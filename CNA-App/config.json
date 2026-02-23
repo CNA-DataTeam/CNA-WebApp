@@ -1,0 +1,50 @@
+{
+  "ssas": {
+    "connection": "powerbi://api.powerbi.com/v1.0/myorg/clark%20national%20accounts",
+    "database": "Item Inventory Model",
+    "query": "// DAX Query\nDEFINE\n\tVAR __DS0Core = \n\t\tSUMMARIZE(\n\t\t\tALLNOBLANKROW('Item Info'),\n\t\t\t'Item Info'[ItemNumber],\n\t\t\t'Item Info'[HeightInInches],\n\t\t\t'Item Info'[LengthInInches],\n\t\t\t'Item Info'[WidthInInches],\n\t\t\t'Item Info'[WeightInPounds],\n\t\t\t'Item Info'[IsRepackRequired],\n\t\t\t'Item Info'[IsRepositionable],\n\t\t\t'Item Info'[IsVerified],\n\t\t\t'Item Info'[Can Nest?],\n\t\t\t'Item Info'[AverageVolume],\n\t\t\t'Item Info'[BreakQuantity]\n\t\t)\n\nEVALUATE\n\t__DS0Core",
+    "timeout_seconds": 60,
+    "enable_mock": false
+  },
+  "api": {
+    "endpoint": "https://shippingcalculator-api.dev.clarkinc.biz/api/warehousepackager/estimatePackingRequirements",
+    "timeout_seconds": 30,
+    "retry_attempts": 4,
+    "retry_backoff_seconds": 1.0,
+    "enable_mock": true
+  },
+  "logging": {
+    "directory": "logs",
+    "max_bytes": 1048576,
+    "backup_count": 5
+  },
+  "ui": {
+    "default_warehouse": "920",
+    "default_marginal_length": 0.0,
+    "default_marginal_width": 0.0,
+    "default_marginal_height": 0.0,
+    "default_marginal_weight": 0.0
+  },
+  "rules": [
+    {
+      "min_volume": 0,
+      "max_volume": 1500,
+      "package_count": 1
+    },
+    {
+      "min_volume": 1500,
+      "max_volume": 3000,
+      "package_count": 2
+    },
+    {
+      "min_volume": 3000,
+      "max_volume": 6000,
+      "package_count": 3
+    },
+    {
+      "min_volume": 6000,
+      "max_volume": null,
+      "package_count": 4
+    }
+  ]
+}
