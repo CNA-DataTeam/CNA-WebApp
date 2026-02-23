@@ -740,6 +740,11 @@ def get_page_logger(page_name: str, source_file: str | None = None) -> logging.L
     return app_logging.get_logger(source_file, page_name)
 
 
+def get_program_logger(source_file: str, context_name: str | None = None) -> logging.LoggerAdapter:
+    """Return logger adapter for non-page modules/program entrypoints."""
+    return app_logging.get_logger(source_file, context_name)
+
+
 def log_page_open_once(page_key: str, logger: logging.LoggerAdapter) -> None:
     """Log one page-open event per Streamlit session."""
     state_key = f"_log_opened_{page_key}"

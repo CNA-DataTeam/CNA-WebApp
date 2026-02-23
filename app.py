@@ -1,8 +1,7 @@
 import streamlit as st
-import config
 import utils
 
-LOGGER = utils.get_program_logger("app", "App")
+LOGGER = utils.get_program_logger(__file__, "App")
 LOGGER.info("App bootstrap started.")
 
 # Define pages and their grouping for navigation
