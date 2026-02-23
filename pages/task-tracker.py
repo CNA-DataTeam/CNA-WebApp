@@ -63,8 +63,14 @@ import config
 import utils
 from streamlit_autorefresh import st_autorefresh
 
+LOGGER = utils.get_page_logger("Task Tracker Page")
+
 # Page configuration
 st.set_page_config(page_title="Task Tracker", layout="wide")
+utils.log_page_open_once("task_tracker_page", LOGGER)
+if "_task_tracker_render_logged" not in st.session_state:
+    st.session_state._task_tracker_render_logged = True
+    LOGGER.info("Rendering task tracker page.")
 
 # Apply global styling
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
@@ -158,6 +164,11 @@ def reset_all():
 
 def start_task():
     """Start a new task timing."""
+    LOGGER.info(
+        "Started task timer | task='%s' cadence='%s'",
+        st.session_state.get(f"task_{st.session_state.reset_counter}", ""),
+        st.session_state.selected_cadence,
+    )
     st.session_state.state = "running"
     st.session_state.start_utc = utils.now_utc()
     st.session_state.end_utc = None
@@ -171,6 +182,7 @@ def pause_task():
     """Pause the current task."""
     if st.session_state.state != "running":
         return
+    LOGGER.info("Paused task timer.")
     st.session_state.state = "paused"
     if not st.session_state.pause_start_utc:
         st.session_state.pause_start_utc = utils.now_utc()
@@ -187,6 +199,7 @@ def resume_task():
     """Resume a paused task."""
     if st.session_state.state != "paused":
         return
+    LOGGER.info("Resumed task timer.")
     if st.session_state.pause_start_utc:
         pause_delta = int((utils.now_utc() - st.session_state.pause_start_utc).total_seconds())
         if pause_delta > 0:
@@ -204,6 +217,7 @@ def resume_task():
 
 def end_task():
     """End the current task."""
+    LOGGER.info("Ended task timer.")
     st.session_state.ended_from_paused = st.session_state.state == "paused"
     st.session_state.state = "ended"
     st.session_state.end_utc = utils.now_utc()
@@ -248,6 +262,7 @@ def archive_task(user_login: str, full_name: str, user_key: str, task_name: str,
     if "current_user_key" in st.session_state:
         utils.delete_live_activity(LIVE_ACTIVITY_DIR, st.session_state.current_user_key)
     reset_all()
+    LOGGER.info("Archived paused task | task='%s' user='%s'", task_name, user_login)
     st.session_state.archived = True
 
 def select_cadence(cadence: str):
@@ -297,6 +312,7 @@ def confirm_submit(user_login, full_name, user_key, task_name, selected_account)
     parsed_duration = utils.parse_hhmmss(edited_duration)
     if parsed_duration < 0:
         parsed_duration = effective_duration_seconds
+        LOGGER.warning("Invalid edited duration format '%s'. Reverting to original duration.", edited_duration)
         st.warning("Invalid format - using original duration")
     st.divider()
     left, right = st.columns(2)
@@ -320,6 +336,13 @@ def confirm_submit(user_login, full_name, user_key, task_name, selected_account)
             eastern_start = utils.to_eastern(st.session_state.start_utc)
             fname = f"task_{eastern_start:%Y%m%d_%H%M%S}_{record['TaskID'][:8]}.parquet"
             utils.atomic_write_parquet(df_record, out_dir / fname)
+            LOGGER.info(
+                "Uploaded completed task | task='%s' cadence='%s' duration_seconds=%s partially_complete=%s",
+                task_name,
+                st.session_state.selected_cadence,
+                parsed_duration,
+                st.session_state.get("submit_partially_complete", False),
+            )
             st.session_state.confirm_open = False
             st.session_state.confirm_rendered = False
             reset_all()
@@ -336,6 +359,7 @@ def review_archived_tasks_dialog(user_login, full_name, user_key):
     """Review archived tasks with options to resume or delete."""
     archived_df = utils.load_archived_tasks(ARCHIVED_TASKS_DIR, user_key)
     if archived_df.empty:
+        LOGGER.info("Archived tasks dialog opened but no archived tasks were found.")
         st.info("No archived tasks found.")
         return
 
@@ -372,6 +396,7 @@ def review_archived_tasks_dialog(user_login, full_name, user_key):
                 st.session_state.review_archive_open = False
                 st.session_state.review_archive_rendered = False
                 utils.load_archived_tasks.clear()
+                LOGGER.info("Resumed archived task | task='%s' user='%s'", task_name, user_login)
                 st.rerun()
         with delete_col:
             if st.button("Delete", key=f"delete_archive_{idx}", width="stretch"):
@@ -382,6 +407,7 @@ def review_archived_tasks_dialog(user_login, full_name, user_key):
                 utils.load_archived_tasks.clear()
                 st.session_state.review_archive_open = True
                 st.session_state.review_archive_rendered = False
+                LOGGER.info("Deleted archived task | task='%s' user='%s'", task_name, user_login)
                 st.rerun()
         st.divider()
 
@@ -434,9 +460,11 @@ st.markdown(
 )
 st.divider()
 if st.session_state.get("uploaded"):
+    LOGGER.info("Showing upload success toast.")
     st.toast("Upload Successful", icon="✅")
     st.session_state.uploaded = False
 if st.session_state.get("archived"):
+    LOGGER.info("Showing archived-task toast.")
     st.toast("Task archived")
     st.session_state.archived = False
 
@@ -550,6 +578,7 @@ with right_col:
             key="review_archived_link",
             type="tertiary",
         ):
+            LOGGER.info("User opened archived tasks review with %s archived item(s).", archived_count)
             st.session_state.review_archive_open = True
             st.session_state.review_archive_rendered = False
             st.rerun()
@@ -606,6 +635,10 @@ with text_col:
     st.markdown("Show all users?", text_alignment="right")
 with toggle_col:
     show_all_users = st.toggle("Show all users?", value=True, key="show_all_users", label_visibility="collapsed")
+_last_show_all = st.session_state.get("_last_show_all_users")
+if _last_show_all is None or _last_show_all != show_all_users:
+    LOGGER.info("Today's Activity filter changed | show_all_users=%s", show_all_users)
+    st.session_state._last_show_all_users = show_all_users
 
 # Load and display today's completed tasks
 if show_all_users:
@@ -640,6 +673,7 @@ if not recent_df.empty:
         },
     )
 else:
+    LOGGER.info("No tasks completed today to display.")
     st.info("No tasks completed today.")
 
 # Footer with app version

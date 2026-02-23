@@ -27,7 +27,6 @@ Outputs:
     - Logs written to config.LOG_FILE
 """
 
-import logging
 import pandas as pd
 from datetime import date, datetime
 from pathlib import Path
@@ -36,17 +35,10 @@ import os
 import platform
 import subprocess
 import sys
+import app_logging
 import config
 
-def setup_logging() -> None:
-    """Configure logging to file."""
-    config.LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        filename=str(config.LOG_FILE),
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+LOGGER = app_logging.get_logger(__file__, "Startup Process")
 
 def get_os_user() -> str:
     """Get current OS username."""
@@ -79,7 +71,7 @@ def log_run_context() -> None:
     parent_pid = os.getppid()
     parent_cmd = get_parent_command(parent_pid)
     caller_hint = os.environ.get("STARTUP_CALLER", "")
-    logging.info(
+    LOGGER.info(
         "Run context | started=%s | user=%s | host=%s | script=%s | cwd=%s | argv=%s | parent_pid=%s | parent_cmd=%s | startup_caller=%s",
         datetime.now().astimezone().isoformat(),
         get_os_user(),
@@ -136,9 +128,9 @@ def delete_old_parquet_files(output_dir: Path, prefix: str) -> None:
     for file in output_dir.glob(f"{prefix}_*.parquet"):
         try:
             file.unlink()
-            logging.info(f"Deleted old file: {file.name}")
+            LOGGER.info("Deleted old file: %s", file.name)
         except Exception as e:
-            logging.error(f"Error deleting {file.name}: {e}")
+            LOGGER.error("Error deleting %s: %s", file.name, e)
 
 def load_accounts_excel(path: Path) -> pd.DataFrame:
     """Load accounts data from Excel and return relevant columns."""
@@ -186,47 +178,47 @@ def save_parquet(df: pd.DataFrame, output_dir: Path, filename: str) -> Path:
 
 def main() -> None:
     """Main startup routine."""
-    setup_logging()
+    LOGGER.info("Session started.")
     log_run_context()
-    logging.info(f"Running startup check: {date.today().isoformat()}")
+    LOGGER.info("Running startup check: %s", date.today().isoformat())
     try:
         output_dir, tasks_xlsx, accounts_xlsx = get_paths()
     except Exception as e:
-        logging.error(f"Initialization failed: {e}")
+        LOGGER.error("Initialization failed: %s", e)
         return
-    logging.info(f"Output directory: {output_dir}")
-    logging.info(f"Tasks Excel: {tasks_xlsx}")
-    logging.info(f"Accounts Excel: {accounts_xlsx}")
+    LOGGER.info("Output directory: %s", output_dir)
+    LOGGER.info("Tasks Excel: %s", tasks_xlsx)
+    LOGGER.info("Accounts Excel: %s", accounts_xlsx)
     # Handle accounts data
     if todays_file_exists(output_dir, "accounts"):
-        logging.info(f"Today's accounts file already exists: {get_todays_filename('accounts')}")
+        LOGGER.info("Today's accounts file already exists: %s", get_todays_filename("accounts"))
     else:
-        logging.info("Preparing accounts data...")
+        LOGGER.info("Preparing accounts data...")
         delete_old_parquet_files(output_dir, "accounts")
         try:
             accounts_df = load_accounts_excel(accounts_xlsx)
         except Exception as e:
-            logging.error(f"Failed to load accounts Excel: {e}")
+            LOGGER.error("Failed to load accounts Excel: %s", e)
             return
         output_path = save_parquet(accounts_df, output_dir, get_todays_filename("accounts"))
-        logging.info(f"Saved accounts data: {output_path}")
+        LOGGER.info("Saved accounts data: %s", output_path)
     # Handle tasks data (overwrite daily)
     try:
         tasks_df = load_tasks_excel(tasks_xlsx)
         if not tasks_df.empty:
             save_parquet(tasks_df, output_dir, "tasks.parquet")
-            logging.info("Saved tasks data: tasks.parquet")
+            LOGGER.info("Saved tasks data: tasks.parquet")
     except Exception as e:
-        logging.error(f"Failed to load tasks Excel: {e}")
+        LOGGER.error("Failed to load tasks Excel: %s", e)
     # Handle users data (login to full name mapping)
     try:
         users_df = load_users_excel(tasks_xlsx)
         if not users_df.empty:
             save_parquet(users_df, output_dir, "users.parquet")
-            logging.info("Saved users data: users.parquet")
+            LOGGER.info("Saved users data: users.parquet")
     except Exception as e:
-        logging.error(f"Failed to load users Excel: {e}")
-    logging.info("Startup check complete.")
+        LOGGER.error("Failed to load users Excel: %s", e)
+    LOGGER.info("Startup check complete.")
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import getpass
 from pathlib import Path
+import re
 from typing import Any
 
 # Organization and environment settings
@@ -48,18 +50,37 @@ ARCHIVED_TASKS_DIR = Path(
 )
 PERSONNEL_DIR = Path(r"\\therestaurantstore.com\920\Data\Logistics\Logistics App\Personnel")
 LOGO_PATH = Path(r"\\therestaurantstore.com\920\Data\Reporting\Power BI Branding\CNA-Logo_Greenx4.png")
-
-# Logging configuration
-LOG_BASE_DIR = Path(r"\\therestaurantstore.com\920\Data\Logistics\Logistics App\Logs")
-LOG_DIR = LOG_BASE_DIR  # Backward-compatible alias
-LOG_USER_FILE_NAME = "CNA-App.log"  # LOG_BASE_DIR/<user>/<file>
-LOG_FILE = LOG_BASE_DIR / LOG_USER_FILE_NAME  # Backward-compatible alias
+LOGS_ROOT_DIR = Path(r"\\therestaurantstore.com\920\Data\Logistics\Logistics App\Logs")
+LOG_USER_FILE_NAME = "Logs.log"
 
 # Application version
 APP_VERSION = "2.0"
 
 # Permission settings for analytics page (None or empty list means no restriction)
 ALLOWED_ANALYTICS_USERS: list[str] | None = None
+
+
+def sanitize_log_user(value: str) -> str:
+    """Sanitize username for safe folder names on local/UNC filesystems."""
+    cleaned = re.sub(r"[^\w\-.]+", "_", str(value).strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or "unknown_user"
+
+
+def get_log_user() -> str:
+    """Return the current user key used for the per-user log folder."""
+    return sanitize_log_user(getpass.getuser())
+
+
+def get_log_dir_for_user(user: str | None = None) -> Path:
+    """Return per-user logs directory under the shared logs root."""
+    user_key = sanitize_log_user(user or get_log_user())
+    return LOGS_ROOT_DIR / user_key
+
+
+def get_log_file_for_user(user: str | None = None) -> Path:
+    """Return the full shared log file path for a user."""
+    return get_log_dir_for_user(user) / LOG_USER_FILE_NAME
 
 
 def _merge_packaging_config(defaults: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
@@ -102,7 +123,7 @@ _PACKAGING_DEFAULTS: dict[str, Any] = {
         "enable_mock": True,
     },
     "logging": {
-        "directory": str(LOG_BASE_DIR),
+        "directory": str(get_log_dir_for_user()),
         "max_bytes": 1_048_576,
         "backup_count": 5,
     },
@@ -132,7 +153,7 @@ _PACKAGING_RAW: dict[str, Any] = {
         "enable_mock": True,
     },
     "logging": {
-        "directory": str(LOG_BASE_DIR),
+        "directory": str(get_log_dir_for_user()),
         "max_bytes": 1_048_576,
         "backup_count": 5,
     },

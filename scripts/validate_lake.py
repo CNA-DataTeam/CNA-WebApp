@@ -1,5 +1,11 @@
 from pathlib import Path
 import pyarrow.parquet as pq
+import sys
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+import app_logging
 
 ROOT = Path("logistics_task_log")
 
@@ -16,17 +22,19 @@ EXPECTED = [
 ]
 
 bad = 0
+LOGGER = app_logging.get_logger(__file__, "Validation Script")
+LOGGER.info("Session started.")
 for f in ROOT.rglob("*.parquet"):
     try:
         schema = pq.read_schema(f)
         cols = [n for n in schema.names]
         if cols != EXPECTED:
             bad += 1
-            print(f"[SCHEMA MISMATCH] {f}")
-            print("  found:   ", cols)
-            print("  expected:", EXPECTED)
+            LOGGER.warning("[SCHEMA MISMATCH] %s", f)
+            LOGGER.warning("found=%s", cols)
+            LOGGER.warning("expected=%s", EXPECTED)
     except Exception as e:
         bad += 1
-        print(f"[READ FAIL] {f} -> {e}")
+        LOGGER.error("[READ FAIL] %s -> %s", f, e)
 
-print(f"\nDone. Bad files: {bad}")
+LOGGER.info("Done. Bad files: %s", bad)

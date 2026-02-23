@@ -48,6 +48,8 @@ Outputs:
 from __future__ import annotations
 import base64
 import getpass
+import inspect
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -60,6 +62,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import streamlit as st
+import app_logging
 import config
 
 # Timezone for Eastern Time
@@ -559,6 +562,7 @@ def load_live_activities(
             df = df[df["UserKey"] != _exclude_user_key]
         return df
     except Exception as e:
+        get_page_logger("Shared Utilities").exception("Failed to load live activities: %s", e)
         st.error(f"Failed to load live activities: {e}")
         return pd.DataFrame()
 
@@ -581,6 +585,7 @@ def load_recent_tasks(completed_dir: Path, user_key: str | None = None, limit: i
         table = dataset.to_table(columns=needed_cols)
         df = table.to_pandas()
     except Exception as e:
+        get_page_logger("Shared Utilities").exception("Failed to load recent tasks: %s", e)
         st.error(f"Failed to load recent tasks: {e}")
         return pd.DataFrame()
     return df.sort_values("StartTimestampUTC", ascending=False).head(limit)
@@ -600,6 +605,7 @@ def load_all_completed_tasks(base_dir: Path) -> pd.DataFrame:
         df["Date"] = df["StartTimestampUTC"].dt.date
         return df
     except Exception as e:
+        get_page_logger("Shared Utilities").exception("Failed to load completed tasks: %s", e)
         st.error(f"Failed to load completed tasks: {e}")
         return pd.DataFrame()
 
@@ -611,9 +617,11 @@ def load_user_fullname_map(tasks_xlsx_path: str | None = None) -> dict[str, str]
     users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
     try:
         if not users_parquet.exists():
+            get_page_logger("Shared Utilities").warning("users.parquet not found in Personnel directory.")
             return {}
         df = pd.read_parquet(users_parquet)
-    except Exception:
+    except Exception as exc:
+        get_page_logger("Shared Utilities").exception("Failed to read users.parquet: %s", exc)
         return {}
     if df.empty:
         return {}
@@ -642,9 +650,11 @@ def load_all_user_full_names(tasks_xlsx_path: str | None = None) -> list[str]:
     try:
         users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
         if not users_parquet.exists():
+            get_page_logger("Shared Utilities").warning("users.parquet not found when loading full-name list.")
             return []
         df = pd.read_parquet(users_parquet)
-    except Exception:
+    except Exception as exc:
+        get_page_logger("Shared Utilities").exception("Failed to load all user full names: %s", exc)
         return []
     if df.empty:
         return []
@@ -664,10 +674,14 @@ def load_tasks(tasks_xlsx_path: str | None = None) -> pd.DataFrame:
     try:
         tasks_parquet = Path(config.PERSONNEL_DIR) / "tasks.parquet"
         if not tasks_parquet.exists():
+            get_page_logger("Shared Utilities").warning(
+                "tasks.parquet not found in Personnel directory."
+            )
             st.error("tasks.parquet not found in Personnel directory. Run startup.py first.")
             return pd.DataFrame()
         df = pd.read_parquet(tasks_parquet)
     except Exception as e:
+        get_page_logger("Shared Utilities").exception("Failed to read tasks.parquet: %s", e)
         st.error(f"Failed to read tasks.parquet: {e}")
         return pd.DataFrame()
     if df.empty:
@@ -686,10 +700,15 @@ def load_accounts(accounts_dir: str) -> list[str]:
     """Load list of Company Group accounts from cached accounts parquet file."""
     parquet_files = list(Path(accounts_dir).glob("accounts_*.parquet"))
     if not parquet_files:
+        get_page_logger("Shared Utilities").info("No accounts parquet files found under '%s'.", accounts_dir)
         return []
-    parquet_files.sort(reverse=True)
-    df = pd.read_parquet(parquet_files[0], columns=["Company Group USE"])
-    return df["Company Group USE"].dropna().astype(str).str.strip().unique().tolist()
+    try:
+        parquet_files.sort(reverse=True)
+        df = pd.read_parquet(parquet_files[0], columns=["Company Group USE"])
+        return df["Company Group USE"].dropna().astype(str).str.strip().unique().tolist()
+    except Exception as exc:
+        get_page_logger("Shared Utilities").exception("Failed to load accounts parquet: %s", exc)
+        return []
 
 class UserContext:
     """Contextual information about the current user (for permission handling)."""
@@ -711,3 +730,20 @@ class UserContext:
 def get_user_context() -> UserContext:
     """Get a cached UserContext for the current user."""
     return UserContext()
+
+
+def get_page_logger(page_name: str, source_file: str | None = None) -> logging.LoggerAdapter:
+    """Return logger adapter for a specific page/source name."""
+    if source_file is None:
+        caller_frame = inspect.stack()[1]
+        source_file = caller_frame.filename
+    return app_logging.get_logger(source_file, page_name)
+
+
+def log_page_open_once(page_key: str, logger: logging.LoggerAdapter) -> None:
+    """Log one page-open event per Streamlit session."""
+    state_key = f"_log_opened_{page_key}"
+    if state_key in st.session_state:
+        return
+    st.session_state[state_key] = True
+    logger.info("Page opened.")

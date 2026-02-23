@@ -4,3 +4,4 @@ pandas
 pyarrow
 openpyxl
 streamlit-autorefresh
+pyadomd

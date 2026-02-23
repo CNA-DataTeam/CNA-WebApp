@@ -11,16 +11,21 @@ if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
 set "VENV_DIR=%ROOT_DIR%\.venv"
 set "STREAMLIT_PORT=8501"
 
-set "LOG_DIR=%ROOT_DIR%\logs"
-if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
-set "LOG_FILE=%LOG_DIR%\launcher.log"
+set "LOG_BASE=\\therestaurantstore.com\920\Data\Logistics\Logistics App\Logs"
+set "LOG_DIR=%LOG_BASE%\%USERNAME%"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
+if not exist "%LOG_DIR%" (
+  set "LOG_DIR=%ROOT_DIR%\logs\%USERNAME%"
+  if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+)
+set "LOG_FILE=%LOG_DIR%\CNA-WebApp.log"
 
 REM ============================================================
 REM LOG HEADER
 REM ============================================================
 (
   echo ============================================================
-  echo [%date% %time%] Launcher start
+  echo [%date% %time%] [Launcher] Session start
   echo ROOT_DIR=%ROOT_DIR%
   echo VENV_DIR=%VENV_DIR%
   echo PORT=%STREAMLIT_PORT%
@@ -31,16 +36,18 @@ REM ============================================================
 REM VALIDATION
 REM ============================================================
 if not exist "%ROOT_DIR%\app.py" (
-  echo [%date% %time%] ERROR: app.py not found>> "%LOG_FILE%"
+  echo [%date% %time%] [Launcher] ERROR: app.py not found>> "%LOG_FILE%"
   echo ERROR: app.py not found in root directory.
   pause
+  echo.>> "%LOG_FILE%"
   exit /b 1
 )
 
 if not exist "%VENV_DIR%\Scripts\python.exe" (
-  echo [%date% %time%] ERROR: venv missing>> "%LOG_FILE%"
+  echo [%date% %time%] [Launcher] ERROR: venv missing>> "%LOG_FILE%"
   echo ERROR: Virtual environment not found. Run setup.bat first.
   pause
+  echo.>> "%LOG_FILE%"
   exit /b 1
 )
 
@@ -103,6 +110,7 @@ netstat -ano | findstr /R /C:":%STREAMLIT_PORT% .*LISTENING" >nul
 if %ERRORLEVEL%==0 (
   call :LOG "App already running. Opening browser."
   start "" "http://localhost:%STREAMLIT_PORT%"
+  echo.>> "%LOG_FILE%"
   exit /b 0
 )
 
@@ -111,6 +119,7 @@ if errorlevel 1 (
   call :LOG "ERROR: Streamlit not installed."
   echo ERROR: Streamlit missing. Run setup.bat.
   pause
+  echo.>> "%LOG_FILE%"
   exit /b 1
 )
 
@@ -118,6 +127,7 @@ if not exist "%ROOT_DIR%\startup.py" (
   call :LOG "ERROR: startup.py not found."
   echo ERROR: startup.py not found in root directory.
   pause
+  echo.>> "%LOG_FILE%"
   exit /b 1
 )
 
@@ -128,6 +138,7 @@ if errorlevel 1 (
   call :LOG "ERROR: startup.py failed."
   echo ERROR: startup.py failed. Check logs for details.
   pause
+  echo.>> "%LOG_FILE%"
   exit /b 1
 )
 call :LOG "startup.py completed."
@@ -141,12 +152,13 @@ start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "app.py" ^
 
 timeout /t 2 >nul
 start "" "http://localhost:%STREAMLIT_PORT%"
+echo.>> "%LOG_FILE%"
 exit /b 0
 
 REM ============================================================
 REM LOG FUNCTION
 REM ============================================================
 :LOG
-echo [%date% %time%] %~1>> "%LOG_FILE%"
+echo [%date% %time%] [Launcher] %~1>> "%LOG_FILE%"
 echo %~1
 exit /b 0

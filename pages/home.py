@@ -13,6 +13,8 @@ import base64
 import config
 import utils
 
+LOGGER = utils.get_page_logger("Home Page")
+
 # ============================================================
 # PAGE CONFIG
 # ============================================================
@@ -20,6 +22,10 @@ st.set_page_config(
     page_title="Logistics Support App",
     layout="wide",
 )
+utils.log_page_open_once("home_page", LOGGER)
+if "_home_render_logged" not in st.session_state:
+    st.session_state._home_render_logged = True
+    LOGGER.info("Rendering home page cards for Tasks, FedEx, and Packaging.")
 
 # ============================================================
 # GLOBAL STYLING (MATCH TASK TRACKER — SAFE FOR SIDEBAR)

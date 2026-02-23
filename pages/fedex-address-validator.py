@@ -38,6 +38,8 @@ from openpyxl import load_workbook
 import config
 import utils
 
+LOGGER = utils.get_page_logger("FedEx Address Validator Page")
+
 # ============================================================
 # PAGE CONFIG (MUST BE FIRST STREAMLIT CALL)
 # ============================================================
@@ -45,6 +47,10 @@ st.set_page_config(
     page_title="FedEx Address Validator",
     layout="wide",
 )
+utils.log_page_open_once("fedex_address_validator_page", LOGGER)
+if "_fedex_render_logged" not in st.session_state:
+    st.session_state._fedex_render_logged = True
+    LOGGER.info("Rendering FedEx address validator page.")
 
 # ============================================================
 # GLOBAL STYLING / HEADER
@@ -121,12 +127,17 @@ def mark_rows_as_disputed(file_path: Path, row_indices: List[int]) -> None:
 RESULTS_CSV_FILE: Path = config.ADDRESS_VALIDATION_RESULTS_FILE.with_suffix(".csv")
 
 if not RESULTS_CSV_FILE.exists():
+    LOGGER.error("Results file not found: %s", RESULTS_CSV_FILE)
     st.error(f"Results file not found:\n{RESULTS_CSV_FILE}")
     st.stop()
 
 df = load_results(RESULTS_CSV_FILE)
+if "_fedex_rows_logged" not in st.session_state:
+    st.session_state._fedex_rows_logged = True
+    LOGGER.info("Loaded FedEx validation results | rows=%s file='%s'", len(df), RESULTS_CSV_FILE)
 
 if df.empty:
+    LOGGER.info("Results file is present but contains no rows.")
     st.info("No results available.")
     st.stop()
 
@@ -517,6 +528,9 @@ selected_mask = edited_df["Select"]
 selected_indices = edited_df.index[selected_mask]
 has_selection = len(selected_indices) > 0
 selected_rows_for_email = df.loc[selected_indices]
+if st.session_state.get("_fedex_last_selection_count") != len(selected_indices):
+    st.session_state._fedex_last_selection_count = len(selected_indices)
+    LOGGER.info("Selection changed | selected_rows=%s", len(selected_indices))
 # ============================================================
 # ACTION BUTTONS (in right columns)
 # ============================================================
@@ -542,10 +556,12 @@ with disputed_button_placeholder:
     )
 
 if generate_dispute_clicked:
+    LOGGER.info("Decision: Generate Dispute File clicked.")
     try:
         with st.spinner("Creating dispute Excel file..."):
             file_name, file_bytes = create_excel_download(selected_rows_for_email)
         trigger_file_download(file_name, file_bytes)
+        LOGGER.info("Generated dispute file '%s' for %s selected row(s).", file_name, len(selected_indices))
         st.success("Dispute file generated and download started.")
         st.download_button(
             "If download did not start, click to download",
@@ -555,11 +571,14 @@ if generate_dispute_clicked:
             key=f"fallback_download_{file_name}",
         )
     except Exception as exc:
+        LOGGER.exception("Generate dispute file failed: %s", exc)
         st.error(f"Generate dispute file failed: {type(exc).__name__}: {exc}")
 
 if send_email_clicked:
+    LOGGER.info("Decision: Send Email to FedEx clicked.")
     try:
         if not FEDEX_EMAIL_TO.strip():
+            LOGGER.error("FedEx recipient email is blank.")
             st.error("FedEx recipient email is blank. Set FEDEX_EMAIL_TO first.")
         else:
             email_body = (
@@ -569,20 +588,26 @@ if send_email_clicked:
             )
             email_opened, email_status = open_email(FEDEX_EMAIL_TO, EMAIL_SUBJECT, email_body)
             if email_opened:
+                LOGGER.info("Opened Outlook draft for %s selected row(s).", len(selected_indices))
                 st.success("Outlook draft opened.")
             else:
+                LOGGER.warning("Failed to open editable Outlook draft. status=%s", email_status)
                 st.error("Failed to open editable Outlook draft.")
                 st.caption(email_status)
     except Exception as exc:
+        LOGGER.exception("Send email failed: %s", exc)
         st.error(f"Send email failed: {type(exc).__name__}: {exc}")
 
 if mark_disputed_clicked:
+    LOGGER.info("Decision: Mark as Disputed clicked.")
     try:
         mark_rows_as_disputed(RESULTS_CSV_FILE, selected_indices.tolist())
         load_results.clear()
+        LOGGER.info("Marked %s selected row(s) as disputed.", len(selected_indices))
         st.success("Selected rows marked as disputed.")
         st.rerun()
     except Exception as exc:
+        LOGGER.exception("Failed to mark rows as disputed: %s", exc)
         st.error(f"Failed to mark rows as disputed: {exc}")
 
 # ============================================================

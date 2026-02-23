@@ -16,11 +16,9 @@ from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import hashlib
 import json
-import logging
 import math
 import os
 from typing import Any
@@ -127,35 +125,12 @@ def load_packaging_config() -> dict[str, Any]:
     return data
 
 
-@st.cache_resource
-def get_page_logger() -> logging.Logger:
-    """Create a page logger using config.json logging settings."""
-    page_config = load_packaging_config()
-    logging_cfg = page_config.get("logging", {})
-    log_dir = Path(str(logging_cfg.get("directory", "logs")))
-    if not log_dir.is_absolute():
-        log_dir = Path.cwd() / log_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    logger = logging.getLogger("packaging_estimator_page")
-    logger.setLevel(logging.INFO)
-    if not logger.handlers:
-        handler = RotatingFileHandler(
-            filename=log_dir / "packaging_estimator.log",
-            maxBytes=int(logging_cfg.get("max_bytes", 1_048_576)),
-            backupCount=int(logging_cfg.get("backup_count", 5)),
-            encoding="utf-8",
-        )
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-        )
-        logger.addHandler(handler)
-        logger.propagate = False
-    return logger
-
-
-LOGGER = get_page_logger()
+LOGGER = utils.get_page_logger("Packaging Estimator Page")
 PAGE_CONFIG = load_packaging_config()
+utils.log_page_open_once("packaging_estimator_page", LOGGER)
+if "_packaging_render_logged" not in st.session_state:
+    st.session_state._packaging_render_logged = True
+    LOGGER.info("Rendering packaging estimator page.")
 
 
 # ============================================================
@@ -799,6 +774,9 @@ with input_col:
         [INPUT_MODE_UPLOAD, INPUT_MODE_PASTE],
         horizontal=True,
     )
+    if st.session_state.get("_pe_last_input_mode") != input_mode:
+        st.session_state._pe_last_input_mode = input_mode
+        LOGGER.info("Input mode changed to '%s'.", input_mode)
 
     if input_mode == INPUT_MODE_UPLOAD:
         uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
@@ -809,11 +787,14 @@ with input_col:
                 uploaded_df.columns = [str(col).strip() for col in uploaded_df.columns]
             except Exception as exc:
                 uploaded_df = pd.DataFrame()
+                LOGGER.exception("Could not read uploaded Excel file: %s", exc)
                 input_parse_errors.append(f"Could not read Excel file: {exc}")
 
             if uploaded_df.empty:
+                LOGGER.info("Uploaded file parsed but contained no rows.")
                 st.info("Uploaded file has no rows.")
             elif len(uploaded_df.columns) < 2:
+                LOGGER.error("Uploaded file has insufficient columns: %s", len(uploaded_df.columns))
                 st.error("Excel input must contain at least two columns: Item Number and Quantity.")
             else:
                 upload_columns = uploaded_df.columns.tolist()
@@ -866,6 +847,7 @@ with preview_col:
         standard_input_df["_RowNumber"] = standard_input_df.index + 2
 
     if standard_input_df.empty:
+        LOGGER.info("Preview unavailable because no input rows are currently loaded.")
         st.info("Preview will appear here after input is provided.")
     else:
         st.caption("Preview shows the first 5 items only.")
@@ -923,6 +905,7 @@ with input_col:
 # UI: OUTPUT
 # ============================================================
 if st.session_state.pe_errors:
+    LOGGER.warning("Displaying %s packaging validation/parsing error(s).", len(st.session_state.pe_errors))
     st.error(
         f"{len(st.session_state.pe_errors)} row(s) were rejected or could not be parsed. "
         "Review details below."
@@ -938,6 +921,21 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
     unverified_df = results.get("unverified_df", pd.DataFrame(columns=SUMMARY_COLUMNS))
     packaging_df = results.get("packaging_df", pd.DataFrame(columns=PACKAGING_COLUMNS))
     debug_data = results.get("debug", {})
+    current_signature = (
+        len(summary_df),
+        len(verified_df),
+        len(unverified_df),
+        len(packaging_df),
+    )
+    if st.session_state.get("_pe_last_results_signature") != current_signature:
+        st.session_state._pe_last_results_signature = current_signature
+        LOGGER.info(
+            "Rendering pipeline results | total=%s verified=%s unverified=%s packages=%s",
+            current_signature[0],
+            current_signature[1],
+            current_signature[2],
+            current_signature[3],
+        )
 
     st.divider()
     st.subheader("Input Summary", anchor=False)
@@ -950,6 +948,7 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
     with verified_col:
         st.subheader("Verified Items", anchor=False)
         if verified_df.empty:
+            LOGGER.info("Decision: no verified items after verification split.")
             st.info("No verified items found.")
         else:
             st.dataframe(
@@ -961,6 +960,7 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
     with unverified_col:
         st.subheader("Unverified Items", anchor=False)
         if unverified_df.empty:
+            LOGGER.info("Decision: no unverified items after verification split.")
             st.info("No unverified items found.")
         else:
             st.dataframe(
@@ -972,6 +972,7 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
     st.divider()
     st.subheader("Packaging Results", anchor=False)
     if verified_df.empty:
+        LOGGER.info("Decision: packaging API not called because verified set is empty.")
         st.info("No verified items found. Packaging API was not called.")
     else:
         st.dataframe(packaging_df, width="stretch", hide_index=True)
