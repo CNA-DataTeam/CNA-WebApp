@@ -1,6 +1,0 @@
-pywin32
-streamlit
-pandas
-pyarrow
-openpyxl
-streamlit-autorefresh
