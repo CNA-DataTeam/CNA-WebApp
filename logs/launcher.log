@@ -47,3 +47,31 @@ PORT=8501
   Network URL: http://10.0.0.244:8501
   External URL: http://73.101.142.204:8501
 
+============================================================
+[Mon 02/23/2026 16:43:06.55] Launcher start
+ROOT_DIR=C:\Users\lbulfon\OneDrive - clarkinc.biz\Desktop\Luca Playgound\CNA-WebApp
+VENV_DIR=C:\Users\lbulfon\OneDrive - clarkinc.biz\Desktop\Luca Playgound\CNA-WebApp\.venv
+PORT=8501
+============================================================
+[Mon 02/23/2026 16:43:06.57] Starting Git check...
+[Mon 02/23/2026 16:43:06.64] Testing Git remote...
+757e314798f1c9dae264c8591434180ec6479520	refs/heads/main
+[Mon 02/23/2026 16:43:07.08] Fetching updates...
+[Mon 02/23/2026 16:43:07.76] No updates detected.
+[Mon 02/23/2026 16:43:07.78] Launching Streamlit...
+[Mon 02/23/2026 16:43:08.86] Running startup.py...
+[Mon 02/23/2026 16:43:14.02] startup.py completed.
+[Mon 02/23/2026 16:43:14.04] Starting server...
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8501
+  Network URL: http://10.0.0.244:8501
+  External URL: http://73.101.142.204:8501
+
+2026-02-23 16:44:06.366 304 GET /task-tracker (::1) 1.00ms
+2026-02-23 16:44:06.471 404 GET /task-tracker/_stcore/health (::1) 1.00ms
+2026-02-23 16:44:06.471 404 GET /task-tracker/_stcore/host-config (::1) 0.00ms
+2026-02-23 16:44:06.582 304 GET /_stcore/health (::1) 0.00ms
+2026-02-23 16:44:06.584 304 GET /_stcore/host-config (::1) 1.50ms
+2026-02-23 16:44:06.589 101 GET /_stcore/stream (::1) 1.00ms
