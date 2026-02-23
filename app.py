@@ -2,8 +2,8 @@ import streamlit as st
 import config
 import utils
 
-LOGGER = utils.get_page_logger("Navigation")
-utils.log_page_open_once("navigation", LOGGER)
+LOGGER = utils.get_program_logger("app", "App")
+LOGGER.info("App bootstrap started.")
 
 # Define pages and their grouping for navigation
 pages = {
@@ -21,11 +21,8 @@ pages = {
         st.Page("pages/packaging-estimator.py", title="Estimator"),
     ],
 }
-if "_navigation_structure_logged" not in st.session_state:
-    st.session_state._navigation_structure_logged = True
-    LOGGER.info("Navigation configured with sections: %s", ", ".join(pages.keys()))
 
 # Initialize and run the navigation
 navigation = st.navigation(pages)
-LOGGER.info("Rendering navigation container.")
+LOGGER.info("Navigation initialized.")
 navigation.run()
