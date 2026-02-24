@@ -2,26 +2,20 @@
 pages/packaging-estimator.py
 
 Purpose:
-    Streamlit page for package estimation from uploaded/pasted item rows.
-
-Workflow:
-    1) Load and validate input (ItemNumber + Quantity)
-    2) Fetch verification flags (SSAS placeholder)
-    3) Split verified vs unverified
-    4) Call packaging API for verified rows only (API placeholder)
-    5) Display normalized results
+    Streamlit page that accepts item input and returns all columns from the
+    configured item-info parquet file for matching item numbers.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
-from pathlib import Path
-import hashlib
 import json
-import math
-import os
+import re
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import streamlit as st
@@ -47,82 +41,69 @@ st.markdown(
 )
 st.divider()
 
-
 # ============================================================
 # CONSTANTS
 # ============================================================
 INPUT_MODE_UPLOAD = "Upload Excel"
 INPUT_MODE_PASTE = "Paste from Excel (tab-separated)"
-
-SUMMARY_COLUMNS = ["ItemNumber", "Quantity", "IsVerified"]
-PACKAGING_COLUMNS = [
-    "PackageId",
-    "ItemNumber",
-    "Quantity",
-    "PackageCount",
-    "Length",
-    "Width",
-    "Height",
-    "Weight",
+US_STATE_CODES = [
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+    "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+    "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+    "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+    "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
 ]
 
 
 # ============================================================
 # CONFIG / LOGGING
 # ============================================================
-@st.cache_data
 def load_packaging_config() -> dict[str, Any]:
-    """Load packaging page config from config.json with safe defaults."""
-    defaults: dict[str, Any] = {
-        "ssas": {
-            "connection": "",
-            "database": "",
-            "query": "",
-            "access_token_env": "SSAS_ACCESS_TOKEN",
-            "access_token_ttl_minutes": 55,
-            "use_service_principal": False,
-            "service_principal_tenant_env": "AZURE_TENANT_ID",
-            "service_principal_client_id_env": "AZURE_CLIENT_ID",
-            "service_principal_client_secret_env": "AZURE_CLIENT_SECRET",
-            "service_principal_scope": "https://analysis.windows.net/powerbi/api/.default",
-            "timeout_seconds": 60,
-            "enable_mock": True,
+    """Load packaging config from config.py with safe defaults."""
+    runtime_cfg = config.PACKAGING_CONFIG if isinstance(config.PACKAGING_CONFIG, dict) else {}
+    item_info_cfg = runtime_cfg.get("item_info", {}) if isinstance(runtime_cfg.get("item_info"), dict) else {}
+    api_cfg = runtime_cfg.get("api", {}) if isinstance(runtime_cfg.get("api"), dict) else {}
+    ui_cfg = runtime_cfg.get("ui", {}) if isinstance(runtime_cfg.get("ui"), dict) else {}
+
+    parquet_path = str(
+        item_info_cfg.get(
+            "parquet_path",
+            r"\\therestaurantstore.com\920\Data\Logistics\Logistics App\Item Info\item_info.parquet",
+        )
+    ).strip()
+    item_number_column = str(item_info_cfg.get("item_number_column", "ItemNumber")).strip() or "ItemNumber"
+    api_endpoint = str(
+        api_cfg.get(
+            "endpoint",
+            "https://shippingcalculator-api.dev.clarkinc.biz/api/warehousepackager/estimatePacking",
+        )
+    ).strip()
+    api_timeout_seconds = int(api_cfg.get("timeout_seconds", 30) or 30)
+    default_warehouse = int(ui_cfg.get("default_warehouse", 105) or 105)
+    default_marginal_length = float(ui_cfg.get("default_marginal_length", 0.0) or 0.0)
+    default_marginal_width = float(ui_cfg.get("default_marginal_width", 0.0) or 0.0)
+    default_marginal_height = float(ui_cfg.get("default_marginal_height", 0.0) or 0.0)
+    default_destination_state = str(ui_cfg.get("default_destination_state", "FL")).strip() or "FL"
+    default_perishable_type = str(ui_cfg.get("default_perishable_type", "N")).strip() or "N"
+
+    return {
+        "item_info": {
+            "parquet_path": parquet_path,
+            "item_number_column": item_number_column,
         },
         "api": {
-            "endpoint": "https://shippingcalculator-api.dev.clarkinc.biz/api/warehousepackager/estimatePackingRequirements",
-            "timeout_seconds": 30,
-            "enable_mock": True,
-        },
-        "logging": {
-            "directory": "logs",
-            "max_bytes": 1_048_576,
-            "backup_count": 5,
+            "endpoint": api_endpoint,
+            "timeout_seconds": api_timeout_seconds,
         },
         "ui": {
-            "default_warehouse": 920,
-            "default_marginal_length": 0.0,
-            "default_marginal_width": 0.0,
-            "default_marginal_height": 0.0,
+            "default_warehouse": default_warehouse,
+            "default_marginal_length": default_marginal_length,
+            "default_marginal_width": default_marginal_width,
+            "default_marginal_height": default_marginal_height,
+            "default_destination_state": default_destination_state,
+            "default_perishable_type": default_perishable_type,
         },
     }
-    config_path = Path("config.json")
-    if not config_path.exists():
-        return defaults
-
-    try:
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return defaults
-    except Exception:
-        return defaults
-
-    for section, section_defaults in defaults.items():
-        if section not in data or not isinstance(data[section], dict):
-            data[section] = section_defaults
-            continue
-        for key, value in section_defaults.items():
-            data[section].setdefault(key, value)
-    return data
 
 
 LOGGER = utils.get_page_logger("Packaging Estimator Page")
@@ -228,9 +209,7 @@ def parse_pasted_input(raw_text: str) -> tuple[pd.DataFrame, list[str]]:
 
 
 def validate_and_aggregate_rows(input_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
-    """
-    Validate rows against business rules and aggregate duplicates by ItemNumber.
-    """
+    """Validate rows and aggregate duplicates by ItemNumber."""
     errors: list[str] = []
     valid_rows: list[dict[str, Any]] = []
 
@@ -264,18 +243,42 @@ def validate_and_aggregate_rows(input_df: pd.DataFrame) -> tuple[pd.DataFrame, l
 
 
 # ============================================================
-# SSAS PLACEHOLDER
+# ITEM-INFO PARQUET LOOKUP
 # ============================================================
-def _mock_verification_flags(items: list[str]) -> dict[str, bool]:
-    flags: dict[str, bool] = {}
-    for item in items:
-        checksum = sum(ord(ch) for ch in item)
-        flags[item] = (checksum % 5) != 0
-    return flags
+@st.cache_data(show_spinner=False)
+def load_item_info_parquet(parquet_path: str) -> pd.DataFrame:
+    df = pd.read_parquet(parquet_path)
+    df.columns = [extract_bracketed_column_name(str(col)) for col in df.columns]
+    return df
 
 
-def _coerce_ssas_flag(value: Any) -> bool:
-    if value is None or type(value).__name__ == "DBNull":
+def extract_bracketed_column_name(column_name: str) -> str:
+    matches = re.findall(r"\[([^\]]+)\]", column_name)
+    if matches:
+        return matches[-1].strip()
+    return str(column_name).strip()
+
+
+def resolve_item_column_name(configured_name: str, available_columns: list[str]) -> str:
+    if configured_name in available_columns:
+        return configured_name
+
+    extracted_name = extract_bracketed_column_name(configured_name)
+    if extracted_name in available_columns:
+        return extracted_name
+
+    normalized_target = normalize_col_name(extracted_name)
+    for col in available_columns:
+        if normalize_col_name(col) == normalized_target:
+            return col
+
+    raise ValueError(
+        f"Configured item number column '{configured_name}' was not found in parquet file columns."
+    )
+
+
+def coerce_verified_value(value: Any) -> bool:
+    if value is None:
         return False
     if isinstance(value, bool):
         return value
@@ -285,470 +288,264 @@ def _coerce_ssas_flag(value: Any) -> bool:
     return normalized in {"1", "true", "t", "yes", "y"}
 
 
-def _normalize_field_name(field_name: str) -> str:
-    return "".join(ch for ch in str(field_name).lower() if ch.isalnum())
-
-
-def _extract_ssas_column_name(description_item: Any) -> str:
-    if description_item is None:
-        return ""
-    if isinstance(description_item, (tuple, list)):
-        if not description_item:
-            return ""
-        return str(description_item[0] or "")
-    for attr_name in ("name", "column_name"):
-        attr_value = getattr(description_item, attr_name, None)
-        if attr_value is not None:
-            return str(attr_value)
-    return str(description_item)
-
-
-def _resolve_ssas_field_ordinals(description: Any) -> tuple[int, int]:
-    item_exact = {"itemnumber", "__itemnumber"}
-    verified_exact = {"isverified", "verified", "__isverified"}
-    item_contains = {"itemnumber"}
-    verified_contains = {"isverified", "verified"}
-    item_ordinal = -1
-    verified_ordinal = -1
-    columns = list(description or [])
-
-    for idx, column in enumerate(columns):
-        normalized_name = _normalize_field_name(_extract_ssas_column_name(column))
-        if item_ordinal < 0 and normalized_name in item_exact:
-            item_ordinal = idx
-        if verified_ordinal < 0 and normalized_name in verified_exact:
-            verified_ordinal = idx
-
-    if item_ordinal >= 0 and verified_ordinal >= 0:
-        return item_ordinal, verified_ordinal
-
-    for idx, column in enumerate(columns):
-        normalized_name = _normalize_field_name(_extract_ssas_column_name(column))
-        if item_ordinal < 0 and any(token in normalized_name for token in item_contains):
-            item_ordinal = idx
-        if verified_ordinal < 0 and any(token in normalized_name for token in verified_contains):
-            verified_ordinal = idx
-
-    if item_ordinal < 0 or verified_ordinal < 0:
-        raise ValueError(
-            "Could not detect ItemNumber/IsVerified columns in SSAS query result."
-        )
-    return item_ordinal, verified_ordinal
-
-
-def _acquire_service_principal_token(
-    tenant_id: str,
-    client_id: str,
-    client_secret: str,
-    scope: str,
-) -> str:
+def to_float(value: Any, default: float = 0.0) -> float:
     try:
-        import msal  # type: ignore
-    except Exception as exc:
-        raise RuntimeError(
-            "MSAL is not installed. Install dependency 'msal' for service principal auth."
-        ) from exc
-
-    authority = f"https://login.microsoftonline.com/{tenant_id}"
-    app = msal.ConfidentialClientApplication(
-        client_id=client_id,
-        authority=authority,
-        client_credential=client_secret,
-    )
-    result = app.acquire_token_for_client(scopes=[scope])
-    access_token = str(result.get("access_token", "")).strip()
-    if access_token:
-        return access_token
-
-    error_text = str(result.get("error_description") or result.get("error") or "Unknown token error")
-    raise RuntimeError(error_text)
+        if value is None:
+            return default
+        if isinstance(value, float) and pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
 
 
-def _resolve_ssas_access_token(ssas_cfg: dict[str, Any]) -> tuple[str, str]:
-    access_token_env = str(ssas_cfg.get("access_token_env", "SSAS_ACCESS_TOKEN")).strip() or "SSAS_ACCESS_TOKEN"
-    env_token = str(os.environ.get(access_token_env, "")).strip()
-    if env_token:
-        return env_token, f"env:{access_token_env}"
-
-    if not bool(ssas_cfg.get("use_service_principal", False)):
-        return "", "none"
-
-    tenant_env = str(ssas_cfg.get("service_principal_tenant_env", "AZURE_TENANT_ID")).strip() or "AZURE_TENANT_ID"
-    client_id_env = str(ssas_cfg.get("service_principal_client_id_env", "AZURE_CLIENT_ID")).strip() or "AZURE_CLIENT_ID"
-    client_secret_env = (
-        str(ssas_cfg.get("service_principal_client_secret_env", "AZURE_CLIENT_SECRET")).strip()
-        or "AZURE_CLIENT_SECRET"
-    )
-    scope = (
-        str(ssas_cfg.get("service_principal_scope", "https://analysis.windows.net/powerbi/api/.default")).strip()
-        or "https://analysis.windows.net/powerbi/api/.default"
-    )
-
-    tenant_id = str(os.environ.get(tenant_env, "")).strip()
-    client_id = str(os.environ.get(client_id_env, "")).strip()
-    client_secret = str(os.environ.get(client_secret_env, "")).strip()
-    if not tenant_id or not client_id or not client_secret:
-        LOGGER.warning(
-            "Service principal auth enabled, but env vars are missing. tenant=%s client_id=%s client_secret=%s",
-            bool(tenant_id),
-            bool(client_id),
-            bool(client_secret),
-        )
-        return "", "service_principal_missing_env"
-
+def to_int(value: Any, default: int = 0) -> int:
     try:
-        token = _acquire_service_principal_token(
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_secret=client_secret,
-            scope=scope,
-        )
-        LOGGER.info(
-            "SSAS access token acquired via service principal | tenant_env=%s client_id_env=%s",
-            tenant_env,
-            client_id_env,
-        )
-        return token, "service_principal"
-    except Exception as exc:
-        LOGGER.exception("Service principal token acquisition failed: %s", exc)
-        return "", "service_principal_error"
+        if value is None:
+            return default
+        if isinstance(value, float) and pd.isna(value):
+            return default
+        return int(float(value))
+    except Exception:
+        return default
 
 
-def _iter_pyadomd_rows(cursor: Any) -> Any:
-    fetchone = getattr(cursor, "fetchone", None)
-    if callable(fetchone):
-        while True:
-            row = fetchone()
-            if row is None:
-                break
-            yield row
-        return
+def fetch_item_info_rows(clean_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    item_info_cfg = PAGE_CONFIG.get("item_info", {})
+    parquet_path = str(item_info_cfg.get("parquet_path", "")).strip()
+    item_col = str(item_info_cfg.get("item_number_column", "ItemNumber")).strip() or "ItemNumber"
 
-    fetchall = getattr(cursor, "fetchall", None)
-    if callable(fetchall):
-        for row in fetchall():
-            yield row
+    if not parquet_path:
+        raise ValueError("Item-info parquet path is not configured.")
 
+    item_info_df = load_item_info_parquet(parquet_path)
+    resolved_item_col = resolve_item_column_name(item_col, item_info_df.columns.tolist())
 
-def fetch_verification_flags(items: list[str]) -> dict[str, bool]:
-    """
-    Execute configured SSAS DAX query via pyadomd and map results back
-    to requested item flags.
-    """
-    normalized_items = [normalize_item_number(item) for item in items]
-    unique_items = [item for item in dict.fromkeys(normalized_items) if item]
-    if not unique_items:
-        return {}
+    requested = clean_df.copy()
+    requested["_NormalizedItem"] = requested["ItemNumber"].map(normalize_item_number)
 
-    ssas_cfg = PAGE_CONFIG.get("ssas", {}) if isinstance(PAGE_CONFIG.get("ssas"), dict) else {}
-    LOGGER.info(
-        "SSAS verification start | requested_items=%s enable_mock=%s has_query=%s",
-        len(unique_items),
-        bool(ssas_cfg.get("enable_mock", True)),
-        bool(str(ssas_cfg.get("query", "")).strip()),
-    )
-    if bool(ssas_cfg.get("enable_mock", True)):
-        LOGGER.info("SSAS verification using mock path (enable_mock=true).")
-        return _mock_verification_flags(unique_items)
+    table_df = item_info_df.copy()
+    table_df["_NormalizedItem"] = table_df[resolved_item_col].map(normalize_item_number)
 
-    connection = str(ssas_cfg.get("connection", "")).strip()
-    database = str(ssas_cfg.get("database", "")).strip()
-    query = str(ssas_cfg.get("query", "")).strip()
-    timeout_seconds = int(ssas_cfg.get("timeout_seconds", 60) or 60)
-    access_token, token_source = _resolve_ssas_access_token(ssas_cfg)
+    requested_item_set = set(requested["_NormalizedItem"].tolist())
+    matched_df = table_df[table_df["_NormalizedItem"].isin(requested_item_set)].copy()
+    matched_df = matched_df.drop(columns=["_NormalizedItem"]).reset_index(drop=True)
 
-    if not connection or not database or not query:
-        LOGGER.warning(
-            "SSAS configuration is incomplete. Falling back to deterministic verification. "
-            "connection_set=%s database_set=%s query_set=%s",
-            bool(connection),
-            bool(database),
-            bool(query),
-        )
-        return _mock_verification_flags(unique_items)
+    matched_items = set(table_df.loc[table_df["_NormalizedItem"].isin(requested_item_set), "_NormalizedItem"].tolist())
+    unmatched_df = requested[~requested["_NormalizedItem"].isin(matched_items)][["ItemNumber", "Quantity"]].copy()
+    unmatched_df = unmatched_df.reset_index(drop=True)
 
-    flags = {item: False for item in unique_items}
-    requested_items = set(unique_items)
-    connection_string = (
-        f"Provider=MSOLAP;Data Source={connection};Initial Catalog={database};Catalog={database};"
-    )
-    if access_token:
-        connection_string = (
-            f"Provider=MSOLAP;Data Source={connection};Initial Catalog={database};Catalog={database};"
-            f"Password={access_token};Persist Security Info=True;User ID=app:;"
-        )
-    query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()[:12]
-
-    try:
-        LOGGER.info(
-            "SSAS opening pyadomd connection | database=%s timeout=%s query_hash=%s token_source=%s token_present=%s",
-            database,
-            timeout_seconds,
-            query_hash,
-            token_source,
-            bool(access_token),
-        )
-        try:
-            from pyadomd import Pyadomd  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(
-                "pyadomd is not installed or failed to import. Install dependency 'pyadomd'."
-            ) from exc
-
-        rows_read = 0
-        matched_items = 0
-        with Pyadomd(connection_string) as conn:
-            cursor = conn.cursor()
-            try:
-                LOGGER.info("SSAS executing query via pyadomd.")
-                cursor.execute(query)
-                item_ordinal, verified_ordinal = _resolve_ssas_field_ordinals(
-                    getattr(cursor, "description", [])
-                )
-                for row in _iter_pyadomd_rows(cursor):
-                    rows_read += 1
-                    item_value = normalize_item_number(row[item_ordinal])
-                    if item_value in requested_items:
-                        matched_items += 1
-                        flags[item_value] = flags[item_value] or _coerce_ssas_flag(
-                            row[verified_ordinal]
-                        )
-            finally:
-                close_fn = getattr(cursor, "close", None)
-                if callable(close_fn):
-                    try:
-                        close_fn()
-                    except Exception:
-                        pass
-
-        verified_true = sum(1 for v in flags.values() if v)
-        LOGGER.info(
-            "SSAS query complete | rows_read=%s matched_items=%s verified_true=%s requested_items=%s",
-            rows_read,
-            matched_items,
-            verified_true,
-            len(unique_items),
-        )
-    except Exception as exc:
-        LOGGER.exception("SSAS verification lookup failed. Falling back to deterministic verification: %s", exc)
-        return _mock_verification_flags(unique_items)
-
-    return flags
+    return matched_df, unmatched_df
 
 
-@st.cache_data(show_spinner=False)
-def fetch_verification_flags_cached(items_key: tuple[str, ...]) -> dict[str, bool]:
-    """Cached wrapper for SSAS placeholder call keyed by normalized item tuple."""
-    return fetch_verification_flags(list(items_key))
+def split_verified_and_non_verified(
+    matched_df: pd.DataFrame,
+    unmatched_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    verified_df = pd.DataFrame()
+    non_verified_df = pd.DataFrame()
+    has_is_verified = (not matched_df.empty) and ("IsVerified" in matched_df.columns)
+
+    if has_is_verified:
+        verification_flags = matched_df["IsVerified"].map(coerce_verified_value)
+        verified_df = matched_df[verification_flags].copy().reset_index(drop=True)
+        non_verified_df = matched_df[~verification_flags].copy().reset_index(drop=True)
+    elif not matched_df.empty:
+        non_verified_df = matched_df.copy().reset_index(drop=True)
+
+    if not unmatched_df.empty:
+        if not matched_df.empty:
+            base_cols = matched_df.columns.tolist()
+            unmatched_for_non_verified = pd.DataFrame(
+                {col: [pd.NA] * len(unmatched_df) for col in base_cols}
+            )
+            if "ItemNumber" in unmatched_for_non_verified.columns:
+                unmatched_for_non_verified["ItemNumber"] = unmatched_df["ItemNumber"].values
+            if "Quantity" in unmatched_for_non_verified.columns:
+                unmatched_for_non_verified["Quantity"] = unmatched_df["Quantity"].values
+            if "IsVerified" in unmatched_for_non_verified.columns:
+                unmatched_for_non_verified["IsVerified"] = False
+        else:
+            unmatched_for_non_verified = unmatched_df.copy()
+            unmatched_for_non_verified["IsVerified"] = False
+
+        non_verified_df = pd.concat([non_verified_df, unmatched_for_non_verified], ignore_index=True)
+
+    return verified_df, non_verified_df
 
 
-def add_verification_flags(clean_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    items_key = tuple(clean_df["ItemNumber"].tolist())
-    verification_flags = fetch_verification_flags_cached(items_key)
-
-    summary_df = clean_df.copy()
-    summary_df["IsVerified"] = summary_df["ItemNumber"].map(verification_flags).fillna(False).astype(bool)
-
-    verified_df = summary_df[summary_df["IsVerified"]].copy().reset_index(drop=True)
-    unverified_df = summary_df[~summary_df["IsVerified"]].copy().reset_index(drop=True)
-    return summary_df, verified_df, unverified_df
-
-
-# ============================================================
-# PACKAGING API PLACEHOLDER
-# ============================================================
-def stable_seed(item_number: str) -> int:
-    return int(hashlib.sha256(item_number.encode("utf-8")).hexdigest()[:8], 16)
-
-
-def build_packaging_payload(
-    verified_rows: pd.DataFrame,
-    destination_state: str,
+def build_verified_payload(
+    verified_df: pd.DataFrame,
+    requested_df: pd.DataFrame,
+    warehouse_number: int,
 ) -> list[dict[str, Any]]:
-    """Build placeholder payload schema for future API integration."""
+    if verified_df.empty:
+        return []
+
     ui_cfg = PAGE_CONFIG.get("ui", {})
-    default_warehouse = int(ui_cfg.get("default_warehouse", 105))
-    default_marginal_length = float(ui_cfg.get("default_marginal_length", 0.0))
-    default_marginal_width = float(ui_cfg.get("default_marginal_width", 0.0))
-    default_marginal_height = float(ui_cfg.get("default_marginal_height", 0.0))
+    item_cfg = PAGE_CONFIG.get("item_info", {})
+    item_col = str(item_cfg.get("item_number_column", "ItemNumber")).strip() or "ItemNumber"
+    resolved_item_col = resolve_item_column_name(item_col, verified_df.columns.tolist())
+
+    quantity_map = {
+        normalize_item_number(row.ItemNumber): int(row.Quantity)
+        for row in requested_df.itertuples(index=False)
+    }
+
+    default_marginal_length = float(ui_cfg.get("default_marginal_length", 0.0) or 0.0)
+    default_marginal_width = float(ui_cfg.get("default_marginal_width", 0.0) or 0.0)
+    default_marginal_height = float(ui_cfg.get("default_marginal_height", 0.0) or 0.0)
+    default_perishable_type = str(ui_cfg.get("default_perishable_type", "N")).strip() or "N"
 
     payload: list[dict[str, Any]] = []
-    for row in verified_rows.itertuples(index=False):
-        seed = stable_seed(row.ItemNumber)
-        length = 10 + (seed % 8)
-        width = 8 + ((seed // 8) % 6)
-        height = 4 + ((seed // 64) % 4)
-        volume = length * width * height
-        weight = round(max(1.0, volume / 200.0), 2)
+    for row in verified_df.to_dict(orient="records"):
+        item_number = normalize_item_number(row.get(resolved_item_col))
+        if not item_number:
+            continue
+        quantity = int(quantity_map.get(item_number, 0))
+        if quantity <= 0:
+            continue
+
+        length = to_float(row.get("LengthInInches"), 0.0)
+        width = to_float(row.get("WidthInInches"), 0.0)
+        height = to_float(row.get("HeightInInches"), 0.0)
+        volume = to_float(row.get("AverageVolume"), length * width * height)
 
         payload.append(
             {
-                "warehouseNumber": default_warehouse,
-                "itemNumber": row.ItemNumber,
-                "quantity": int(row.Quantity),
-                "length": float(length),
-                "width": float(width),
-                "height": float(height),
-                "weight": float(weight),
-                "isRepack": True,
-                "isRepositional": True,
-                "breakQuantity": 0,
+                "warehouseNumber": int(warehouse_number),
+                "itemNumber": item_number,
+                "quantity": quantity,
+                "length": length,
+                "width": width,
+                "height": height,
+                "weight": to_float(row.get("WeightInPounds"), 0.0),
+                "isRepack": coerce_verified_value(row.get("IsRepackRequired")),
+                "isRepositional": coerce_verified_value(row.get("IsRepositionable")),
+                "breakQuantity": to_int(row.get("BreakQuantity"), 0),
                 "marginalLength": default_marginal_length,
                 "marginalHeight": default_marginal_height,
                 "marginalWidth": default_marginal_width,
-                "canBeNested": False,
-                "volume": float(volume),
-                "perishableType": "N",
+                "canBeNested": coerce_verified_value(row.get("Can Nest?")),
+                "volume": volume,
+                "perishableType": default_perishable_type,
             }
         )
+
     return payload
 
 
-def mock_packaging_api_response(payload: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Build a mock API response using the published schema shape."""
-    response: dict[str, dict[str, Any]] = {}
-    for idx, item_payload in enumerate(payload, start=1):
-        quantity = int(item_payload["quantity"])
-        package_count = max(1, math.ceil(quantity / 4))
-        box_dims = {
-            "Width": float(item_payload["width"]) + 2.0,
-            "Length": float(item_payload["length"]) + 2.0,
-            "Height": float(item_payload["height"]) + 1.0,
-        }
+def call_packaging_api(payload: list[dict[str, Any]], destination_state: str) -> tuple[Any, str]:
+    if not payload:
+        return None, ""
 
-        response[f"package_{idx}"] = {
-            "ContainedDimensions": {
-                "Width": float(item_payload["width"]),
-                "Length": float(item_payload["length"]),
-                "Height": float(item_payload["height"]),
-            },
-            "ContainedItems": {item_payload["itemNumber"]: quantity},
-            "Volume": float(item_payload["volume"]),
-            "BoxDimensions": box_dims,
-            "Weight": round(float(item_payload["weight"]) * package_count, 2),
-            "IsTaped": True,
-            "CumulativeVolume": float(item_payload["volume"]) * quantity,
-            "TotalQuantity": quantity,
-            "PackageCount": package_count,
-            "ItemDetails": [
+    api_cfg = PAGE_CONFIG.get("api", {})
+    endpoint = str(api_cfg.get("endpoint", "")).strip()
+    timeout_seconds = int(api_cfg.get("timeout_seconds", 30) or 30)
+    if not endpoint:
+        return None, "API endpoint is not configured."
+
+    separator = "&" if "?" in endpoint else "?"
+    url = f"{endpoint}{separator}destinationState={quote(destination_state)}"
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        url=url,
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+        try:
+            return json.loads(raw), ""
+        except Exception:
+            return raw, ""
+    except HTTPError as exc:
+        error_body = ""
+        try:
+            error_body = exc.read().decode("utf-8")
+        except Exception:
+            error_body = str(exc)
+        return None, f"HTTP {exc.code}: {error_body}"
+    except URLError as exc:
+        return None, f"Network error: {exc.reason}"
+    except Exception as exc:
+        return None, f"API call failed: {exc}"
+
+
+def normalize_api_response_to_df(api_response: Any) -> pd.DataFrame:
+    if api_response is None:
+        return pd.DataFrame()
+
+    if isinstance(api_response, list):
+        if not api_response:
+            return pd.DataFrame()
+        if all(isinstance(x, dict) for x in api_response):
+            return pd.json_normalize(api_response)
+        return pd.DataFrame({"value": api_response})
+
+    if isinstance(api_response, dict):
+        package_rows: list[dict[str, Any]] = []
+        for package_id, package in api_response.items():
+            if not isinstance(package, dict):
+                continue
+            package_num = to_int(package_id, 0)
+            volume = to_float(package.get("volume", package.get("Volume", 0.0)), 0.0)
+            weight = to_float(package.get("weight", package.get("Weight", 0.0)), 0.0)
+            package_rows.append(
                 {
-                    "ItemNumber": item_payload["itemNumber"],
-                    "IsCoolant": False,
-                    "Quantity": quantity,
-                    "Length": float(item_payload["length"]),
-                    "Width": float(item_payload["width"]),
-                    "Height": float(item_payload["height"]),
-                    "Weight": float(item_payload["weight"]),
-                }
-            ],
-        }
-    return response
-
-
-def normalize_packaging_response(response_json: dict[str, dict[str, Any]]) -> pd.DataFrame:
-    """Normalize API response to tabular output."""
-    rows: list[dict[str, Any]] = []
-    for package_id, package in response_json.items():
-        box_dims = package.get("BoxDimensions", {}) or {}
-        package_count = int(package.get("PackageCount", 1) or 1)
-        package_weight = float(package.get("Weight", 0.0) or 0.0)
-        item_details = package.get("ItemDetails", []) or []
-
-        for detail in item_details:
-            rows.append(
-                {
-                    "PackageId": package_id,
-                    "ItemNumber": str(detail.get("ItemNumber", "")),
-                    "Quantity": int(detail.get("Quantity", 0) or 0),
-                    "PackageCount": package_count,
-                    "Length": float(box_dims.get("Length", 0.0) or 0.0),
-                    "Width": float(box_dims.get("Width", 0.0) or 0.0),
-                    "Height": float(box_dims.get("Height", 0.0) or 0.0),
-                    "Weight": package_weight,
+                    "Package Number": package_num,
+                    "Volume": volume,
+                    "Weight": weight,
                 }
             )
+        if package_rows:
+            df = pd.DataFrame(package_rows)
+            return df.sort_values("Package Number").reset_index(drop=True)
 
-    if not rows:
-        return pd.DataFrame(columns=PACKAGING_COLUMNS)
-    return pd.DataFrame(rows, columns=PACKAGING_COLUMNS).sort_values(
-        ["ItemNumber", "PackageId"]
-    ).reset_index(drop=True)
+        for key in ("data", "results", "items"):
+            value = api_response.get(key)
+            if isinstance(value, list) and value and all(isinstance(x, dict) for x in value):
+                return pd.json_normalize(value)
 
+        return pd.json_normalize([api_response])
 
-def call_packaging_api(verified_rows: pd.DataFrame) -> pd.DataFrame:
-    """
-    Input: dataframe with ItemNumber and Quantity (verified only), also create variables
-    for all other variables needed by the query.
-    Output: normalized dataframe of package results.
-    Placeholder: return mock results with expected schema.
-    """
-    # TODO(API): Add authentication and real HTTP requests to configured endpoint.
-    if verified_rows.empty:
-        return pd.DataFrame(columns=PACKAGING_COLUMNS)
-
-    destination_state = "FL"
-    payload = build_packaging_payload(verified_rows, destination_state=destination_state)
-    response_json = mock_packaging_api_response(payload)
-    return normalize_packaging_response(response_json)
-
-
-@st.cache_data(show_spinner=False)
-def call_packaging_api_cached(verified_key: tuple[tuple[str, int], ...]) -> pd.DataFrame:
-    verified_rows = pd.DataFrame(verified_key, columns=["ItemNumber", "Quantity"])
-    return call_packaging_api(verified_rows)
+    return pd.DataFrame({"value": [str(api_response)]})
 
 
 # ============================================================
 # PIPELINE
 # ============================================================
 def run_pipeline(standard_input_df: pd.DataFrame) -> dict[str, Any]:
-    """Run the load -> verify -> split -> package workflow."""
     clean_df, row_errors = validate_and_aggregate_rows(standard_input_df)
     if clean_df.empty:
         return {
-            "summary_df": pd.DataFrame(columns=SUMMARY_COLUMNS),
-            "verified_df": pd.DataFrame(columns=SUMMARY_COLUMNS),
-            "unverified_df": pd.DataFrame(columns=SUMMARY_COLUMNS),
-            "packaging_df": pd.DataFrame(columns=PACKAGING_COLUMNS),
+            "requested_df": pd.DataFrame(columns=["ItemNumber", "Quantity"]),
+            "matched_df": pd.DataFrame(),
+            "unmatched_df": pd.DataFrame(columns=["ItemNumber", "Quantity"]),
             "row_errors": row_errors or ["No valid rows found after validation."],
-            "debug": {},
         }
 
-    summary_df, verified_df, unverified_df = add_verification_flags(clean_df)
-
-    packaging_df = pd.DataFrame(columns=PACKAGING_COLUMNS)
-    payload_preview: list[dict[str, Any]] = []
-    response_preview: dict[str, Any] = {}
-    destination_state = "FL"
-    if not verified_df.empty:
-        verified_key = tuple(
-            (row.ItemNumber, int(row.Quantity)) for row in verified_df.itertuples(index=False)
-        )
-        packaging_df = call_packaging_api_cached(verified_key)
-        payload_preview = build_packaging_payload(verified_df, destination_state=destination_state)[:3]
-        response_preview = mock_packaging_api_response(payload_preview[:1]) if payload_preview else {}
+    matched_df, unmatched_df = fetch_item_info_rows(clean_df)
 
     LOGGER.info(
-        "Packaging load complete | total=%s verified=%s unverified=%s errors=%s",
-        len(summary_df),
-        len(verified_df),
-        len(unverified_df),
+        "Packaging load complete | requested=%s matched_rows=%s unmatched_items=%s errors=%s",
+        len(clean_df),
+        len(matched_df),
+        len(unmatched_df),
         len(row_errors),
     )
 
-    debug_data = {
-        "api_endpoint": PAGE_CONFIG.get("api", {}).get("endpoint", ""),
-        "destination_state": destination_state,
-        "payload_preview": payload_preview,
-        "response_preview": response_preview,
-    }
     return {
-        "summary_df": summary_df,
-        "verified_df": verified_df,
-        "unverified_df": unverified_df,
-        "packaging_df": packaging_df,
+        "requested_df": clean_df,
+        "matched_df": matched_df,
+        "unmatched_df": unmatched_df,
         "row_errors": row_errors,
-        "debug": debug_data,
     }
 
 
@@ -769,14 +566,39 @@ with spacer_col:
 
 with input_col:
     st.subheader("Input", anchor=False)
+    ui_cfg = PAGE_CONFIG.get("ui", {})
+    default_destination_state = str(ui_cfg.get("default_destination_state", "FL")).strip().upper() or "FL"
+    default_warehouse = int(ui_cfg.get("default_warehouse", 105) or 105)
+    state_default_index = (
+        US_STATE_CODES.index(default_destination_state)
+        if default_destination_state in US_STATE_CODES
+        else US_STATE_CODES.index("FL")
+    )
+
+    selector_left, selector_right = st.columns(2)
+    with selector_left:
+        destination_state = st.selectbox(
+            "Destination State",
+            options=US_STATE_CODES,
+            index=state_default_index,
+            key="pe_destination_state",
+        )
+    with selector_right:
+        warehouse_number = int(
+            st.number_input(
+                "Warehouse Number",
+                min_value=1,
+                step=1,
+                value=default_warehouse,
+                key="pe_warehouse_number",
+            )
+        )
+
     input_mode = st.radio(
         "Input Mode",
         [INPUT_MODE_UPLOAD, INPUT_MODE_PASTE],
         horizontal=True,
     )
-    if st.session_state.get("_pe_last_input_mode") != input_mode:
-        st.session_state._pe_last_input_mode = input_mode
-        LOGGER.info("Input mode changed to '%s'.", input_mode)
 
     if input_mode == INPUT_MODE_UPLOAD:
         uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
@@ -791,10 +613,8 @@ with input_col:
                 input_parse_errors.append(f"Could not read Excel file: {exc}")
 
             if uploaded_df.empty:
-                LOGGER.info("Uploaded file parsed but contained no rows.")
                 st.info("Uploaded file has no rows.")
             elif len(uploaded_df.columns) < 2:
-                LOGGER.error("Uploaded file has insufficient columns: %s", len(uploaded_df.columns))
                 st.error("Excel input must contain at least two columns: Item Number and Quantity.")
             else:
                 upload_columns = uploaded_df.columns.tolist()
@@ -847,7 +667,6 @@ with preview_col:
         standard_input_df["_RowNumber"] = standard_input_df.index + 2
 
     if standard_input_df.empty:
-        LOGGER.info("Preview unavailable because no input rows are currently loaded.")
         st.info("Preview will appear here after input is provided.")
     else:
         st.caption("Preview shows the first 5 items only.")
@@ -862,50 +681,38 @@ with input_col:
     has_input_rows = not standard_input_df.empty
     if st.button("Load", type="primary", width="content", disabled=not has_input_rows):
         try:
-            runtime_cfg = load_packaging_config()
-            runtime_ssas = runtime_cfg.get("ssas", {}) if isinstance(runtime_cfg.get("ssas"), dict) else {}
-            page_ssas = PAGE_CONFIG.get("ssas", {}) if isinstance(PAGE_CONFIG.get("ssas"), dict) else {}
-            LOGGER.info(
-                "Load clicked | mode=%s rows=%s input_errors=%s page_enable_mock=%s runtime_enable_mock=%s runtime_has_query=%s",
-                input_mode,
-                len(standard_input_df),
-                len(input_parse_errors),
-                bool(page_ssas.get("enable_mock", True)),
-                bool(runtime_ssas.get("enable_mock", True)),
-                bool(str(runtime_ssas.get("query", "")).strip()),
-            )
-            if bool(page_ssas.get("enable_mock", True)) != bool(runtime_ssas.get("enable_mock", True)):
-                LOGGER.warning(
-                    "SSAS config mismatch between PAGE_CONFIG and current file config. "
-                    "Clear Streamlit cache/restart to reload PAGE_CONFIG."
-                )
-
             pipeline_results = run_pipeline(standard_input_df)
+            requested_df = pipeline_results.get("requested_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
+            matched_df = pipeline_results.get("matched_df", pd.DataFrame())
+            unmatched_df = pipeline_results.get("unmatched_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
+            verified_df, non_verified_df = split_verified_and_non_verified(matched_df, unmatched_df)
+            payload = build_verified_payload(verified_df, requested_df, warehouse_number=warehouse_number)
+            api_response, api_error = call_packaging_api(payload, destination_state=destination_state)
+
+            pipeline_results["verified_df"] = verified_df
+            pipeline_results["non_verified_df"] = non_verified_df
+            pipeline_results["api_payload"] = payload
+            pipeline_results["api_response"] = api_response
+            pipeline_results["api_error"] = api_error
+            pipeline_results["destination_state"] = destination_state
+            pipeline_results["warehouse_number"] = warehouse_number
             combined_errors = input_parse_errors + pipeline_results.get("row_errors", [])
 
             st.session_state.pe_loaded = True
             st.session_state.pe_results = pipeline_results
             st.session_state.pe_errors = combined_errors
-            LOGGER.info(
-                "Load completed | summary=%s verified=%s unverified=%s row_errors=%s",
-                len(pipeline_results.get("summary_df", pd.DataFrame())),
-                len(pipeline_results.get("verified_df", pd.DataFrame())),
-                len(pipeline_results.get("unverified_df", pd.DataFrame())),
-                len(combined_errors),
-            )
 
         except Exception as exc:
-            LOGGER.exception("Packaging pipeline failed: %s", exc)
+            LOGGER.exception("Packaging lookup failed: %s", exc)
             st.session_state.pe_loaded = False
             st.session_state.pe_results = {}
-            st.session_state.pe_errors = [f"Pipeline failed: {exc}"]
+            st.session_state.pe_errors = [f"Lookup failed: {exc}"]
 
 
 # ============================================================
 # UI: OUTPUT
 # ============================================================
 if st.session_state.pe_errors:
-    LOGGER.warning("Displaying %s packaging validation/parsing error(s).", len(st.session_state.pe_errors))
     st.error(
         f"{len(st.session_state.pe_errors)} row(s) were rejected or could not be parsed. "
         "Review details below."
@@ -916,71 +723,58 @@ if st.session_state.pe_errors:
 
 if st.session_state.pe_loaded and st.session_state.pe_results:
     results = st.session_state.pe_results
-    summary_df = results.get("summary_df", pd.DataFrame(columns=SUMMARY_COLUMNS))
-    verified_df = results.get("verified_df", pd.DataFrame(columns=SUMMARY_COLUMNS))
-    unverified_df = results.get("unverified_df", pd.DataFrame(columns=SUMMARY_COLUMNS))
-    packaging_df = results.get("packaging_df", pd.DataFrame(columns=PACKAGING_COLUMNS))
-    debug_data = results.get("debug", {})
-    current_signature = (
-        len(summary_df),
-        len(verified_df),
-        len(unverified_df),
-        len(packaging_df),
-    )
-    if st.session_state.get("_pe_last_results_signature") != current_signature:
-        st.session_state._pe_last_results_signature = current_signature
-        LOGGER.info(
-            "Rendering pipeline results | total=%s verified=%s unverified=%s packages=%s",
-            current_signature[0],
-            current_signature[1],
-            current_signature[2],
-            current_signature[3],
-        )
+    requested_df = results.get("requested_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
+    matched_df = results.get("matched_df", pd.DataFrame())
+    unmatched_df = results.get("unmatched_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
+    verified_df = results.get("verified_df", pd.DataFrame())
+    non_verified_df = results.get("non_verified_df", pd.DataFrame())
+    api_payload = results.get("api_payload", [])
+    api_response = results.get("api_response", None)
+    api_error = str(results.get("api_error", "") or "")
+    destination_state = str(results.get("destination_state", ""))
+    warehouse_number = results.get("warehouse_number", "")
 
     st.divider()
-    st.subheader("Input Summary", anchor=False)
-    col_total, col_verified, col_unverified = st.columns(3)
-    col_total.metric("Total Items", len(summary_df))
-    col_verified.metric("Verified Items", len(verified_df))
-    col_unverified.metric("Unverified Items", len(unverified_df))
+    st.subheader("Lookup Summary", anchor=False)
+    col_requested, col_matched_rows, col_unmatched = st.columns(3)
+    col_requested.metric("Requested Items", len(requested_df))
+    col_matched_rows.metric("Matched Rows", len(matched_df))
+    col_unmatched.metric("Unmatched Items", len(unmatched_df))
 
-    verified_col, unverified_col = st.columns(2)
+    st.divider()
+    st.subheader("Item Info Results", anchor=False)
+    verified_col, non_verified_col = st.columns(2)
     with verified_col:
         st.subheader("Verified Items", anchor=False)
         if verified_df.empty:
-            LOGGER.info("Decision: no verified items after verification split.")
             st.info("No verified items found.")
         else:
-            st.dataframe(
-                verified_df[["ItemNumber", "Quantity"]],
-                width="stretch",
-                hide_index=True,
-            )
+            st.dataframe(verified_df, width="stretch", hide_index=True)
 
-    with unverified_col:
-        st.subheader("Unverified Items", anchor=False)
-        if unverified_df.empty:
-            LOGGER.info("Decision: no unverified items after verification split.")
-            st.info("No unverified items found.")
+    with non_verified_col:
+        st.subheader("Non-Verified Items", anchor=False)
+        if non_verified_df.empty:
+            st.info("No non-verified items found.")
         else:
-            st.dataframe(
-                unverified_df[["ItemNumber", "Quantity"]],
-                width="stretch",
-                hide_index=True,
-            )
+            st.dataframe(non_verified_df, width="stretch", hide_index=True)
 
     st.divider()
-    st.subheader("Packaging Results", anchor=False)
-    if verified_df.empty:
-        LOGGER.info("Decision: packaging API not called because verified set is empty.")
-        st.info("No verified items found. Packaging API was not called.")
+    st.subheader("Packaging API", anchor=False)
+    if not api_payload:
+        st.info("No verified items available to send to the packaging API.")
     else:
-        st.dataframe(packaging_df, width="stretch", hide_index=True)
-
-    with st.expander("Debug (placeholder integration details)", expanded=False):
-        st.write(f"API endpoint: `{debug_data.get('api_endpoint', '')}`")
-        st.write(f"Destination state: `{debug_data.get('destination_state', '')}`")
-        st.write("Payload preview:")
-        st.json(debug_data.get("payload_preview", []))
-        st.write("Response preview:")
-        st.json(debug_data.get("response_preview", {}))
+        st.caption(f"Destination State: `{destination_state}` | Warehouse Number: `{warehouse_number}`")
+        if api_error:
+            st.error(api_error)
+        else:
+            st.write("API package summary:")
+            response_df = normalize_api_response_to_df(api_response)
+            if response_df.empty:
+                st.info("API returned no rows.")
+            else:
+                total_volume = float(response_df["Volume"].sum()) if "Volume" in response_df.columns else 0.0
+                total_weight = float(response_df["Weight"].sum()) if "Weight" in response_df.columns else 0.0
+                card_col_1, card_col_2 = st.columns(2)
+                card_col_1.metric("Total Dimension", f"{total_volume:,.2f}")
+                card_col_2.metric("Total Weight", f"{total_weight:,.2f}")
+                st.dataframe(response_df, width="stretch", hide_index=True)
