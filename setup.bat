@@ -7,9 +7,10 @@ REM ROOT / PATHS
 REM ============================================================
 set "ROOT_DIR=%~dp0"
 if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
+set "CODE_DIR=%ROOT_DIR%\CODE - do not open"
 
 set "VENV_DIR=%ROOT_DIR%\.venv"
-set "REQ_FILE=%ROOT_DIR%\requirements.txt"
+set "REQ_FILE=%CODE_DIR%\requirements.txt"
 
 REM ============================================================
 REM VALIDATE PYTHON
@@ -40,7 +41,7 @@ REM ============================================================
 REM INSTALL DEPENDENCIES
 REM ============================================================
 if not exist "%REQ_FILE%" (
-  echo ERROR: requirements.txt not found.
+  echo ERROR: requirements.txt not found in CODE directory.
   pause
   exit /b 1
 )

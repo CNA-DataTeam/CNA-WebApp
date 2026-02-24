@@ -734,10 +734,15 @@ def get_user_context() -> UserContext:
 
 def get_page_logger(page_name: str, source_file: str | None = None) -> logging.LoggerAdapter:
     """Return logger adapter for a specific page/source name."""
+    clean_page_name = str(page_name).strip()
+    if clean_page_name.lower().endswith(" page"):
+        clean_page_name = clean_page_name[:-5].strip()
+    if not clean_page_name:
+        clean_page_name = "Page"
     if source_file is None:
         caller_frame = inspect.stack()[1]
         source_file = caller_frame.filename
-    return app_logging.get_logger(source_file, page_name)
+    return app_logging.get_logger(source_file, clean_page_name)
 
 
 def get_program_logger(source_file: str, context_name: str | None = None) -> logging.LoggerAdapter:

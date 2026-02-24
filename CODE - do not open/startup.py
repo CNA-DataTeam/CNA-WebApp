@@ -35,6 +35,14 @@ import os
 import platform
 import subprocess
 import sys
+
+CODE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = CODE_DIR.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+if str(CODE_DIR) not in sys.path:
+    sys.path.insert(0, str(CODE_DIR))
+
 import app_logging
 import config
 

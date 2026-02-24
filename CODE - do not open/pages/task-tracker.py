@@ -61,16 +61,30 @@ import uuid
 from pathlib import Path
 import config
 import utils
-from streamlit_autorefresh import st_autorefresh
 
-LOGGER = utils.get_page_logger("Task Tracker Page")
+_AUTOREFRESH_IMPORT_ERROR: Exception | None = None
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception as exc:
+    _AUTOREFRESH_IMPORT_ERROR = exc
+
+    def st_autorefresh(*_args, **_kwargs):
+        return None
+
+LOGGER = utils.get_page_logger("Task Tracker")
 
 # Page configuration
 st.set_page_config(page_title="Task Tracker", layout="wide")
 utils.log_page_open_once("task_tracker_page", LOGGER)
 if "_task_tracker_render_logged" not in st.session_state:
     st.session_state._task_tracker_render_logged = True
-    LOGGER.info("Rendering task tracker page.")
+    LOGGER.info("Render UI.")
+if _AUTOREFRESH_IMPORT_ERROR is not None and "_task_tracker_autorefresh_warned" not in st.session_state:
+    st.session_state._task_tracker_autorefresh_warned = True
+    LOGGER.warning(
+        "Auto-refresh component unavailable. Timer will update on user interaction. error=%s",
+        _AUTOREFRESH_IMPORT_ERROR,
+    )
 
 # Apply global styling
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
@@ -133,6 +147,12 @@ if not st.session_state.state_restored:
         st.session_state.restored_task_name = restored["task_name"]
         st.session_state.restored_account = restored["account"]
         st.session_state.restored_covering_for = restored["covering_for"]
+        LOGGER.info(
+            "Restored active session | task='%s' cadence='%s' state='%s'",
+            restored["task_name"],
+            restored["cadence"],
+            restored["state"],
+        )
 
 # Business logic functions
 def compute_elapsed_seconds() -> int:
@@ -499,6 +519,19 @@ with left_col:
     selected_account = st.selectbox("Account (optional)", account_options, key=acct_key)
     st.session_state.covering_for = covering_for
     archived_count = len(utils.load_archived_tasks(ARCHIVED_TASKS_DIR, user_key))
+    data_signature = (
+        len([u for u in covering_options if u]),
+        len([a for a in account_options if a]),
+        archived_count,
+    )
+    if st.session_state.get("_task_tracker_data_signature") != data_signature:
+        st.session_state._task_tracker_data_signature = data_signature
+        LOGGER.info(
+            "Data snapshot | covering_users=%s accounts=%s archived_tasks=%s",
+            data_signature[0],
+            data_signature[1],
+            data_signature[2],
+        )
 
 with mid_col:
     tasks_df = utils.load_tasks()
@@ -614,6 +647,12 @@ if st.session_state.state in ("running", "paused") and not st.session_state.live
     st.session_state.live_task_name = task_name
     st.session_state.live_cadence = st.session_state.selected_cadence
     st.session_state.live_account = selected_account
+    LOGGER.info(
+        "Live activity saved | task='%s' cadence='%s' state='%s'",
+        task_name,
+        st.session_state.selected_cadence,
+        st.session_state.state,
+    )
 
 # Open confirmation modal if triggered
 if st.session_state.confirm_open and not st.session_state.get("confirm_rendered"):

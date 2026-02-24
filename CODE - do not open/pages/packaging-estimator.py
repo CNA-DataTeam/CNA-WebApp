@@ -106,12 +106,12 @@ def load_packaging_config() -> dict[str, Any]:
     }
 
 
-LOGGER = utils.get_page_logger("Packaging Estimator Page")
+LOGGER = utils.get_page_logger("Packaging Estimator")
 PAGE_CONFIG = load_packaging_config()
 utils.log_page_open_once("packaging_estimator_page", LOGGER)
 if "_packaging_render_logged" not in st.session_state:
     st.session_state._packaging_render_logged = True
-    LOGGER.info("Rendering packaging estimator page.")
+    LOGGER.info("Render UI.")
 
 
 # ============================================================
@@ -618,6 +618,9 @@ with input_col:
         [INPUT_MODE_UPLOAD, INPUT_MODE_PASTE],
         horizontal=True,
     )
+    if st.session_state.get("_pe_last_input_mode") != input_mode:
+        st.session_state._pe_last_input_mode = input_mode
+        LOGGER.info("Input mode changed | mode='%s'", input_mode)
 
     if input_mode == INPUT_MODE_UPLOAD:
         uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "csv"])
@@ -625,6 +628,15 @@ with input_col:
         if uploaded_file is not None:
             uploaded_file_bytes = uploaded_file.getvalue()
             uploaded_file_ext = uploaded_file.name.lower().rsplit(".", 1)[-1] if "." in uploaded_file.name else ""
+            file_signature = (uploaded_file.name, len(uploaded_file_bytes))
+            if st.session_state.get("_pe_last_upload_signature") != file_signature:
+                st.session_state._pe_last_upload_signature = file_signature
+                LOGGER.info(
+                    "File uploaded | name='%s' type='%s' size_bytes=%s",
+                    uploaded_file.name,
+                    uploaded_file_ext or "unknown",
+                    len(uploaded_file_bytes),
+                )
 
             try:
                 if uploaded_file_ext in {"xlsx", "xls"}:
@@ -664,6 +676,9 @@ with preview_col:
                     index=0,
                     key="pe_sheet_name",
                 )
+                if st.session_state.get("_pe_last_sheet_name") != selected_sheet_name:
+                    st.session_state._pe_last_sheet_name = selected_sheet_name
+                    LOGGER.info("Worksheet selected | sheet='%s'", selected_sheet_name)
                 try:
                     uploaded_df = read_excel_bytes(uploaded_file_bytes, selected_sheet_name)
                     uploaded_df.columns = [str(col).strip() for col in uploaded_df.columns]
@@ -699,6 +714,13 @@ with preview_col:
             if default_qty_idx == default_item_idx and len(upload_columns) > 1:
                 default_qty_idx = 1 if default_item_idx == 0 else 0
             upload_has_valid_columns = True
+            if st.session_state.get("_pe_last_upload_rows") != len(uploaded_df):
+                st.session_state._pe_last_upload_rows = len(uploaded_df)
+                LOGGER.info(
+                    "Input table ready | rows=%s columns=%s",
+                    len(uploaded_df),
+                    len(upload_columns),
+                )
 
     if input_mode == INPUT_MODE_UPLOAD and upload_has_valid_columns:
         col_left, col_right = st.columns(2)
@@ -720,6 +742,14 @@ with preview_col:
         standard_input_df = uploaded_df[[item_column, qty_column]].copy()
         standard_input_df.columns = ["ItemNumber", "Quantity"]
         standard_input_df["_RowNumber"] = standard_input_df.index + 2
+        selected_columns_signature = (item_column, qty_column)
+        if st.session_state.get("_pe_last_column_selection") != selected_columns_signature:
+            st.session_state._pe_last_column_selection = selected_columns_signature
+            LOGGER.info(
+                "Column mapping updated | item_col='%s' qty_col='%s'",
+                item_column,
+                qty_column,
+            )
 
     if standard_input_df.empty:
         st.info("Preview will appear here after input is provided.")
@@ -735,6 +765,13 @@ with preview_col:
 with input_col:
     has_input_rows = not standard_input_df.empty
     if st.button("Load", type="primary", width="content", disabled=not has_input_rows):
+        LOGGER.info(
+            "Load requested | mode='%s' rows=%s destination_state='%s' warehouse=%s",
+            input_mode,
+            len(standard_input_df),
+            destination_state,
+            warehouse_number,
+        )
         try:
             pipeline_results = run_pipeline(standard_input_df)
             requested_df = pipeline_results.get("requested_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
@@ -756,6 +793,16 @@ with input_col:
             st.session_state.pe_loaded = True
             st.session_state.pe_results = pipeline_results
             st.session_state.pe_errors = combined_errors
+            LOGGER.info(
+                "Load complete | requested=%s matched=%s unmatched=%s verified=%s payload_items=%s parse_errors=%s api_error=%s",
+                len(requested_df),
+                len(matched_df),
+                len(unmatched_df),
+                len(verified_df),
+                len(payload),
+                len(combined_errors),
+                bool(api_error),
+            )
 
         except Exception as exc:
             LOGGER.exception("Packaging lookup failed: %s", exc)

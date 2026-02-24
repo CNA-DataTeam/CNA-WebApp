@@ -16,7 +16,7 @@ import altair as alt
 import config
 import utils
 
-LOGGER = utils.get_page_logger("Task Analytics Page")
+LOGGER = utils.get_page_logger("Task Analytics")
 
 
 # ============================================================
@@ -100,6 +100,24 @@ def main_filters(df: pd.DataFrame) -> pd.DataFrame:
     filtered_df = filtered_df[
         (filtered_df["Date"] >= start_date) & (filtered_df["Date"] <= end_date)
     ]
+
+    filter_signature = (
+        user_filter,
+        tuple(sorted(task_filter)),
+        tuple(sorted(cadence_filter)),
+        str(start_date),
+        str(end_date),
+    )
+    if st.session_state.get("_analytics_filter_signature") != filter_signature:
+        st.session_state._analytics_filter_signature = filter_signature
+        LOGGER.info(
+            "Filters updated | user='%s' tasks=%s cadences=%s date_range=%s..%s",
+            user_filter,
+            len(task_filter),
+            len(cadence_filter),
+            start_date,
+            end_date,
+        )
 
     return filtered_df, user_filter
 
@@ -240,7 +258,7 @@ def main_performance_review(filtered_df: pd.DataFrame, user_filter: str) -> None
 # ============================================================
 def main() -> None:
     st.markdown(utils.get_global_css(), unsafe_allow_html=True)
-    LOGGER.info("Rendering analytics page.")
+    LOGGER.info("Render UI.")
 
     user_ctx = utils.get_user_context()
     if not user_ctx.can_view_analytics:
@@ -253,6 +271,7 @@ def main() -> None:
         LOGGER.info("No completed task data available for analytics.")
         st.warning("No completed task data available.")
         return
+    LOGGER.info("Loaded completed task history | rows=%s", len(df))
 
     if "PartiallyComplete" not in df.columns:
         df["PartiallyComplete"] = False
@@ -272,12 +291,7 @@ def main() -> None:
     st.divider()
 
     filtered_df, user_filter = main_filters(df)
-    LOGGER.info(
-        "Applied analytics filters | user_filter='%s' source_rows=%s filtered_rows=%s",
-        user_filter,
-        len(df),
-        len(filtered_df),
-    )
+    LOGGER.info("Filter result | source_rows=%s filtered_rows=%s", len(df), len(filtered_df))
 
     if filtered_df.empty:
         LOGGER.info("No analytics data for selected filters.")

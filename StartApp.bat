@@ -7,9 +7,20 @@ REM ROOT / PATHS
 REM ============================================================
 set "ROOT_DIR=%~dp0"
 if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
+set "CODE_DIR=%ROOT_DIR%\CODE - do not open"
+set "APP_FILE=%CODE_DIR%\app.py"
+set "STARTUP_FILE=%CODE_DIR%\startup.py"
 
 set "VENV_DIR=%ROOT_DIR%\.venv"
 set "STREAMLIT_PORT=8501"
+cd /d "%ROOT_DIR%"
+
+if defined PYTHONPATH (
+  set "PYTHONPATH=%ROOT_DIR%;%CODE_DIR%;%PYTHONPATH%"
+) else (
+  set "PYTHONPATH=%ROOT_DIR%;%CODE_DIR%"
+)
+set "STREAMLIT_CONFIG_DIR=%CODE_DIR%\.streamlit"
 
 set "LOG_BASE=\\therestaurantstore.com\920\Data\Logistics\Logistics App\Logs"
 set "LOG_DIR=%LOG_BASE%\%USERNAME%"
@@ -18,7 +29,7 @@ if not exist "%LOG_DIR%" (
   set "LOG_DIR=%ROOT_DIR%\logs\%USERNAME%"
   if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 )
-set "LOG_FILE=%LOG_DIR%\CNA-WebApp.log"
+set "LOG_FILE=%LOG_DIR%\StartApp.log"
 
 REM ============================================================
 REM LOG HEADER
@@ -27,6 +38,7 @@ REM ============================================================
   echo ============================================================
   echo [%date% %time%] [Launcher] Session start
   echo ROOT_DIR=%ROOT_DIR%
+  echo CODE_DIR=%CODE_DIR%
   echo VENV_DIR=%VENV_DIR%
   echo PORT=%STREAMLIT_PORT%
   echo ============================================================
@@ -35,9 +47,9 @@ REM ============================================================
 REM ============================================================
 REM VALIDATION
 REM ============================================================
-if not exist "%ROOT_DIR%\app.py" (
+if not exist "%APP_FILE%" (
   echo [%date% %time%] [Launcher] ERROR: app.py not found>> "%LOG_FILE%"
-  echo ERROR: app.py not found in root directory.
+  echo ERROR: app.py not found in CODE directory.
   pause
   echo.>> "%LOG_FILE%"
   exit /b 1
@@ -123,9 +135,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "%ROOT_DIR%\startup.py" (
+if not exist "%STARTUP_FILE%" (
   call :LOG "ERROR: startup.py not found."
-  echo ERROR: startup.py not found in root directory.
+  echo ERROR: startup.py not found in CODE directory.
   pause
   echo.>> "%LOG_FILE%"
   exit /b 1
@@ -133,7 +145,7 @@ if not exist "%ROOT_DIR%\startup.py" (
 
 call :LOG "Running startup.py..."
 set "STARTUP_CALLER=StartApp.bat"
-"%VENV_DIR%\Scripts\python.exe" "%ROOT_DIR%\startup.py" >> "%LOG_FILE%" 2>&1
+"%VENV_DIR%\Scripts\python.exe" "%STARTUP_FILE%" >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
   call :LOG "ERROR: startup.py failed."
   echo ERROR: startup.py failed. Check logs for details.
@@ -144,7 +156,7 @@ if errorlevel 1 (
 call :LOG "startup.py completed."
 
 call :LOG "Starting server..."
-start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "%ROOT_DIR%\app.py" ^
+start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "%APP_FILE%" ^
   --server.port=%STREAMLIT_PORT% ^
   --server.headless=true ^
   --browser.gatherUsageStats=false ^

@@ -13,7 +13,7 @@ import base64
 import config
 import utils
 
-LOGGER = utils.get_page_logger("Home Page")
+LOGGER = utils.get_page_logger("Home")
 
 # ============================================================
 # PAGE CONFIG
@@ -25,7 +25,10 @@ st.set_page_config(
 utils.log_page_open_once("home_page", LOGGER)
 if "_home_render_logged" not in st.session_state:
     st.session_state._home_render_logged = True
-    LOGGER.info("Rendering home page cards for Tasks, FedEx, and Packaging.")
+    LOGGER.info("Render navigation cards.")
+if "_home_sections_logged" not in st.session_state:
+    st.session_state._home_sections_logged = True
+    LOGGER.info("Sections available | tasks=2 fedex=1 packaging=1")
 
 # ============================================================
 # GLOBAL STYLING (MATCH TASK TRACKER — SAFE FOR SIDEBAR)

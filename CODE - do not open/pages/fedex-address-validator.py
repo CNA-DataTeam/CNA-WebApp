@@ -38,7 +38,7 @@ from openpyxl import load_workbook
 import config
 import utils
 
-LOGGER = utils.get_page_logger("FedEx Address Validator Page")
+LOGGER = utils.get_page_logger("FedEx Address Validator")
 
 # ============================================================
 # PAGE CONFIG (MUST BE FIRST STREAMLIT CALL)
@@ -50,7 +50,7 @@ st.set_page_config(
 utils.log_page_open_once("fedex_address_validator_page", LOGGER)
 if "_fedex_render_logged" not in st.session_state:
     st.session_state._fedex_render_logged = True
-    LOGGER.info("Rendering FedEx address validator page.")
+    LOGGER.info("Render UI.")
 
 # ============================================================
 # GLOBAL STYLING / HEADER
@@ -430,6 +430,29 @@ if invoice_date_col:
         view_df = view_df[(invoice_dates >= start_date) & (invoice_dates <= end_date)]
 if status_filter:
     view_df = view_df[view_df["Residential Match"].isin(status_filter)]
+
+_start_date_text = str(start_date) if "start_date" in locals() else ""
+_end_date_text = str(end_date) if "end_date" in locals() else ""
+filter_signature = (
+    tuple(sorted(status_filter)),
+    tuple(sorted(state_filter)),
+    tuple(sorted(service_filter)),
+    _start_date_text,
+    _end_date_text,
+)
+if st.session_state.get("_fedex_filter_signature") != filter_signature:
+    st.session_state._fedex_filter_signature = filter_signature
+    LOGGER.info(
+        "Filters updated | status=%s states=%s services=%s date_range=%s..%s",
+        len(status_filter),
+        len(state_filter),
+        len(service_filter),
+        _start_date_text,
+        _end_date_text,
+    )
+if st.session_state.get("_fedex_last_view_rows") != len(view_df):
+    st.session_state._fedex_last_view_rows = len(view_df)
+    LOGGER.info("Rows visible after filter | rows=%s", len(view_df))
 
 
 # ============================================================
