@@ -22,6 +22,8 @@ LOGGER = utils.get_program_logger(__file__, "App")
 LOGGER.info("App bootstrap started.")
 if _AUTOREFRESH_PRELOAD_ERROR is not None:
     LOGGER.warning("Auto-refresh preload failed: %s", _AUTOREFRESH_PRELOAD_ERROR)
+is_admin_user = utils.is_current_user_admin()
+LOGGER.info("Admin access check | user='%s' is_admin=%s", utils.get_os_user(), is_admin_user)
 
 # Define pages and their grouping for navigation
 pages = {
@@ -39,6 +41,11 @@ pages = {
         st.Page(str(APP_DIR / "pages" / "packaging-estimator.py"), title="Estimator"),
     ],
 }
+
+if is_admin_user:
+    pages["Tasks"].append(
+        st.Page(str(APP_DIR / "pages" / "tasks-management.py"), title="Management"),
+    )
 
 # Initialize and run the navigation
 navigation = st.navigation(pages)

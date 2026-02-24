@@ -29,16 +29,16 @@ What it does:
     - Data loading:
         * load_recent_tasks(root, user_key, limit) -> DataFrame (today’s tasks)
         * load_all_completed_tasks(base_dir) -> DataFrame (historical)
-        * load_tasks(tasks_xlsx_path) -> DataFrame (active tasks)
+        * load_tasks() -> DataFrame (active tasks)
         * load_accounts(personnel_dir) -> list[str] (company groups)
-        * load_user_fullname_map(tasks_xlsx_path) -> dict[user_login->full name]
-        * get_full_name_for_user(tasks_xlsx_path, user_login) -> str
-        * load_all_user_full_names(tasks_xlsx_path) -> list[str]
+        * load_user_fullname_map() -> dict[user_login->full name]
+        * get_full_name_for_user(..., user_login) -> str
+        * load_all_user_full_names() -> list[str]
 
 Inputs:
     - Paths and constants from config.py
     - Parquet directories (completed tasks, live activity, cached personnel)
-    - Excel file path for task/user mappings
+    - Cached parquet files for task and user mappings
 
 Outputs:
     - Consistent dataframes/lists/dicts for pages to render
@@ -668,16 +668,129 @@ def load_all_user_full_names(tasks_xlsx_path: str | None = None) -> list[str]:
     names = names.dropna().astype(str).str.strip()
     return sorted(n for n in names.unique() if n)
 
+
+def _normalize_column_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def _find_column_by_alias(df: pd.DataFrame, aliases: list[str]) -> str | None:
+    if df.empty:
+        return None
+    alias_set = {_normalize_column_name(a) for a in aliases}
+    for col in df.columns:
+        if _normalize_column_name(str(col)) in alias_set:
+            return str(col)
+    return None
+
+
+def _coerce_bool_like(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    try:
+        if pd.isna(value):
+            return False
+    except Exception:
+        pass
+    if isinstance(value, (int, float)):
+        return float(value) != 0.0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    return text in {"admin", "administrator"}
+
+
+def _normalize_login_key(value: object) -> str:
+    text = str(value).strip().lower()
+    if not text:
+        return ""
+    text = text.replace("/", "\\")
+    if "\\" in text:
+        text = text.split("\\")[-1]
+    if "@" in text:
+        text = text.split("@")[0]
+    return text.strip()
+
+
+@st.cache_data(ttl=300)
+def load_users_table() -> pd.DataFrame:
+    """Load users.parquet from personnel storage."""
+    users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
+    try:
+        if not users_parquet.exists():
+            get_page_logger("Shared Utilities").warning("users.parquet not found in Personnel directory.")
+            return pd.DataFrame()
+        return pd.read_parquet(users_parquet)
+    except Exception as exc:
+        get_page_logger("Shared Utilities").exception("Failed to read users.parquet: %s", exc)
+        return pd.DataFrame()
+
+
+def is_user_admin(user_login: str, users_df: pd.DataFrame | None = None) -> bool:
+    """Return True when the user is marked as admin in users.parquet."""
+    lookup_user = str(user_login).strip().lower()
+    lookup_key = _normalize_login_key(user_login)
+    if not lookup_user:
+        return False
+
+    df = users_df.copy() if isinstance(users_df, pd.DataFrame) else load_users_table()
+    if df.empty:
+        return False
+
+    user_col = _find_column_by_alias(
+        df,
+        ["User", "UserLogin", "Login", "Username", "User Name", "NetworkLogin", "SamAccountName"],
+    )
+    if not user_col:
+        return False
+
+    user_series = df[user_col].astype(str).str.strip().str.lower()
+    user_key_series = user_series.map(_normalize_login_key)
+    matched = df[(user_series == lookup_user) | (user_key_series == lookup_key)]
+    if matched.empty:
+        return False
+
+    admin_col = _find_column_by_alias(
+        matched,
+        ["IsAdmin", "Admin", "Is Admin", "IsAdministrator", "TaskAdmin", "CanManageTasks"],
+    )
+    if admin_col:
+        return bool(matched[admin_col].map(_coerce_bool_like).any())
+
+    role_col = _find_column_by_alias(
+        matched,
+        ["Role", "UserRole", "Permission", "Permissions", "AccessLevel"],
+    )
+    if role_col:
+        role_series = matched[role_col].fillna("").astype(str).str.strip().str.lower()
+        return bool(role_series.isin({"admin", "administrator"}).any())
+
+    for col in matched.columns:
+        if "admin" in _normalize_column_name(str(col)):
+            return bool(matched[col].map(_coerce_bool_like).any())
+
+    return False
+
+
+def is_current_user_admin() -> bool:
+    """Return True when the current OS user is marked admin in users.parquet."""
+    return is_user_admin(get_os_user())
+
+
 @st.cache_data(ttl=3600)
 def load_tasks(tasks_xlsx_path: str | None = None) -> pd.DataFrame:
-    """Load active tasks from startup output tasks.parquet."""
+    """Load active tasks from tasks.parquet managed by Tasks Management."""
+    _ = tasks_xlsx_path  # Backward-compatible arg kept intentionally.
     try:
         tasks_parquet = Path(config.PERSONNEL_DIR) / "tasks.parquet"
         if not tasks_parquet.exists():
             get_page_logger("Shared Utilities").warning(
                 "tasks.parquet not found in Personnel directory."
             )
-            st.error("tasks.parquet not found in Personnel directory. Run startup.py first.")
+            st.error("tasks.parquet not found in Personnel directory. Add tasks in Tasks Management.")
             return pd.DataFrame()
         df = pd.read_parquet(tasks_parquet)
     except Exception as e:

@@ -8,9 +8,10 @@ What it does:
     - Locates the locally-synced Task-Tracker folder (SharePoint/OneDrive).
     - Writes/refreshes derived datasets into cached parquet files on the network:
         * accounts_<YYYY-MM-DD>.parquet (daily)
-        * tasks.parquet (latest)
         * users.parquet (latest)
     - Avoids rework if today's accounts parquet already exists.
+    - Does NOT regenerate tasks.parquet. Task definitions are managed only
+      through the Tasks Management page.
 
 Utils used:
     - None (startup runs as a standalone prep step; avoids importing Streamlit).
@@ -19,7 +20,7 @@ Inputs:
     - config.POTENTIAL_ROOTS / config.DOCUMENT_LIBRARIES / config.RELATIVE_APP_PATH
       to discover the local Task-Tracker root
     - Excel sources:
-        * TasksAndTargets.xlsx (Tasks sheet, Users sheet)
+        * TasksAndTargets.xlsx (Users sheet)
         * CNA Personnel - Temporary.xlsx (CNA Personnel sheet)
 
 Outputs:
@@ -114,14 +115,15 @@ def get_paths() -> tuple[Path, Path, Path]:
     Determine output directory and source Excel file paths.
     Returns:
         output_dir: Directory for output parquet files (UNC network path).
-        tasks_xlsx: Path to the Task-Tracker Excel file (TasksAndTargets.xlsx).
+        tracker_xlsx: Path to the Task-Tracker Excel file (TasksAndTargets.xlsx)
+            used for Users sheet refresh.
         accounts_xlsx: Path to the accounts Excel file (CNA Personnel - Temporary.xlsx).
     """
     task_tracker_root = find_task_tracker_root()
     output_dir = config.PERSONNEL_DIR  # UNC path for cached data
-    tasks_xlsx = task_tracker_root / config.TASKS_XLSX_NAME
+    tracker_xlsx = task_tracker_root / config.TASKS_XLSX_NAME
     accounts_xlsx = task_tracker_root.parents[2] / "Data and Analytics" / "Resources" / config.ACCOUNTS_XLSX_NAME
-    return output_dir, tasks_xlsx, accounts_xlsx
+    return output_dir, tracker_xlsx, accounts_xlsx
 
 def get_todays_filename(prefix: str) -> str:
     """Generate a filename with today's date for the given prefix."""
@@ -150,31 +152,57 @@ def load_accounts_excel(path: Path) -> pd.DataFrame:
     result = result[(result["Company Group USE"] != "nan") | (result["CustomerCode"] != "nan")]
     return result
 
-def load_tasks_excel(path: Path) -> pd.DataFrame:
-    """Load active tasks from the Tasks Excel file (Tasks sheet)."""
-    df = pd.read_excel(path, sheet_name="Tasks", engine="openpyxl")
-    if df.empty:
-        return pd.DataFrame()
-    # Filter active tasks and clean text fields
-    df_active = df[df["IsActive"].astype(int) == 1].copy()
-    df_active["TaskName"] = df_active["TaskName"].astype(str).str.strip()
-    df_active["TaskCadence"] = df_active["TaskCadence"].astype(str).str.strip().str.title()
-    return df_active
-
 def load_users_excel(path: Path) -> pd.DataFrame:
     """Load user login to full name mapping from the Tasks Excel file (Users sheet)."""
     df = pd.read_excel(path, sheet_name="Users", engine="openpyxl")
     if df.empty:
         return pd.DataFrame()
+
     cols = {str(c).strip().lower(): c for c in df.columns}
-    user_col = cols.get("user")
-    full_col = cols.get("full name") or cols.get("fullname")
+
+    def _find_col(candidates: list[str]) -> str | None:
+        normalized = {
+            "".join(ch for ch in key if ch.isalnum()): key
+            for key in cols.keys()
+        }
+        for candidate in candidates:
+            key = candidate.strip().lower()
+            if key in cols:
+                return cols[key]
+            normalized_key = "".join(ch for ch in key if ch.isalnum())
+            if normalized_key in normalized:
+                return cols[normalized[normalized_key]]
+        return None
+
+    user_col = _find_col(["user", "user login", "username", "login"])
+    full_col = _find_col(["full name", "fullname", "name"])
+    admin_col = _find_col(["isadmin", "is admin", "admin", "is_administrator", "isadministrator"])
     if not user_col or not full_col:
         return pd.DataFrame()
-    df_users = df[[user_col, full_col]].copy().dropna(subset=[user_col])
-    df_users.columns = ["User", "Full Name"]
+
+    keep_cols = [user_col, full_col]
+    if admin_col:
+        keep_cols.append(admin_col)
+
+    df_users = df[keep_cols].copy().dropna(subset=[user_col])
+    rename_map = {
+        user_col: "User",
+        full_col: "Full Name",
+    }
+    if admin_col:
+        rename_map[admin_col] = "IsAdmin"
+    df_users = df_users.rename(columns=rename_map)
+
     df_users["User"] = df_users["User"].astype(str).str.strip()
     df_users["Full Name"] = df_users["Full Name"].astype(str).str.strip()
+    if "IsAdmin" not in df_users.columns:
+        df_users["IsAdmin"] = 0
+    df_users["IsAdmin"] = (
+        pd.to_numeric(df_users["IsAdmin"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .clip(lower=0, upper=1)
+    )
     return df_users
 
 def save_parquet(df: pd.DataFrame, output_dir: Path, filename: str) -> Path:
@@ -190,12 +218,12 @@ def main() -> None:
     log_run_context()
     LOGGER.info("Running startup check: %s", date.today().isoformat())
     try:
-        output_dir, tasks_xlsx, accounts_xlsx = get_paths()
+        output_dir, tracker_xlsx, accounts_xlsx = get_paths()
     except Exception as e:
         LOGGER.error("Initialization failed: %s", e)
         return
     LOGGER.info("Output directory: %s", output_dir)
-    LOGGER.info("Tasks Excel: %s", tasks_xlsx)
+    LOGGER.info("Users source Excel: %s", tracker_xlsx)
     LOGGER.info("Accounts Excel: %s", accounts_xlsx)
     # Handle accounts data
     if todays_file_exists(output_dir, "accounts"):
@@ -210,17 +238,9 @@ def main() -> None:
             return
         output_path = save_parquet(accounts_df, output_dir, get_todays_filename("accounts"))
         LOGGER.info("Saved accounts data: %s", output_path)
-    # Handle tasks data (overwrite daily)
-    try:
-        tasks_df = load_tasks_excel(tasks_xlsx)
-        if not tasks_df.empty:
-            save_parquet(tasks_df, output_dir, "tasks.parquet")
-            LOGGER.info("Saved tasks data: tasks.parquet")
-    except Exception as e:
-        LOGGER.error("Failed to load tasks Excel: %s", e)
     # Handle users data (login to full name mapping)
     try:
-        users_df = load_users_excel(tasks_xlsx)
+        users_df = load_users_excel(tracker_xlsx)
         if not users_df.empty:
             save_parquet(users_df, output_dir, "users.parquet")
             LOGGER.info("Saved users data: users.parquet")

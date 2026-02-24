@@ -53,6 +53,18 @@ US_STATE_CODES = [
     "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
     "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
 ]
+PERISHABLE_TYPE_OPTIONS: list[tuple[str, str]] = [
+    ("Alive", "A"),
+    ("Deep Frozen", "Z"),
+    ("Deep Refrigerated", "G"),
+    ("Defrosted", "D"),
+    ("Frozen", "F"),
+    ("KeepCool", "K"),
+    ("None", "N"),
+    ("Refrigerated", "R"),
+]
+PERISHABLE_CODE_TO_LABEL = {code: label for label, code in PERISHABLE_TYPE_OPTIONS}
+PERISHABLE_CODE_OPTIONS = [code for _, code in PERISHABLE_TYPE_OPTIONS]
 
 
 # ============================================================
@@ -123,6 +135,14 @@ if "pe_results" not in st.session_state:
     st.session_state.pe_results = {}
 if "pe_errors" not in st.session_state:
     st.session_state.pe_errors = []
+if "pe_dimension_unit" not in st.session_state:
+    st.session_state.pe_dimension_unit = "in"
+if "pe_weight_unit" not in st.session_state:
+    st.session_state.pe_weight_unit = "lb"
+if "pe_refrigeration_required" not in st.session_state:
+    st.session_state.pe_refrigeration_required = False
+if "pe_perishable_rows" not in st.session_state:
+    st.session_state.pe_perishable_rows = [{"item_number": "", "perishable_code": ""}]
 
 
 # ============================================================
@@ -154,6 +174,24 @@ def normalize_col_name(col_name: str) -> str:
     return "".join(ch for ch in str(col_name).lower() if ch.isalnum())
 
 
+def find_matching_column(columns: list[str], candidates: list[str]) -> str | None:
+    if not columns:
+        return None
+
+    normalized_map: dict[str, str] = {}
+    for col in columns:
+        normalized_map.setdefault(normalize_col_name(col), col)
+
+    for candidate in candidates:
+        if candidate in columns:
+            return candidate
+        normalized_candidate = normalize_col_name(candidate)
+        if normalized_candidate in normalized_map:
+            return normalized_map[normalized_candidate]
+
+    return None
+
+
 def find_default_column(columns: list[str], targets: set[str], fallback_index: int) -> int:
     normalized = [normalize_col_name(col) for col in columns]
     for idx, col_name in enumerate(normalized):
@@ -168,6 +206,74 @@ def normalize_item_number(value: Any) -> str:
     if isinstance(value, float) and pd.isna(value):
         return ""
     return "".join(str(value).split()).upper()
+
+
+def get_uploaded_item_numbers(input_df: pd.DataFrame) -> list[str]:
+    if input_df.empty or "ItemNumber" not in input_df.columns:
+        return []
+
+    unique_item_numbers: list[str] = []
+    seen: set[str] = set()
+    for raw_item in input_df["ItemNumber"].tolist():
+        item_number = normalize_item_number(raw_item)
+        if item_number and item_number not in seen:
+            seen.add(item_number)
+            unique_item_numbers.append(item_number)
+    return unique_item_numbers
+
+
+def normalize_perishable_rows(
+    rows: Any,
+    valid_item_numbers: set[str],
+) -> list[dict[str, str]]:
+    normalized_rows: list[dict[str, str]] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            item_number = normalize_item_number(row.get("item_number"))
+            perishable_code = str(row.get("perishable_code", "")).strip().upper()
+            if item_number and item_number not in valid_item_numbers:
+                item_number = ""
+            if perishable_code not in PERISHABLE_CODE_TO_LABEL:
+                perishable_code = ""
+            normalized_rows.append(
+                {
+                    "item_number": item_number,
+                    "perishable_code": perishable_code,
+                }
+            )
+
+    if not normalized_rows:
+        normalized_rows = [{"item_number": "", "perishable_code": ""}]
+
+    while len(normalized_rows) > 1:
+        last_row = normalized_rows[-1]
+        previous_row = normalized_rows[-2]
+        if (
+            not last_row["item_number"]
+            and not last_row["perishable_code"]
+            and not previous_row["item_number"]
+            and not previous_row["perishable_code"]
+        ):
+            normalized_rows.pop()
+        else:
+            break
+
+    if normalized_rows[-1]["item_number"] and normalized_rows[-1]["perishable_code"]:
+        normalized_rows.append({"item_number": "", "perishable_code": ""})
+
+    return normalized_rows
+
+
+def build_perishable_override_map(rows: list[dict[str, str]]) -> dict[str, str]:
+    overrides: dict[str, str] = {}
+    for row in rows:
+        item_number = normalize_item_number(row.get("item_number"))
+        perishable_code = str(row.get("perishable_code", "")).strip().upper()
+        if item_number and perishable_code in PERISHABLE_CODE_TO_LABEL:
+            overrides[item_number] = perishable_code
+    return overrides
 
 
 def parse_quantity(value: Any) -> int | None:
@@ -394,6 +500,7 @@ def build_verified_payload(
     verified_df: pd.DataFrame,
     requested_df: pd.DataFrame,
     warehouse_number: int,
+    perishable_type_overrides: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     if verified_df.empty:
         return []
@@ -411,7 +518,17 @@ def build_verified_payload(
     default_marginal_length = float(ui_cfg.get("default_marginal_length", 0.0) or 0.0)
     default_marginal_width = float(ui_cfg.get("default_marginal_width", 0.0) or 0.0)
     default_marginal_height = float(ui_cfg.get("default_marginal_height", 0.0) or 0.0)
-    default_perishable_type = str(ui_cfg.get("default_perishable_type", "N")).strip() or "N"
+    default_perishable_type = str(ui_cfg.get("default_perishable_type", "N")).strip().upper() or "N"
+    if default_perishable_type not in PERISHABLE_CODE_TO_LABEL:
+        default_perishable_type = "N"
+
+    normalized_overrides: dict[str, str] = {}
+    if perishable_type_overrides:
+        for raw_item_number, raw_perishable_code in perishable_type_overrides.items():
+            item_number = normalize_item_number(raw_item_number)
+            perishable_code = str(raw_perishable_code).strip().upper()
+            if item_number and perishable_code in PERISHABLE_CODE_TO_LABEL:
+                normalized_overrides[item_number] = perishable_code
 
     payload: list[dict[str, Any]] = []
     for row in verified_df.to_dict(orient="records"):
@@ -426,6 +543,7 @@ def build_verified_payload(
         width = to_float(row.get("WidthInInches"), 0.0)
         height = to_float(row.get("HeightInInches"), 0.0)
         volume = to_float(row.get("AverageVolume"), length * width * height)
+        perishable_type = normalized_overrides.get(item_number, default_perishable_type)
 
         payload.append(
             {
@@ -444,7 +562,7 @@ def build_verified_payload(
                 "marginalWidth": default_marginal_width,
                 "canBeNested": coerce_verified_value(row.get("Can Nest?")),
                 "volume": volume,
-                "perishableType": default_perishable_type,
+                "perishableType": perishable_type,
             }
         )
 
@@ -506,16 +624,57 @@ def normalize_api_response_to_df(api_response: Any) -> pd.DataFrame:
         return pd.DataFrame({"value": api_response})
 
     if isinstance(api_response, dict):
+        for key in ("packages", "Packages", "data", "results", "items"):
+            nested = api_response.get(key)
+            if isinstance(nested, dict):
+                api_response = nested
+                break
+            if isinstance(nested, list) and nested and all(isinstance(x, dict) for x in nested):
+                return pd.json_normalize(nested)
+
         package_rows: list[dict[str, Any]] = []
-        for package_id, package in api_response.items():
+        for idx, (package_id, package) in enumerate(api_response.items(), start=1):
             if not isinstance(package, dict):
                 continue
-            package_num = to_int(package_id, 0)
-            volume = to_float(package.get("volume", package.get("Volume", 0.0)), 0.0)
-            weight = to_float(package.get("weight", package.get("Weight", 0.0)), 0.0)
+            package_num = to_int(package_id, -1)
+            if package_num <= 0:
+                package_num = to_int(
+                    package.get(
+                        "packageNumber",
+                        package.get(
+                            "PackageNumber",
+                            package.get("package_number", package.get("Package Number", -1)),
+                        ),
+                    ),
+                    -1,
+                )
+            if package_num <= 0:
+                package_num = idx
+
+            volume = to_float(
+                package.get(
+                    "volume",
+                    package.get(
+                        "Volume",
+                        package.get("packageVolume", package.get("totalVolume", 0.0)),
+                    ),
+                ),
+                0.0,
+            )
+            weight = to_float(
+                package.get(
+                    "weight",
+                    package.get(
+                        "Weight",
+                        package.get("packageWeight", package.get("totalWeight", 0.0)),
+                    ),
+                ),
+                0.0,
+            )
             package_rows.append(
                 {
                     "Package Number": package_num,
+                    "Items": _extract_item_count(package),
                     "Volume": volume,
                     "Weight": weight,
                 }
@@ -532,6 +691,462 @@ def normalize_api_response_to_df(api_response: Any) -> pd.DataFrame:
         return pd.json_normalize([api_response])
 
     return pd.DataFrame({"value": [str(api_response)]})
+
+
+def _extract_item_count(package: dict[str, Any]) -> int:
+    direct_candidates = [
+        "itemCount",
+        "ItemCount",
+        "itemsCount",
+        "ItemsCount",
+        "quantity",
+        "Quantity",
+        "qty",
+        "Qty",
+        "totalItems",
+        "TotalItems",
+    ]
+    for key in direct_candidates:
+        if key in package:
+            value = package.get(key)
+            if isinstance(value, (list, dict)):
+                continue
+            return max(0, to_int(value, 0))
+
+    collection_candidates = ["items", "Items", "itemNumbers", "ItemNumbers", "packageItems", "PackageItems"]
+    quantity_keys = ["quantity", "Quantity", "qty", "Qty"]
+    for key in collection_candidates:
+        if key not in package:
+            continue
+        value = package.get(key)
+        if isinstance(value, list):
+            total = 0
+            for entry in value:
+                if isinstance(entry, dict):
+                    qty = 0
+                    for qty_key in quantity_keys:
+                        if qty_key in entry:
+                            qty = to_int(entry.get(qty_key), 0)
+                            break
+                    total += qty if qty > 0 else 1
+                else:
+                    total += 1
+            return total
+        if isinstance(value, dict):
+            numeric_total = 0
+            numeric_found = False
+            for maybe_qty in value.values():
+                qty = to_int(maybe_qty, -1)
+                if qty >= 0:
+                    numeric_total += qty
+                    numeric_found = True
+            if numeric_found:
+                return max(0, numeric_total)
+            return len(value)
+
+    return 0
+
+
+def build_package_details_pivot(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df.empty:
+        return pd.DataFrame(columns=["Package Number", "Items", "Volume", "Weight"])
+
+    details_df = raw_df.copy()
+    columns = details_df.columns.tolist()
+    package_col = find_matching_column(
+        columns,
+        ["Package Number", "PackageNumber", "packageNumber", "package_number", "PackageId", "packageId", "id"],
+    )
+    items_col = find_matching_column(
+        columns,
+        ["Items", "ItemCount", "itemCount", "itemsCount", "Quantity", "quantity", "Qty", "qty", "totalItems"],
+    )
+    volume_col = find_matching_column(
+        columns,
+        ["Volume", "volume", "AverageVolume", "packageVolume", "totalVolume"],
+    )
+    weight_col = find_matching_column(
+        columns,
+        ["Weight", "weight", "WeightInPounds", "packageWeight", "totalWeight"],
+    )
+
+    if package_col:
+        details_df["Package Number"] = details_df[package_col]
+    else:
+        details_df["Package Number"] = details_df.index + 1
+    if items_col:
+        details_df["Items"] = details_df[items_col]
+    else:
+        details_df["Items"] = 0
+    if volume_col:
+        details_df["Volume"] = details_df[volume_col]
+    else:
+        details_df["Volume"] = 0.0
+    if weight_col:
+        details_df["Weight"] = details_df[weight_col]
+    else:
+        details_df["Weight"] = 0.0
+
+    package_numbers = _safe_numeric(details_df["Package Number"]).fillna(0).astype(int)
+    if (package_numbers <= 0).any():
+        next_package_num = max(0, int(package_numbers.max()))
+        normalized_package_numbers: list[int] = []
+        for package_num in package_numbers.tolist():
+            if package_num > 0:
+                normalized_package_numbers.append(package_num)
+            else:
+                next_package_num += 1
+                normalized_package_numbers.append(next_package_num)
+        package_numbers = pd.Series(normalized_package_numbers, index=details_df.index, dtype="int64")
+    details_df["Package Number"] = package_numbers
+    details_df["Items"] = _safe_numeric(details_df["Items"]).fillna(0)
+    details_df["Volume"] = _safe_numeric(details_df["Volume"]).fillna(0.0)
+    details_df["Weight"] = _safe_numeric(details_df["Weight"]).fillna(0.0)
+
+    pivot_df = (
+        details_df.pivot_table(
+            index="Package Number",
+            values=["Items", "Volume", "Weight"],
+            aggfunc="sum",
+        )
+        .reset_index()
+        .sort_values("Package Number")
+        .reset_index(drop=True)
+    )
+    pivot_df["Items"] = pivot_df["Items"].round(0).astype(int)
+    return pivot_df
+
+
+def _pick_dict_value(record: dict[str, Any], keys: list[str], default: Any = None) -> Any:
+    for key in keys:
+        if key in record:
+            return record.get(key)
+
+    normalized_map: dict[str, Any] = {}
+    for raw_key in record.keys():
+        normalized_map.setdefault(normalize_col_name(str(raw_key)), raw_key)
+
+    for key in keys:
+        normalized_key = normalize_col_name(key)
+        if normalized_key in normalized_map:
+            return record.get(normalized_map[normalized_key])
+
+    return default
+
+
+def _extract_package_candidates(api_response: Any) -> list[tuple[Any, dict[str, Any]]]:
+    if api_response is None:
+        return []
+
+    if isinstance(api_response, list):
+        return [
+            (index + 1, package)
+            for index, package in enumerate(api_response)
+            if isinstance(package, dict)
+        ]
+
+    if not isinstance(api_response, dict):
+        return []
+
+    for key in ("packages", "Packages", "data", "results", "items"):
+        nested = api_response.get(key)
+        if isinstance(nested, dict):
+            if all(isinstance(value, dict) for value in nested.values()):
+                return list(nested.items())
+        if isinstance(nested, list):
+            return [
+                (index + 1, package)
+                for index, package in enumerate(nested)
+                if isinstance(package, dict)
+            ]
+
+    if all(isinstance(value, dict) for value in api_response.values()):
+        return list(api_response.items())
+
+    return [(1, api_response)]
+
+
+def _extract_item_rows_from_package(package: dict[str, Any]) -> list[dict[str, Any]]:
+    item_number_keys = ["itemNumber", "ItemNumber", "item", "Item", "sku", "Sku", "itemNo", "item_number"]
+    quantity_keys = ["quantity", "Quantity", "qty", "Qty", "itemCount", "ItemCount", "count", "Count"]
+    volume_keys = ["volume", "Volume", "itemVolume", "ItemVolume"]
+    weight_keys = ["weight", "Weight", "itemWeight", "ItemWeight"]
+
+    collection = _pick_dict_value(
+        package,
+        ["items", "Items", "packageItems", "PackageItems", "itemNumbers", "ItemNumbers", "contents", "Contents"],
+    )
+
+    item_rows: list[dict[str, Any]] = []
+
+    if isinstance(collection, list):
+        for index, entry in enumerate(collection, start=1):
+            if isinstance(entry, dict):
+                item_number = normalize_item_number(_pick_dict_value(entry, item_number_keys, ""))
+                quantity = to_float(_pick_dict_value(entry, quantity_keys, 0.0), 0.0)
+                volume = to_float(_pick_dict_value(entry, volume_keys, 0.0), 0.0)
+                weight = to_float(_pick_dict_value(entry, weight_keys, 0.0), 0.0)
+            else:
+                item_number = normalize_item_number(entry)
+                quantity = 1.0 if item_number else 0.0
+                volume = 0.0
+                weight = 0.0
+
+            if quantity <= 0 and (item_number or volume > 0 or weight > 0):
+                quantity = 1.0
+            if not item_number and (quantity > 0 or volume > 0 or weight > 0):
+                item_number = f"Item {index}"
+            if item_number:
+                item_rows.append(
+                    {
+                        "Item Number": item_number,
+                        "Quantity": quantity,
+                        "Volume": volume,
+                        "Weight": weight,
+                    }
+                )
+
+    elif isinstance(collection, dict):
+        for index, (raw_item_key, raw_item_value) in enumerate(collection.items(), start=1):
+            item_number = normalize_item_number(raw_item_key)
+            quantity = 0.0
+            volume = 0.0
+            weight = 0.0
+
+            if isinstance(raw_item_value, dict):
+                quantity = to_float(_pick_dict_value(raw_item_value, quantity_keys, 0.0), 0.0)
+                volume = to_float(_pick_dict_value(raw_item_value, volume_keys, 0.0), 0.0)
+                weight = to_float(_pick_dict_value(raw_item_value, weight_keys, 0.0), 0.0)
+            else:
+                quantity = to_float(raw_item_value, 0.0)
+
+            if quantity <= 0 and (item_number or volume > 0 or weight > 0):
+                quantity = 1.0
+            if not item_number and (quantity > 0 or volume > 0 or weight > 0):
+                item_number = f"Item {index}"
+            if item_number:
+                item_rows.append(
+                    {
+                        "Item Number": item_number,
+                        "Quantity": quantity,
+                        "Volume": volume,
+                        "Weight": weight,
+                    }
+                )
+
+    if not item_rows:
+        single_item_number = normalize_item_number(_pick_dict_value(package, item_number_keys, ""))
+        if single_item_number:
+            quantity = to_float(_pick_dict_value(package, quantity_keys, 1.0), 1.0)
+            volume = to_float(_pick_dict_value(package, volume_keys, 0.0), 0.0)
+            weight = to_float(_pick_dict_value(package, weight_keys, 0.0), 0.0)
+            item_rows.append(
+                {
+                    "Item Number": single_item_number,
+                    "Quantity": max(1.0, quantity),
+                    "Volume": volume,
+                    "Weight": weight,
+                }
+            )
+
+    return item_rows
+
+
+def build_package_matrix_tables(api_response: Any) -> tuple[pd.DataFrame, dict[int, pd.DataFrame]]:
+    candidates = _extract_package_candidates(api_response)
+    if not candidates:
+        return pd.DataFrame(columns=["Package Number", "Quantity", "Volume", "Weight"]), {}
+
+    package_rows: list[dict[str, Any]] = []
+    item_rows_by_package: dict[int, list[dict[str, Any]]] = {}
+
+    for index, (raw_package_key, package) in enumerate(candidates, start=1):
+        package_number = to_int(raw_package_key, -1)
+        if package_number <= 0:
+            package_number = to_int(
+                _pick_dict_value(
+                    package,
+                    ["packageNumber", "PackageNumber", "package_number", "Package Number", "id", "Id"],
+                    -1,
+                ),
+                -1,
+            )
+        if package_number <= 0:
+            package_number = index
+
+        item_rows = _extract_item_rows_from_package(package)
+        package_quantity = to_float(
+            _pick_dict_value(
+                package,
+                ["quantity", "Quantity", "qty", "Qty", "itemCount", "ItemCount", "itemsCount", "totalItems"],
+                0.0,
+            ),
+            0.0,
+        )
+        package_volume = to_float(
+            _pick_dict_value(package, ["volume", "Volume", "packageVolume", "totalVolume"], 0.0),
+            0.0,
+        )
+        package_weight = to_float(
+            _pick_dict_value(package, ["weight", "Weight", "packageWeight", "totalWeight"], 0.0),
+            0.0,
+        )
+
+        if package_quantity <= 0:
+            if item_rows:
+                package_quantity = float(sum(to_float(item.get("Quantity"), 0.0) for item in item_rows))
+            else:
+                package_quantity = float(_extract_item_count(package))
+        if package_volume <= 0 and item_rows:
+            package_volume = float(sum(to_float(item.get("Volume"), 0.0) for item in item_rows))
+        if package_weight <= 0 and item_rows:
+            package_weight = float(sum(to_float(item.get("Weight"), 0.0) for item in item_rows))
+
+        package_rows.append(
+            {
+                "Package Number": package_number,
+                "Quantity": package_quantity,
+                "Volume": package_volume,
+                "Weight": package_weight,
+            }
+        )
+        if item_rows:
+            item_rows_by_package.setdefault(package_number, []).extend(item_rows)
+
+    package_df = pd.DataFrame(package_rows)
+    if package_df.empty:
+        return pd.DataFrame(columns=["Package Number", "Quantity", "Volume", "Weight"]), {}
+
+    package_df["Package Number"] = _safe_numeric(package_df["Package Number"]).fillna(0).astype(int)
+    package_df["Quantity"] = _safe_numeric(package_df["Quantity"]).fillna(0.0)
+    package_df["Volume"] = _safe_numeric(package_df["Volume"]).fillna(0.0)
+    package_df["Weight"] = _safe_numeric(package_df["Weight"]).fillna(0.0)
+    package_df = (
+        package_df.groupby("Package Number", as_index=False)[["Quantity", "Volume", "Weight"]]
+        .sum()
+        .sort_values("Package Number")
+        .reset_index(drop=True)
+    )
+
+    item_tables: dict[int, pd.DataFrame] = {}
+    for package_number, item_rows in item_rows_by_package.items():
+        if not item_rows:
+            continue
+        item_df = pd.DataFrame(item_rows)
+        if item_df.empty:
+            continue
+        item_df["Item Number"] = item_df["Item Number"].fillna("").map(normalize_item_number)
+        item_df["Quantity"] = _safe_numeric(item_df["Quantity"]).fillna(0.0)
+        item_df["Volume"] = _safe_numeric(item_df["Volume"]).fillna(0.0)
+        item_df["Weight"] = _safe_numeric(item_df["Weight"]).fillna(0.0)
+        item_df = (
+            item_df.groupby("Item Number", as_index=False)[["Quantity", "Volume", "Weight"]]
+            .sum()
+            .sort_values("Item Number")
+            .reset_index(drop=True)
+        )
+        item_tables[package_number] = item_df
+
+    return package_df, item_tables
+
+
+def format_quantity_value(value: Any) -> str:
+    numeric_value = to_float(value, 0.0)
+    if abs(numeric_value - round(numeric_value)) < 1e-9:
+        return f"{int(round(numeric_value)):,}"
+    return f"{numeric_value:,.2f}"
+
+
+def format_quantity_volume_weight_dataframe(
+    df: pd.DataFrame,
+    dimension_unit: str,
+    weight_unit: str,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    display_df = df.copy()
+    if "Quantity" in display_df.columns:
+        display_df["Quantity"] = _safe_numeric(display_df["Quantity"]).fillna(0.0).map(format_quantity_value)
+
+    return format_measurement_dataframe(display_df, dimension_unit, weight_unit)
+
+
+def _dimension_multiplier(dimension_unit: str) -> float:
+    return 1.0 if dimension_unit == "in" else 2.54
+
+
+def _weight_multiplier(weight_unit: str) -> float:
+    return 1.0 if weight_unit == "lb" else 0.45359237
+
+
+def _volume_multiplier(dimension_unit: str) -> float:
+    # API volume is in cubic inches; metric display should be cubic meters.
+    return 1.0 if dimension_unit == "in" else 0.000016387064
+
+
+def _safe_numeric(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce")
+
+
+def format_measurement_dataframe(
+    df: pd.DataFrame,
+    dimension_unit: str,
+    weight_unit: str,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    dim_label = "in" if dimension_unit == "in" else "cm"
+    weight_label = "lb" if weight_unit == "lb" else "kg"
+    volume_label = "in³" if dimension_unit == "in" else "m³"
+    dim_multiplier = _dimension_multiplier(dimension_unit)
+    weight_multiplier = _weight_multiplier(weight_unit)
+    volume_multiplier = _volume_multiplier(dimension_unit)
+
+    display_df = df.copy()
+
+    dimension_columns = ["LengthInInches", "WidthInInches", "HeightInInches", "length", "width", "height"]
+    weight_columns = ["WeightInPounds", "weight", "Weight"]
+    volume_columns = ["AverageVolume", "volume", "Volume"]
+
+    for col in dimension_columns:
+        if col in display_df.columns:
+            display_df[col] = (_safe_numeric(display_df[col]) * dim_multiplier).round(2)
+    for col in weight_columns:
+        if col in display_df.columns:
+            display_df[col] = (_safe_numeric(display_df[col]) * weight_multiplier).round(2)
+    for col in volume_columns:
+        if col in display_df.columns:
+            display_df[col] = (_safe_numeric(display_df[col]) * volume_multiplier).round(2)
+
+    rename_map: dict[str, str] = {}
+    if "LengthInInches" in display_df.columns:
+        rename_map["LengthInInches"] = f"Length ({dim_label})"
+    if "WidthInInches" in display_df.columns:
+        rename_map["WidthInInches"] = f"Width ({dim_label})"
+    if "HeightInInches" in display_df.columns:
+        rename_map["HeightInInches"] = f"Height ({dim_label})"
+    if "WeightInPounds" in display_df.columns:
+        rename_map["WeightInPounds"] = f"Weight ({weight_label})"
+    if "AverageVolume" in display_df.columns:
+        rename_map["AverageVolume"] = f"Volume ({volume_label})"
+    if "length" in display_df.columns and f"Length ({dim_label})" not in display_df.columns:
+        rename_map["length"] = f"Length ({dim_label})"
+    if "width" in display_df.columns and f"Width ({dim_label})" not in display_df.columns:
+        rename_map["width"] = f"Width ({dim_label})"
+    if "height" in display_df.columns and f"Height ({dim_label})" not in display_df.columns:
+        rename_map["height"] = f"Height ({dim_label})"
+    if "weight" in display_df.columns and f"Weight ({weight_label})" not in display_df.columns:
+        rename_map["weight"] = f"Weight ({weight_label})"
+    if "Weight" in display_df.columns and f"Weight ({weight_label})" not in display_df.columns:
+        rename_map["Weight"] = f"Weight ({weight_label})"
+    if "volume" in display_df.columns and f"Volume ({volume_label})" not in display_df.columns:
+        rename_map["volume"] = f"Volume ({volume_label})"
+    if "Volume" in display_df.columns and f"Volume ({volume_label})" not in display_df.columns:
+        rename_map["Volume"] = f"Volume ({volume_label})"
+
+    return display_df.rename(columns=rename_map)
 
 
 # ============================================================
@@ -754,7 +1369,9 @@ with preview_col:
     if standard_input_df.empty:
         st.info("Preview will appear here after input is provided.")
     else:
-        st.caption("Preview shows the first 5 items only.")
+        st.caption(
+            f"Preview shows the first 5 items only. {len(standard_input_df):,} items were loaded."
+        )
         st.dataframe(
             standard_input_df[["ItemNumber", "Quantity"]].head(5),
             width="stretch",
@@ -764,13 +1381,100 @@ with preview_col:
 
 with input_col:
     has_input_rows = not standard_input_df.empty
+    perishable_overrides: dict[str, str] = {}
+
+    if not has_input_rows:
+        st.session_state.pe_refrigeration_required = False
+        st.session_state.pe_perishable_rows = [{"item_number": "", "perishable_code": ""}]
+    else:
+        uploaded_item_numbers = get_uploaded_item_numbers(standard_input_df)
+        needs_refrigeration = st.toggle(
+            "Do items need refrigeration?",
+            key="pe_refrigeration_required",
+        )
+
+        if needs_refrigeration:
+            valid_item_numbers = set(uploaded_item_numbers)
+            perishable_rows = normalize_perishable_rows(
+                st.session_state.get("pe_perishable_rows", []),
+                valid_item_numbers,
+            )
+
+            if not uploaded_item_numbers:
+                st.session_state.pe_perishable_rows = [{"item_number": "", "perishable_code": ""}]
+                st.info("No uploaded item numbers available.")
+            else:
+                rows_before_render = len(perishable_rows)
+                for idx, row in enumerate(perishable_rows):
+                    row_item_col, row_type_col = st.columns([1.4, 1.3])
+                    item_options = [""] + uploaded_item_numbers
+                    current_item = row.get("item_number", "")
+                    if current_item not in item_options:
+                        current_item = ""
+                    item_index = item_options.index(current_item)
+
+                    type_options = [""] + PERISHABLE_CODE_OPTIONS
+                    current_type = row.get("perishable_code", "")
+                    if current_type not in type_options:
+                        current_type = ""
+                    type_index = type_options.index(current_type)
+
+                    with row_item_col:
+                        selected_item = st.selectbox(
+                            f"Perishable Item {idx + 1}",
+                            options=item_options,
+                            index=item_index,
+                            format_func=lambda item: "Select item..." if item == "" else item,
+                            key=f"pe_perishable_item_{idx}",
+                            label_visibility="collapsed",
+                        )
+                    with row_type_col:
+                        selected_type = st.selectbox(
+                            f"Perishable Type {idx + 1}",
+                            options=type_options,
+                            index=type_index,
+                            format_func=lambda code: (
+                                "Select type..."
+                                if code == ""
+                                else f"{PERISHABLE_CODE_TO_LABEL.get(code, code)} ({code})"
+                            ),
+                            key=f"pe_perishable_type_{idx}",
+                            label_visibility="collapsed",
+                        )
+
+                    perishable_rows[idx] = {
+                        "item_number": normalize_item_number(selected_item),
+                        "perishable_code": str(selected_type).strip().upper(),
+                    }
+
+                perishable_rows = normalize_perishable_rows(perishable_rows, valid_item_numbers)
+                st.session_state.pe_perishable_rows = perishable_rows
+                if len(perishable_rows) > rows_before_render:
+                    st.rerun()
+
+                perishable_overrides = build_perishable_override_map(perishable_rows)
+
+                selected_override_items = [
+                    row["item_number"]
+                    for row in perishable_rows
+                    if row.get("item_number") and row.get("perishable_code")
+                ]
+                if len(selected_override_items) != len(set(selected_override_items)):
+                    st.warning(
+                        "Duplicate item selections detected. The last selection for each item will be used."
+                    )
+                if perishable_overrides:
+                    st.caption(f"{len(perishable_overrides)} item(s) configured with perishable overrides.")
+
     if st.button("Load", type="primary", width="content", disabled=not has_input_rows):
         LOGGER.info(
-            "Load requested | mode='%s' rows=%s destination_state='%s' warehouse=%s",
+            "Load requested | mode='%s' rows=%s destination_state='%s' warehouse=%s refrigeration=%s overrides=%s",
             input_mode,
             len(standard_input_df),
             destination_state,
             warehouse_number,
+            bool(st.session_state.get("pe_refrigeration_required", False)),
+            len(perishable_overrides),
         )
         try:
             pipeline_results = run_pipeline(standard_input_df)
@@ -778,7 +1482,12 @@ with input_col:
             matched_df = pipeline_results.get("matched_df", pd.DataFrame())
             unmatched_df = pipeline_results.get("unmatched_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
             verified_df, non_verified_df = split_verified_and_non_verified(matched_df, unmatched_df)
-            payload = build_verified_payload(verified_df, requested_df, warehouse_number=warehouse_number)
+            payload = build_verified_payload(
+                verified_df,
+                requested_df,
+                warehouse_number=warehouse_number,
+                perishable_type_overrides=perishable_overrides,
+            )
             api_response, api_error = call_packaging_api(payload, destination_state=destination_state)
 
             pipeline_results["verified_df"] = verified_df
@@ -788,18 +1497,20 @@ with input_col:
             pipeline_results["api_error"] = api_error
             pipeline_results["destination_state"] = destination_state
             pipeline_results["warehouse_number"] = warehouse_number
+            pipeline_results["perishable_overrides"] = perishable_overrides
             combined_errors = input_parse_errors + pipeline_results.get("row_errors", [])
 
             st.session_state.pe_loaded = True
             st.session_state.pe_results = pipeline_results
             st.session_state.pe_errors = combined_errors
             LOGGER.info(
-                "Load complete | requested=%s matched=%s unmatched=%s verified=%s payload_items=%s parse_errors=%s api_error=%s",
+                "Load complete | requested=%s matched=%s unmatched=%s verified=%s payload_items=%s overrides=%s parse_errors=%s api_error=%s",
                 len(requested_df),
                 len(matched_df),
                 len(unmatched_df),
                 len(verified_df),
                 len(payload),
+                len(perishable_overrides),
                 len(combined_errors),
                 bool(api_error),
             )
@@ -835,48 +1546,126 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
     api_error = str(results.get("api_error", "") or "")
     destination_state = str(results.get("destination_state", ""))
     warehouse_number = results.get("warehouse_number", "")
+    dimension_unit = str(st.session_state.get("pe_dimension_unit", "in"))
+    weight_unit = str(st.session_state.get("pe_weight_unit", "lb"))
+    dim_label = "in" if dimension_unit == "in" else "cm"
+    weight_label = "lb" if weight_unit == "lb" else "kg"
+    volume_label = "in³" if dimension_unit == "in" else "m³"
 
     st.divider()
-    st.subheader("Lookup Summary", anchor=False)
+    st.subheader("Query Results", anchor=False)
     col_requested, col_matched_rows, col_unmatched = st.columns(3)
-    col_requested.metric("Requested Items", len(requested_df))
-    col_matched_rows.metric("Matched Rows", len(matched_df))
-    col_unmatched.metric("Unmatched Items", len(unmatched_df))
 
-    st.divider()
-    st.subheader("Item Info Results", anchor=False)
-    verified_col, non_verified_col = st.columns(2)
+    verified_count = len(verified_df)
+    non_verified_count = max(0, len(matched_df) - len(verified_df)) + len(unmatched_df)
+
+    verified_col, mid, non_verified_col = st.columns([5,0.5,5])
     with verified_col:
-        st.subheader("Verified Items", anchor=False)
+        verified_label_col, verified_count_col = st.columns([2.2, 1.0])
+        with verified_label_col:
+            st.markdown("**Verified Items**")
+        with verified_count_col:
+            st.markdown(f"**Count:** `{verified_count:,}`")
+
         if verified_df.empty:
             st.info("No verified items found.")
         else:
-            st.dataframe(verified_df, width="stretch", hide_index=True)
+            st.dataframe(
+                format_measurement_dataframe(verified_df, dimension_unit, weight_unit),
+                width="stretch",
+                hide_index=True,
+            )
 
     with non_verified_col:
-        st.subheader("Non-Verified Items", anchor=False)
+        non_verified_label_col, non_verified_count_col = st.columns([2.2, 1.0])
+        with non_verified_label_col:
+            st.markdown("**Non-Verified Items**")
+        with non_verified_count_col:
+            st.markdown(f"**Count:** `{non_verified_count:,}`")
+
         if non_verified_df.empty:
             st.info("No non-verified items found.")
         else:
-            st.dataframe(non_verified_df, width="stretch", hide_index=True)
+            st.dataframe(
+                format_measurement_dataframe(non_verified_df, dimension_unit, weight_unit),
+                width="stretch",
+                hide_index=True,
+            )
 
     st.divider()
-    st.subheader("Packaging API", anchor=False)
+    st.subheader("Package Estimation Results", anchor=False)
+    dim_label = "in" if dimension_unit == "in" else "cm"
+    weight_label = "lb" if weight_unit == "lb" else "kg"
+    volume_label = "in³" if dimension_unit == "in" else "m³"
     if not api_payload:
         st.info("No verified items available to send to the packaging API.")
     else:
-        st.caption(f"Destination State: `{destination_state}` | Warehouse Number: `{warehouse_number}`")
+        
         if api_error:
             st.error(api_error)
         else:
-            st.write("API package summary:")
             response_df = normalize_api_response_to_df(api_response)
             if response_df.empty:
                 st.info("API returned no rows.")
             else:
-                total_volume = float(response_df["Volume"].sum()) if "Volume" in response_df.columns else 0.0
-                total_weight = float(response_df["Weight"].sum()) if "Weight" in response_df.columns else 0.0
-                card_col_1, card_col_2 = st.columns(2)
-                card_col_1.metric("Total Dimension", f"{total_volume:,.2f}")
-                card_col_2.metric("Total Weight", f"{total_weight:,.2f}")
-                st.dataframe(response_df, width="stretch", hide_index=True)
+                package_details_df = build_package_details_pivot(response_df)
+                package_table_columns = [
+                    col for col in ["Package Number", "Volume", "Weight"] if col in package_details_df.columns
+                ]
+                package_table_df = (
+                    package_details_df[package_table_columns].copy()
+                    if package_table_columns
+                    else package_details_df.copy()
+                )
+                response_display_df = format_measurement_dataframe(package_table_df, dimension_unit, weight_unit)
+                total_packages = (
+                    int(package_details_df["Package Number"].nunique())
+                    if "Package Number" in package_details_df.columns
+                    else len(package_details_df)
+                )
+                total_volume = 0.0
+                if "Volume" in package_details_df.columns:
+                    total_volume = float(
+                        (_safe_numeric(package_details_df["Volume"]) * _volume_multiplier(dimension_unit)).sum()
+                    )
+                total_weight = 0.0
+                if "Weight" in package_details_df.columns:
+                    total_weight = float(
+                        (_safe_numeric(package_details_df["Weight"]) * _weight_multiplier(weight_unit)).sum()
+                    )
+                dnw, totals_col, details_col = st.columns([1,1, 2.2], vertical_alignment="top")
+                with dnw:
+                    st.markdown(
+                        f"**Destination State:** `{destination_state}`  \n"
+                        f"**Warehouse Number:** `{warehouse_number}`"
+                    )
+                with totals_col:
+                    st.markdown("**Total Packages**")
+                    st.metric("", f"{total_packages:,}",label_visibility="collapsed")
+                    st.markdown("**Total Dimension**")
+                    st.metric("", f"{total_volume:,.2f} {volume_label}", label_visibility="collapsed")
+                    st.markdown("**Total Weight**")
+                    st.metric("", f"{total_weight:,.2f} {weight_label}", label_visibility="collapsed")
+                with details_col:
+                    st.markdown("**Units**")
+                    dimension_unit_col, weight_unit_col = st.columns([1, 1])  
+                    with dimension_unit_col:
+                        dimension_unit = st.radio(
+                            "Dimensions Unit",
+                            options=["in", "cm"],
+                            format_func=lambda u: "Inches (in)" if u == "in" else "Centimeters (cm)",
+                            horizontal=True,
+                            key="pe_dimension_unit",
+                            label_visibility="collapsed",
+                        )
+                    with weight_unit_col:
+                        weight_unit = st.radio(
+                            "Weight Unit",
+                            options=["lb", "kg"],
+                            format_func=lambda u: "Pounds (lb)" if u == "lb" else "Kilograms (kg)",
+                            horizontal=True,
+                            key="pe_weight_unit",
+                            label_visibility="collapsed",
+                        )
+                    st.markdown("**Package Details**")
+                    st.dataframe(response_display_df, width="stretch", hide_index=True)

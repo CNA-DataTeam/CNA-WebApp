@@ -14,6 +14,7 @@ import config
 import utils
 
 LOGGER = utils.get_page_logger("Home")
+IS_ADMIN_USER = utils.is_current_user_admin()
 
 # ============================================================
 # PAGE CONFIG
@@ -28,7 +29,11 @@ if "_home_render_logged" not in st.session_state:
     LOGGER.info("Render navigation cards.")
 if "_home_sections_logged" not in st.session_state:
     st.session_state._home_sections_logged = True
-    LOGGER.info("Sections available | tasks=2 fedex=1 packaging=1")
+    LOGGER.info(
+        "Sections available | tasks=%s fedex=1 packaging=1 admin=%s",
+        3 if IS_ADMIN_USER else 2,
+        IS_ADMIN_USER,
+    )
 
 # ============================================================
 # GLOBAL STYLING (MATCH TASK TRACKER — SAFE FOR SIDEBAR)
@@ -60,7 +65,11 @@ st.divider()
 # ============================================================
 st.subheader("Tasks", anchor=False)
 
-spacer_l, col1, space_m, col2, spacer_r = st.columns([0.4, 2, 0.4, 2, 0.4])
+if IS_ADMIN_USER:
+    spacer_l, col1, space_m, col2, space_n, col3, spacer_r = st.columns([0.3, 1.8, 0.3, 1.8, 0.3, 1.8, 0.3])
+else:
+    spacer_l, col1, space_m, col2, spacer_r = st.columns([0.4, 2, 0.4, 2, 0.4])
+    col3 = None
 
 with col1:
     st.page_link(
@@ -85,6 +94,18 @@ with col2:
         "Upcoming logistics and analytics tools designed to support reporting, "
         "automation, and operational visibility."
     )
+
+if col3 is not None:
+    with col3:
+        st.page_link(
+            "pages/tasks-management.py",
+            label="**Management**",
+            icon="🛠️",
+        )
+        st.caption(
+            "Admin page to view and update tasks metadata, including task name, cadence, "
+            "and active status."
+        )
 
 st.divider()
 
