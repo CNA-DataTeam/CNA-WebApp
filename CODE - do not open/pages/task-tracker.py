@@ -238,7 +238,12 @@ def resume_task():
 def end_task():
     """End the current task."""
     LOGGER.info("Ended task timer.")
-    st.session_state.ended_from_paused = st.session_state.state == "paused"
+    if st.session_state.pause_start_utc:
+        pause_delta = int((utils.now_utc() - st.session_state.pause_start_utc).total_seconds())
+        if pause_delta > 0:
+            st.session_state.paused_seconds += pause_delta
+    st.session_state.pause_start_utc = None
+    st.session_state.ended_from_paused = False
     st.session_state.state = "ended"
     st.session_state.end_utc = utils.now_utc()
     if "current_user_key" in st.session_state:
@@ -252,9 +257,7 @@ def format_start_datetime(dt_utc):
     return dt_et.strftime("%m/%d/%Y %I:%M:%S %p").lower()
 
 def get_submit_duration_seconds(default_seconds: int) -> int:
-    """Duration rule: if ended while paused, count from start to submission time."""
-    if st.session_state.get("ended_from_paused") and st.session_state.start_utc:
-        return max(0, int((utils.now_utc() - st.session_state.start_utc).total_seconds()))
+    """Use effective elapsed time (paused time excluded)."""
     return max(0, int(default_seconds))
 
 def archive_task(user_login: str, full_name: str, user_key: str, task_name: str, selected_account: str) -> None:
@@ -339,7 +342,7 @@ def confirm_submit(user_login, full_name, user_key, task_name, selected_account)
     with left:
         if st.button("Submit", type="primary", width="stretch"):
             if edited_duration.strip() == current_duration:
-                parsed_duration = get_submit_duration_seconds(effective_duration_seconds)
+                parsed_duration = effective_duration_seconds
             record = build_task_record(
                 user_login,
                 full_name,
@@ -403,7 +406,6 @@ def review_archived_tasks_dialog(user_login, full_name, user_key):
                 st.session_state.end_utc = None
                 st.session_state.paused_seconds = int(row.get("PausedSeconds", 0) or 0)
                 st.session_state.pause_start_utc = utils.now_utc()
-                st.session_state.ended_from_paused = False
                 st.session_state.notes = str(row.get("Notes") or "")
                 st.session_state.selected_cadence = str(row.get("TaskCadence") or "")
                 st.session_state.covering_for = str(row.get("CoveringFor") or "")
