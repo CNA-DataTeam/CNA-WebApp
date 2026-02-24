@@ -4,12 +4,14 @@ import atexit
 import logging
 from functools import lru_cache
 from pathlib import Path
+import tempfile
 
 import config
 
 _LOG_FORMAT = "%(asctime)s | %(levelname)s | %(message)s"
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOGGER_NAME = "cna_webapp"
+_APP_ROOT = Path(__file__).resolve().parent
 
 
 class _SourceLogger(logging.LoggerAdapter):
@@ -25,30 +27,46 @@ class _SourceLogger(logging.LoggerAdapter):
 
 @lru_cache(maxsize=1)
 def _get_base_logger() -> logging.Logger:
-    log_file = config.get_log_file_for_user()
-    fallback_dir = Path.cwd() / "logs" / config.get_log_user()
-    fallback_dir.mkdir(parents=True, exist_ok=True)
-    fallback_file = fallback_dir / config.LOG_USER_FILE_NAME
+    user_key = config.get_log_user()
+    candidates = [
+        (config.get_log_file_for_user(user_key), False),
+        (_APP_ROOT / "logs" / user_key / config.LOG_USER_FILE_NAME, True),
+        (Path(tempfile.gettempdir()) / "cna-webapp-logs" / user_key / config.LOG_USER_FILE_NAME, True),
+    ]
 
+    log_file: Path | None = None
     using_fallback = False
-    try:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_file, "a", encoding="utf-8"):
-            pass
-    except Exception:
-        log_file = fallback_file
-        using_fallback = True
+    for candidate_path, candidate_is_fallback in candidates:
+        try:
+            candidate_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(candidate_path, "a", encoding="utf-8"):
+                pass
+            log_file = candidate_path
+            using_fallback = candidate_is_fallback
+            break
+        except Exception:
+            continue
 
     logger = logging.getLogger(_LOGGER_NAME)
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
+    if log_file is None:
+        if not logger.handlers:
+            logger.addHandler(logging.NullHandler())
+        return logger
+
     target = str(log_file.resolve())
     has_target_handler = False
-    for handler in logger.handlers:
-        if isinstance(handler, logging.FileHandler) and str(Path(handler.baseFilename).resolve()) == target:
+    for handler in list(logger.handlers):
+        if not isinstance(handler, logging.FileHandler):
+            continue
+        handler_path = str(Path(handler.baseFilename).resolve())
+        if handler_path == target:
             has_target_handler = True
-            break
+            continue
+        logger.removeHandler(handler)
+        handler.close()
 
     if not has_target_handler:
         handler = logging.FileHandler(log_file, encoding="utf-8")

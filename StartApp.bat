@@ -144,7 +144,7 @@ if errorlevel 1 (
 call :LOG "startup.py completed."
 
 call :LOG "Starting server..."
-start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "app.py" ^
+start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "%ROOT_DIR%\app.py" ^
   --server.port=%STREAMLIT_PORT% ^
   --server.headless=true ^
   --browser.gatherUsageStats=false ^
