@@ -44,7 +44,7 @@ st.divider()
 # ============================================================
 # CONSTANTS
 # ============================================================
-INPUT_MODE_UPLOAD = "Upload Excel"
+INPUT_MODE_UPLOAD = "Upload File"
 INPUT_MODE_PASTE = "Paste from Excel (tab-separated)"
 US_STATE_CODES = [
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
@@ -129,9 +129,25 @@ if "pe_errors" not in st.session_state:
 # INPUT HELPERS
 # ============================================================
 @st.cache_data
-def read_excel_bytes(file_bytes: bytes) -> pd.DataFrame:
-    """Read uploaded Excel bytes into a DataFrame."""
-    return pd.read_excel(BytesIO(file_bytes), dtype=str)
+def read_excel_sheet_names(file_bytes: bytes) -> list[str]:
+    """Read workbook sheet names from uploaded Excel bytes."""
+    with pd.ExcelFile(BytesIO(file_bytes)) as workbook:
+        return [str(name).strip() for name in workbook.sheet_names]
+
+
+@st.cache_data
+def read_excel_bytes(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    """Read one worksheet from uploaded Excel bytes into a DataFrame."""
+    return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name, dtype=str)
+
+
+@st.cache_data
+def read_csv_bytes(file_bytes: bytes) -> pd.DataFrame:
+    """Read uploaded CSV bytes into a DataFrame."""
+    try:
+        return pd.read_csv(BytesIO(file_bytes), dtype=str)
+    except UnicodeDecodeError:
+        return pd.read_csv(BytesIO(file_bytes), dtype=str, encoding="latin-1")
 
 
 def normalize_col_name(col_name: str) -> str:
@@ -560,6 +576,9 @@ upload_columns: list[str] = []
 upload_has_valid_columns = False
 default_item_idx = 0
 default_qty_idx = 1
+uploaded_file_bytes = b""
+uploaded_file_ext = ""
+excel_sheet_names: list[str] = []
 
 with spacer_col:
     st.write("")
@@ -601,38 +620,25 @@ with input_col:
     )
 
     if input_mode == INPUT_MODE_UPLOAD:
-        uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
+        uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "csv"])
 
         if uploaded_file is not None:
+            uploaded_file_bytes = uploaded_file.getvalue()
+            uploaded_file_ext = uploaded_file.name.lower().rsplit(".", 1)[-1] if "." in uploaded_file.name else ""
+
             try:
-                uploaded_df = read_excel_bytes(uploaded_file.getvalue())
-                uploaded_df.columns = [str(col).strip() for col in uploaded_df.columns]
+                if uploaded_file_ext in {"xlsx", "xls"}:
+                    excel_sheet_names = read_excel_sheet_names(uploaded_file_bytes)
+                elif uploaded_file_ext == "csv":
+                    pass
+                else:
+                    input_parse_errors.append("Unsupported file type. Please upload .xlsx, .xls, or .csv.")
             except Exception as exc:
                 uploaded_df = pd.DataFrame()
-                LOGGER.exception("Could not read uploaded Excel file: %s", exc)
-                input_parse_errors.append(f"Could not read Excel file: {exc}")
-
-            if uploaded_df.empty:
-                st.info("Uploaded file has no rows.")
-            elif len(uploaded_df.columns) < 2:
-                st.error("Excel input must contain at least two columns: Item Number and Quantity.")
-            else:
-                upload_columns = uploaded_df.columns.tolist()
-                default_item_idx = find_default_column(
-                    columns=upload_columns,
-                    targets={"itemnumber", "item", "itemno", "sku"},
-                    fallback_index=0,
-                )
-                default_qty_idx = find_default_column(
-                    columns=upload_columns,
-                    targets={"quantity", "qty"},
-                    fallback_index=1,
-                )
-                if default_qty_idx == default_item_idx and len(upload_columns) > 1:
-                    default_qty_idx = 1 if default_item_idx == 0 else 0
-                upload_has_valid_columns = True
+                LOGGER.exception("Could not inspect uploaded file: %s", exc)
+                input_parse_errors.append(f"Could not inspect uploaded file: {exc}")
         else:
-            st.caption("Upload an Excel file with item and quantity columns, then click Load.")
+            st.caption("Upload an Excel or CSV file with item and quantity columns, then click Load.")
 
     else:
         pasted_text = st.text_area(
@@ -645,6 +651,55 @@ with input_col:
 
 with preview_col:
     st.subheader("Preview", anchor=False)
+    if input_mode == INPUT_MODE_UPLOAD and uploaded_file is not None:
+        selected_sheet_name = ""
+
+        if uploaded_file_ext in {"xlsx", "xls"}:
+            if not excel_sheet_names:
+                st.error("No worksheet found in the uploaded Excel file.")
+            else:
+                selected_sheet_name = st.selectbox(
+                    "Worksheet",
+                    options=excel_sheet_names,
+                    index=0,
+                    key="pe_sheet_name",
+                )
+                try:
+                    uploaded_df = read_excel_bytes(uploaded_file_bytes, selected_sheet_name)
+                    uploaded_df.columns = [str(col).strip() for col in uploaded_df.columns]
+                except Exception as exc:
+                    uploaded_df = pd.DataFrame()
+                    LOGGER.exception("Could not read worksheet '%s': %s", selected_sheet_name, exc)
+                    input_parse_errors.append(f"Could not read worksheet '{selected_sheet_name}': {exc}")
+        elif uploaded_file_ext == "csv":
+            try:
+                uploaded_df = read_csv_bytes(uploaded_file_bytes)
+                uploaded_df.columns = [str(col).strip() for col in uploaded_df.columns]
+            except Exception as exc:
+                uploaded_df = pd.DataFrame()
+                LOGGER.exception("Could not read uploaded CSV file: %s", exc)
+                input_parse_errors.append(f"Could not read CSV file: {exc}")
+
+        if uploaded_df.empty:
+            st.info("Uploaded file has no rows.")
+        elif len(uploaded_df.columns) < 2:
+            st.error("Input must contain at least two columns: Item Number and Quantity.")
+        else:
+            upload_columns = uploaded_df.columns.tolist()
+            default_item_idx = find_default_column(
+                columns=upload_columns,
+                targets={"itemnumber", "item", "itemno", "sku"},
+                fallback_index=0,
+            )
+            default_qty_idx = find_default_column(
+                columns=upload_columns,
+                targets={"quantity", "qty"},
+                fallback_index=1,
+            )
+            if default_qty_idx == default_item_idx and len(upload_columns) > 1:
+                default_qty_idx = 1 if default_item_idx == 0 else 0
+            upload_has_valid_columns = True
+
     if input_mode == INPUT_MODE_UPLOAD and upload_has_valid_columns:
         col_left, col_right = st.columns(2)
         with col_left:
