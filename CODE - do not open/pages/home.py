@@ -20,7 +20,7 @@ IS_ADMIN_USER = utils.is_current_user_admin()
 # PAGE CONFIG
 # ============================================================
 st.set_page_config(
-    page_title="Logistics Support App",
+    page_title="CNA Web App",
     layout="wide",
 )
 utils.log_page_open_once("home_page", LOGGER)

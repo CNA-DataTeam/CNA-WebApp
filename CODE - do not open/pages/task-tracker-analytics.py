@@ -53,7 +53,7 @@ def load_targets_placeholder() -> pd.DataFrame:
 def main_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.subheader("Filters", anchor=False)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns([1.5, 1.8, 1.6, 1.2, 1.9])
 
     with c1:
         user_filter = st.selectbox(
@@ -76,6 +76,16 @@ def main_filters(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     with c4:
+        exclude_partial = (
+            st.selectbox(
+                "Partially complete?",
+                options=["Exclude", "Include"],
+                index=0,
+            )
+            == "Exclude"
+        )
+
+    with c5:
         date_range = st.date_input(
             "Date Range",
             value=(df["Date"].min(), df["Date"].max()),
@@ -92,6 +102,9 @@ def main_filters(df: pd.DataFrame) -> pd.DataFrame:
     if cadence_filter:
         filtered_df = filtered_df[filtered_df["TaskCadence"].isin(cadence_filter)]
 
+    if exclude_partial:
+        filtered_df = filtered_df[~filtered_df["PartiallyComplete"]]
+
     if isinstance(date_range, tuple):
         start_date, end_date = date_range
     else:
@@ -105,16 +118,18 @@ def main_filters(df: pd.DataFrame) -> pd.DataFrame:
         user_filter,
         tuple(sorted(task_filter)),
         tuple(sorted(cadence_filter)),
+        exclude_partial,
         str(start_date),
         str(end_date),
     )
     if st.session_state.get("_analytics_filter_signature") != filter_signature:
         st.session_state._analytics_filter_signature = filter_signature
         LOGGER.info(
-            "Filters updated | user='%s' tasks=%s cadences=%s date_range=%s..%s",
+            "Filters updated | user='%s' tasks=%s cadences=%s exclude_partial=%s date_range=%s..%s",
             user_filter,
             len(task_filter),
             len(cadence_filter),
+            exclude_partial,
             start_date,
             end_date,
         )
