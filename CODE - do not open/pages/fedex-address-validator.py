@@ -2,21 +2,17 @@
 address_validation_results.py
 
 Purpose:
-    Streamlit page for reviewing FedEx Address Validation results and emailing FedEx.
+    Streamlit page for reviewing FedEx Address Validation results.
 
 Behavior:
     - Loads results.csv from configured output path
     - Displays results in a selectable table
-    - Allows user to select one or more rows
-    - Opens a pre-filled Outlook email addressed to FedEx with row details
+    - Supports filtering for analysis
+    - Supports dispute workflow actions (export/email/mark disputed)
     - Preserves global app styling and layout conventions
 
 Inputs:
     - results.csv (path resolved via config)
-
-Outputs:
-    - Downloadable Excel file
-    - Outlook email draft
 """
 
 # ============================================================
@@ -78,8 +74,9 @@ st.divider()
 # ============================================================
 FEDEX_EMAIL_TO = "quickresponse6@fedex.com"
 EMAIL_SUBJECT = "Clark National Accounts - Residential Status Dispute"
-
-TABLE_KEY = "results_table"
+ROW_ID_COL = "__source_row_id"
+BASE_RESIDENTIAL_MATCH_VALUES = {"mismatch", "mixed"}
+BASE_RESIDENTIAL_MATCH_COLUMNS = ("ResidentialStatusMatch", "Residential Match")
 
 
 # ============================================================
@@ -107,7 +104,7 @@ def load_results(file_path: Path) -> pd.DataFrame:
     raise RuntimeError(f"Unable to read results file: {file_path}") from last_error
 
 
-def mark_rows_as_disputed(file_path: Path, row_indices: List[int]) -> None:
+def mark_rows_as_disputed(file_path: Path, row_indices: List[object]) -> None:
     """
     Persist Disputed=1 to the source file using original DataFrame indices.
     """
@@ -115,7 +112,14 @@ def mark_rows_as_disputed(file_path: Path, row_indices: List[int]) -> None:
     if "Disputed" not in full_df.columns:
         full_df["Disputed"] = ""
 
-    for idx in row_indices:
+    normalized_indices: List[int] = []
+    for raw_idx in row_indices:
+        try:
+            normalized_indices.append(int(raw_idx))
+        except (TypeError, ValueError):
+            LOGGER.warning("Skipping invalid row index while marking disputed: %r", raw_idx)
+
+    for idx in normalized_indices:
         if idx in full_df.index:
             full_df.at[idx, "Disputed"] = "1"
 
@@ -142,16 +146,8 @@ if df.empty:
     st.stop()
 
 # ============================================================
-# ATTACHMENT DATA BUILDER
+# DISPLAY HELPERS
 # ============================================================
-def _first_present(row: pd.Series, candidates: List[str]) -> str:
-    for col in candidates:
-        if col in row.index:
-            value = row.get(col, "")
-            if pd.notna(value) and str(value).strip():
-                return str(value).strip()
-    return ""
-
 def normalize_tracking_number(value: object) -> str:
     """Render scientific-notation tracking numbers as plain strings."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -177,6 +173,15 @@ def format_currency_display(value: object) -> str:
     if pd.isna(num):
         return ""
     return f"${num:,.2f}"
+
+
+def _first_present(row: pd.Series, candidates: List[str]) -> str:
+    for col in candidates:
+        if col in row.index:
+            value = row.get(col, "")
+            if pd.notna(value) and str(value).strip():
+                return str(value).strip()
+    return ""
 
 
 def build_attachment_df(rows: pd.DataFrame) -> pd.DataFrame:
@@ -238,6 +243,7 @@ def create_excel_download(rows: pd.DataFrame) -> Tuple[str, bytes]:
 
     return file_name, formatted_buffer.getvalue()
 
+
 def trigger_file_download(file_name: str, file_bytes: bytes) -> None:
     """Trigger a browser download in the same click cycle."""
     safe_name = file_name.replace('"', "_")
@@ -254,9 +260,6 @@ def trigger_file_download(file_name: str, file_bytes: bytes) -> None:
     )
 
 
-# ============================================================
-# EMAIL DISPATCH (OUTLOOK ONLY)
-# ============================================================
 def open_email(to_addr: str, subject: str, body: str) -> Tuple[bool, str]:
     # Prefer default mail handler (New Outlook when configured as default).
     mailto = f"mailto:{quote(to_addr)}?subject={quote(subject)}&body={quote(body)}"
@@ -305,7 +308,22 @@ if "Disputed" in df.columns:
     disputed_values = df["Disputed"].fillna("").astype(str).str.strip()
     df = df[disputed_values.eq("")]
 
-# Build a display-only dataframe. Keep `df` intact for downstream actions like Excel generation.
+# Keep only rows with Residential Match statuses that need review.
+residential_match_col = next((c for c in BASE_RESIDENTIAL_MATCH_COLUMNS if c in df.columns), None)
+if residential_match_col:
+    base_status_values = df[residential_match_col].fillna("").astype(str).str.strip().str.lower()
+    df = df[base_status_values.isin(BASE_RESIDENTIAL_MATCH_VALUES)]
+else:
+    LOGGER.warning(
+        "Residential Match column not found. Expected one of: %s",
+        ", ".join(BASE_RESIDENTIAL_MATCH_COLUMNS),
+    )
+
+# Persist source row identity for stable selection mapping.
+df = df.copy()
+df[ROW_ID_COL] = df.index.astype(str)
+
+# Build a display-only dataframe for the table.
 display_df = df.copy()
 
 # Remove unwanted display columns.
@@ -313,6 +331,8 @@ columns_to_remove = [
     "StreetLine1",
     "StreetLine2",
     "PostalCode",
+    "State",
+    "StateOrProvince",
     "Shipment Date",
     "OriginalCustomerReference",
     "Original Customer Reference",
@@ -332,11 +352,6 @@ display_df = display_df.rename(
         "ResidentialStatusMatch": "Residential Match",
     }
 )
-if "StateOrProvince" in display_df.columns:
-    if "State" in display_df.columns:
-        display_df = display_df.drop(columns=["StateOrProvince"])
-    else:
-        display_df = display_df.rename(columns={"StateOrProvince": "State"})
 
 # Ensure tracking values display in full (not scientific notation).
 tracking_col = next((c for c in ["Tracking Number", "InvTrackingNumber", "Tracking"] if c in display_df.columns), None)
@@ -364,10 +379,6 @@ if classification_col and match_type_col and classification_col != match_type_co
 # FILTERS
 # ============================================================
 with st.expander("Filters", expanded=True):
-    state_col = next(
-        (c for c in ["State", "StateOrProvince", "Recipient State"] if c in display_df.columns),
-        None,
-    )
     service_col = next(
         (c for c in ["Service Type", "ServiceType", "Service"] if c in display_df.columns),
         None,
@@ -383,8 +394,8 @@ with st.expander("Filters", expanded=True):
             "Residential Match",
             sorted(display_df["Residential Match"].dropna().astype(str).unique().tolist()),
         )
-        state_options = sorted(display_df[state_col].dropna().astype(str).unique().tolist()) if state_col else []
-        state_filter = st.multiselect("State", state_options, disabled=state_col is None)
+        service_options = sorted(display_df[service_col].dropna().astype(str).unique().tolist()) if service_col else []
+        service_filter = st.multiselect("Service Type", service_options, disabled=service_col is None)
 
     with right_col:
         if invoice_date_col:
@@ -410,12 +421,8 @@ with st.expander("Filters", expanded=True):
                 disabled=True,
                 help="Invoice Date column not found.",
             )
-        service_options = sorted(display_df[service_col].dropna().astype(str).unique().tolist()) if service_col else []
-        service_filter = st.multiselect("Service Type", service_options, disabled=service_col is None)
 
 view_df = display_df
-if state_filter and state_col:
-    view_df = view_df[view_df[state_col].fillna("").astype(str).isin(state_filter)]
 if service_filter and service_col:
     view_df = view_df[view_df[service_col].fillna("").astype(str).isin(service_filter)]
 if invoice_date_col:
@@ -435,7 +442,6 @@ _start_date_text = str(start_date) if "start_date" in locals() else ""
 _end_date_text = str(end_date) if "end_date" in locals() else ""
 filter_signature = (
     tuple(sorted(status_filter)),
-    tuple(sorted(state_filter)),
     tuple(sorted(service_filter)),
     _start_date_text,
     _end_date_text,
@@ -443,9 +449,8 @@ filter_signature = (
 if st.session_state.get("_fedex_filter_signature") != filter_signature:
     st.session_state._fedex_filter_signature = filter_signature
     LOGGER.info(
-        "Filters updated | status=%s states=%s services=%s date_range=%s..%s",
+        "Filters updated | status=%s services=%s date_range=%s..%s",
         len(status_filter),
-        len(state_filter),
         len(service_filter),
         _start_date_text,
         _end_date_text,
@@ -456,143 +461,56 @@ if st.session_state.get("_fedex_last_view_rows") != len(view_df):
 
 
 # ============================================================
-# INITIALIZE SESSION STATE FOR SELECTIONS
+# TABLE CONTROLS / DISPLAY
 # ============================================================
-if "select_all" not in st.session_state:
-    st.session_state.select_all = False
-
-if "editor_df" not in st.session_state:
-    st.session_state.editor_df = None
-if "apply_select_all" not in st.session_state:
-    st.session_state.apply_select_all = False
-
-# ============================================================
-# TOGGLE SELECT / SEND EMAIL BUTTONS
-# ============================================================
-col1, col2, col3, col4, col5 = st.columns([1.5, 5.1, 2.4, 2.6, 2.4], width="stretch")
-
-with col1:
-    # Determine button label based on current state
-    if st.session_state.select_all:
-        button_label = "Deselect All ❌"
-    else:
-        button_label = "Select All ✅"
-    
-    if st.button(button_label, key="toggle_select"):
-        st.session_state.select_all = not st.session_state.select_all
-        st.session_state.apply_select_all = True
-        st.rerun()
-
-# col2 is empty spacer in the middle
-
-with col3:
-    # This will be populated after we know selected_rows
-    generate_button_placeholder = st.empty()
-
-with col4:
-    # This will be populated after we know selected_rows
-    email_button_placeholder = st.empty()
-
-with col5:
-    # This will be populated after we know selected_rows
-    disputed_button_placeholder = st.empty()
-
-# ============================================================
-# TABLE WITH CHECKBOX SELECTION
-# ============================================================
-
-# Build a stable display DF with a persisted Select column.
-base_df = view_df.copy()
-
-# Seed editor_df the first time, or when shape/columns change (filters, new data, etc.)
-needs_reset = (
-    st.session_state.editor_df is None
-    or len(st.session_state.editor_df) != len(base_df)
-    or list(st.session_state.editor_df.columns) != (["Select"] + list(base_df.columns))
+visible_row_ids = view_df[ROW_ID_COL].astype(str).tolist() if ROW_ID_COL in view_df.columns else []
+visible_rows_for_actions = (
+    df.set_index(ROW_ID_COL, drop=False).loc[visible_row_ids] if visible_row_ids else df.head(0)
 )
+visible_source_indices: List[int] = []
+for row_id in visible_row_ids:
+    try:
+        visible_source_indices.append(int(row_id))
+    except (TypeError, ValueError):
+        LOGGER.warning("Skipping invalid visible row id: %r", row_id)
 
-if needs_reset:
-    seed_df = base_df.copy()
-    seed_df.insert(0, "Select", False)
-    st.session_state.editor_df = seed_df
+table_df = view_df.drop(columns=[ROW_ID_COL], errors="ignore")
 
-# Apply Select All / Deselect All exactly once when user clicks the toggle button.
-if st.session_state.apply_select_all:
-    st.session_state.editor_df["Select"] = bool(st.session_state.select_all)
-    st.session_state.apply_select_all = False
+btn_col1, btn_col2, btn_col3, btn_spacer = st.columns([2.4, 2.4, 2.4, 6.8], width="stretch")
+with btn_col1:
+    generate_dispute_clicked = st.button("Generate Dispute File", key="generate_dispute")
+with btn_col2:
+    send_email_clicked = st.button("Send Email to FedEx", key="send_email")
+with btn_col3:
+    mark_disputed_clicked = st.button("Mark as Disputed", key="mark_disputed")
 
-edited_df = st.data_editor(
-    st.session_state.editor_df,
+st.caption(f"{len(table_df):,} rows loaded")
+
+st.dataframe(
+    table_df,
     use_container_width=True,
     hide_index=True,
     height=700,
-    key="address_validation_editor",
-    column_config={
-        "Select": st.column_config.CheckboxColumn(
-            "Select",
-            help="Select rows to include in the email",
-        )
-    },
-    disabled=[c for c in st.session_state.editor_df.columns if c != "Select"],
 )
-
-# Persist edits so selections survive reruns (button clicks cause reruns).
-st.session_state.editor_df = edited_df
-
-# If user manually changes any checkbox while select_all is True, drop select_all flag
-# (this prevents the UI label from lying).
-if st.session_state.select_all and edited_df["Select"].sum() != len(edited_df):
-    st.session_state.select_all = False
-
-# ============================================================
-# SELECTION EXTRACTION
-# ============================================================
-selected_mask = edited_df["Select"]
-selected_indices = edited_df.index[selected_mask]
-has_selection = len(selected_indices) > 0
-selected_rows_for_email = df.loc[selected_indices]
-if st.session_state.get("_fedex_last_selection_count") != len(selected_indices):
-    st.session_state._fedex_last_selection_count = len(selected_indices)
-    LOGGER.info("Selection changed | selected_rows=%s", len(selected_indices))
-# ============================================================
-# ACTION BUTTONS (in right columns)
-# ============================================================
-with generate_button_placeholder:
-    generate_dispute_clicked = st.button(
-        "Generate Dispute File",
-        disabled=not has_selection,
-        key="generate_dispute",
-    )
-
-with email_button_placeholder:
-    send_email_clicked = st.button(
-        "Send Email to FedEx 📨",
-        disabled=not has_selection,
-        key="send_email",
-    )
-
-with disputed_button_placeholder:
-    mark_disputed_clicked = st.button(
-        "Mark as Disputed",
-        disabled=not has_selection,
-        key="mark_disputed",
-    )
 
 if generate_dispute_clicked:
     LOGGER.info("Decision: Generate Dispute File clicked.")
     try:
-        with st.spinner("Creating dispute Excel file..."):
-            file_name, file_bytes = create_excel_download(selected_rows_for_email)
-        trigger_file_download(file_name, file_bytes)
-        LOGGER.info("Generated dispute file '%s' for %s selected row(s).", file_name, len(selected_indices))
-        st.success("Dispute file generated and download started.")
-        st.download_button(
-            "If download did not start, click to download",
-            data=file_bytes,
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"fallback_download_{file_name}",
-        )
+        if visible_rows_for_actions.empty:
+            st.warning("No rows are currently displayed to export.")
+        else:
+            with st.spinner("Creating dispute Excel file..."):
+                file_name, file_bytes = create_excel_download(visible_rows_for_actions)
+            trigger_file_download(file_name, file_bytes)
+            LOGGER.info("Generated dispute file '%s' for %s displayed row(s).", file_name, len(visible_rows_for_actions))
+            st.success("Dispute file generated and download started.")
+            st.download_button(
+                "If download did not start, click to download",
+                data=file_bytes,
+                file_name=file_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"fallback_download_{file_name}",
+            )
     except Exception as exc:
         LOGGER.exception("Generate dispute file failed: %s", exc)
         st.error(f"Generate dispute file failed: {type(exc).__name__}: {exc}")
@@ -600,18 +518,20 @@ if generate_dispute_clicked:
 if send_email_clicked:
     LOGGER.info("Decision: Send Email to FedEx clicked.")
     try:
-        if not FEDEX_EMAIL_TO.strip():
+        if visible_rows_for_actions.empty:
+            st.warning("No rows are currently displayed to email.")
+        elif not FEDEX_EMAIL_TO.strip():
             LOGGER.error("FedEx recipient email is blank.")
             st.error("FedEx recipient email is blank. Set FEDEX_EMAIL_TO first.")
         else:
             email_body = (
                 "Hello FedEx Team,\n\n"
-                "Please review the selected shipments in the dispute file.\n\n"
+                "Please review the displayed shipments in the dispute file.\n\n"
                 "Thank you,"
             )
             email_opened, email_status = open_email(FEDEX_EMAIL_TO, EMAIL_SUBJECT, email_body)
             if email_opened:
-                LOGGER.info("Opened Outlook draft for %s selected row(s).", len(selected_indices))
+                LOGGER.info("Opened Outlook draft for %s displayed row(s).", len(visible_rows_for_actions))
                 st.success("Outlook draft opened.")
             else:
                 LOGGER.warning("Failed to open editable Outlook draft. status=%s", email_status)
@@ -624,18 +544,17 @@ if send_email_clicked:
 if mark_disputed_clicked:
     LOGGER.info("Decision: Mark as Disputed clicked.")
     try:
-        mark_rows_as_disputed(RESULTS_CSV_FILE, selected_indices.tolist())
-        load_results.clear()
-        LOGGER.info("Marked %s selected row(s) as disputed.", len(selected_indices))
-        st.success("Selected rows marked as disputed.")
-        st.rerun()
+        if not visible_source_indices:
+            st.warning("No rows are currently displayed to mark as disputed.")
+        else:
+            mark_rows_as_disputed(RESULTS_CSV_FILE, visible_source_indices)
+            load_results.clear()
+            LOGGER.info("Marked %s displayed row(s) as disputed.", len(visible_source_indices))
+            st.success("Displayed rows marked as disputed.")
+            st.rerun(scope="app")
     except Exception as exc:
         LOGGER.exception("Failed to mark rows as disputed: %s", exc)
         st.error(f"Failed to mark rows as disputed: {exc}")
 
-# ============================================================
-# FOOTNOTE
-# ============================================================
-st.caption(
-    "Emails open as editable drafts in Outlook desktop. Download the dispute Excel separately."
-)
+st.caption("Emails open as editable drafts in Outlook desktop. Download the dispute Excel separately.")
+
