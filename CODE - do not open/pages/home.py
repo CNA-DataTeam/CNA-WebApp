@@ -52,7 +52,7 @@ st.markdown(
     f"""
     <div class="header-row">
         <img class="header-logo" src="data:image/png;base64,{logo_b64}" />
-        <h1 class="header-title">Logistics Support App</h1>
+        <h1 class="header-title">CNA Web App</h1>
     </div>
     """,
     unsafe_allow_html=True,
