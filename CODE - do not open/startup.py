@@ -3,7 +3,7 @@ startup.py
 
 Purpose:
     Daily startup/cache preparation for the Logistics Support app.
-
+Hello Jordan
 What it does:
     - Locates the locally-synced Task-Tracker folder (SharePoint/OneDrive).
     - Writes/refreshes derived datasets into cached parquet files on the network:
