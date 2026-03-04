@@ -645,8 +645,12 @@ def get_full_name_for_user(tasks_xlsx_path: str | None, user_login: str) -> str:
     return mapping.get(str(user_login).strip().lower(), user_login)
 
 @st.cache_data(ttl=3600)
-def load_all_user_full_names(tasks_xlsx_path: str | None = None) -> list[str]:
-    """Load all full names from startup output users.parquet (sorted)."""
+def load_all_user_full_names(
+    tasks_xlsx_path: str | None = None,
+    department: str | None = None,
+) -> list[str]:
+    """Load full names from users.parquet, optionally filtered by department."""
+    _ = tasks_xlsx_path  # Backward-compatible arg kept intentionally.
     try:
         users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
         if not users_parquet.exists():
@@ -658,14 +662,23 @@ def load_all_user_full_names(tasks_xlsx_path: str | None = None) -> list[str]:
         return []
     if df.empty:
         return []
-    if "Full Name" in df.columns:
-        names = df["Full Name"]
-    elif "fullname" in df.columns or "FullName" in df.columns:
-        col = "fullname" if "fullname" in df.columns else "FullName"
-        names = df[col]
-    else:
+
+    full_col = _find_column_by_alias(df, ["Full Name", "FullName", "fullname", "Name"])
+    if not full_col:
         return []
-    names = names.dropna().astype(str).str.strip()
+
+    if department and str(department).strip():
+        dept_col = _find_column_by_alias(df, ["Department", "Dept"])
+        if dept_col:
+            target_dept = str(department).strip().lower()
+            dept_series = df[dept_col].fillna("").astype(str).str.strip().str.lower()
+            df = df[dept_series == target_dept]
+        else:
+            get_page_logger("Shared Utilities").warning(
+                "Department filter requested but no Department column found in users.parquet."
+            )
+
+    names = df[full_col].dropna().astype(str).str.strip()
     return sorted(n for n in names.unique() if n)
 
 
@@ -727,6 +740,37 @@ def load_users_table() -> pd.DataFrame:
     except Exception as exc:
         get_page_logger("Shared Utilities").exception("Failed to read users.parquet: %s", exc)
         return pd.DataFrame()
+
+
+def get_user_department(user_login: str, users_df: pd.DataFrame | None = None) -> str:
+    """Return the department for a given user login, or empty string if unknown."""
+    lookup_user = str(user_login).strip().lower()
+    lookup_key = _normalize_login_key(user_login)
+    if not lookup_user:
+        return ""
+
+    df = users_df.copy() if isinstance(users_df, pd.DataFrame) else load_users_table()
+    if df.empty:
+        return ""
+
+    user_col = _find_column_by_alias(
+        df,
+        ["User", "UserLogin", "Login", "Username", "User Name", "NetworkLogin", "SamAccountName"],
+    )
+    dept_col = _find_column_by_alias(df, ["Department", "Dept"])
+    if not user_col or not dept_col:
+        return ""
+
+    user_series = df[user_col].astype(str).str.strip().str.lower()
+    user_key_series = user_series.map(_normalize_login_key)
+    matched = df[(user_series == lookup_user) | (user_key_series == lookup_key)]
+    if matched.empty:
+        return ""
+
+    value = matched.iloc[0].get(dept_col)
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    return str(value).strip()
 
 
 def is_user_admin(user_login: str, users_df: pd.DataFrame | None = None) -> bool:

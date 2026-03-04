@@ -499,7 +499,7 @@ with left_col:
     st.session_state.current_user_key = user_key
     inputs_locked = st.session_state.state != "idle"
     st.text_input("User", value=full_name, disabled=True)
-    all_users = utils.load_all_user_full_names()
+    all_users = utils.load_all_user_full_names(department="Logistics - Support")
     # Exclude current user from covering list
     covering_options = [""] + [u for u in all_users if u != full_name]
     covering_key = f"covering_{st.session_state.reset_counter}"

@@ -32,6 +32,7 @@ pages = {
     ],
     "Tasks": [
         st.Page(str(APP_DIR / "pages" / "task-tracker.py"), title="Tracker"),
+        st.Page(str(APP_DIR / "pages" / "time-allocation-tool.py"), title="Time Allocation"),
         st.Page(str(APP_DIR / "pages" / "task-tracker-analytics.py"), title="Analytics"),
     ],
     "FedEx": [

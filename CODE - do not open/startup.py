@@ -153,57 +153,101 @@ def load_accounts_excel(path: Path) -> pd.DataFrame:
     return result
 
 def load_users_excel(path: Path) -> pd.DataFrame:
-    """Load user login to full name mapping from the Tasks Excel file (Users sheet)."""
+    """Load users metadata from the Tasks Excel Users sheet."""
     df = pd.read_excel(path, sheet_name="Users", engine="openpyxl")
     if df.empty:
         return pd.DataFrame()
 
-    cols = {str(c).strip().lower(): c for c in df.columns}
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    def _normalize_col(value: str) -> str:
+        return "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
+
+    normalized_cols = {_normalize_col(c): c for c in df.columns}
 
     def _find_col(candidates: list[str]) -> str | None:
-        normalized = {
-            "".join(ch for ch in key if ch.isalnum()): key
-            for key in cols.keys()
-        }
         for candidate in candidates:
-            key = candidate.strip().lower()
-            if key in cols:
-                return cols[key]
-            normalized_key = "".join(ch for ch in key if ch.isalnum())
-            if normalized_key in normalized:
-                return cols[normalized[normalized_key]]
+            match = normalized_cols.get(_normalize_col(candidate))
+            if match:
+                return match
         return None
 
-    user_col = _find_col(["user", "user login", "username", "login"])
-    full_col = _find_col(["full name", "fullname", "name"])
-    admin_col = _find_col(["isadmin", "is admin", "admin", "is_administrator", "isadministrator"])
-    if not user_col or not full_col:
-        return pd.DataFrame()
+    def _clean_text(value: object) -> str | None:
+        if pd.isna(value):
+            return None
+        text = str(value).strip()
+        return text if text else None
 
-    keep_cols = [user_col, full_col]
-    if admin_col:
-        keep_cols.append(admin_col)
+    def _clean_id_text(value: object) -> str | None:
+        if pd.isna(value):
+            return None
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, float):
+            if pd.isna(value):
+                return None
+            if float(value).is_integer():
+                return str(int(value))
+        text = str(value).strip()
+        return text if text else None
 
-    df_users = df[keep_cols].copy().dropna(subset=[user_col])
-    rename_map = {
-        user_col: "User",
-        full_col: "Full Name",
-    }
-    if admin_col:
-        rename_map[admin_col] = "IsAdmin"
-    df_users = df_users.rename(columns=rename_map)
+    def _to_flag(value: object) -> int:
+        if pd.isna(value):
+            return 0
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return 1 if float(value) != 0 else 0
+        text = str(value).strip().lower()
+        if text in {"1", "true", "t", "yes", "y", "on"}:
+            return 1
+        if text in {"0", "false", "f", "no", "n", "off", ""}:
+            return 0
+        return 0
 
-    df_users["User"] = df_users["User"].astype(str).str.strip()
-    df_users["Full Name"] = df_users["Full Name"].astype(str).str.strip()
-    if "IsAdmin" not in df_users.columns:
-        df_users["IsAdmin"] = 0
-    df_users["IsAdmin"] = (
-        pd.to_numeric(df_users["IsAdmin"], errors="coerce")
-        .fillna(0)
-        .astype(int)
-        .clip(lower=0, upper=1)
-    )
-    return df_users
+    column_map: list[tuple[str, list[str]]] = [
+        ("EmployeeNumber", ["employee number", "employee id"]),
+        ("StartDate", ["start date", "hire date"]),
+        ("First Name", ["first name", "firstname"]),
+        ("Last Name", ["last name", "lastname"]),
+        ("Full Name", ["full name", "fullname", "name"]),
+        ("Email", ["email", "email address"]),
+        ("Role", ["role", "title"]),
+        ("IsManager", ["ismanager", "is manager", "manager flag"]),
+        ("Department", ["department", "dept"]),
+        ("Manager", ["manager", "manager name"]),
+        ("ManagerEmployeeNumber", ["manageremployeenumber", "manager employee number", "manager id"]),
+        ("isAdmin", ["isadmin", "is admin", "admin", "isadministrator", "is administrator"]),
+        ("User", ["user", "user login", "username", "login", "samaccountname"]),
+    ]
+
+    out = pd.DataFrame(index=df.index)
+    for target_col, aliases in column_map:
+        source_col = _find_col([target_col] + aliases)
+        if source_col:
+            out[target_col] = df[source_col]
+        else:
+            out[target_col] = pd.NA
+
+    out["EmployeeNumber"] = out["EmployeeNumber"].map(_clean_id_text)
+    out["ManagerEmployeeNumber"] = out["ManagerEmployeeNumber"].map(_clean_id_text)
+    for col in ["First Name", "Last Name", "Full Name", "Email", "Role", "Department", "Manager", "User"]:
+        out[col] = out[col].map(_clean_text)
+
+    out["StartDate"] = pd.to_datetime(out["StartDate"], errors="coerce")
+    out["IsManager"] = out["IsManager"].map(_to_flag).astype(int)
+    out["isAdmin"] = out["isAdmin"].map(_to_flag).astype(int)
+
+    # Fill missing full-name values from First/Last when possible.
+    first = out["First Name"].fillna("")
+    last = out["Last Name"].fillna("")
+    fallback_name = (first + " " + last).str.strip().replace("", pd.NA)
+    missing_full_name = out["Full Name"].isna() | out["Full Name"].astype(str).str.strip().eq("")
+    out.loc[missing_full_name, "Full Name"] = fallback_name[missing_full_name]
+
+    out = out[out["User"].notna()].copy()
+    return out
 
 def save_parquet(df: pd.DataFrame, output_dir: Path, filename: str) -> Path:
     """Save DataFrame to Parquet file with given filename in output_dir."""
