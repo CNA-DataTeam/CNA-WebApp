@@ -58,6 +58,12 @@ if "tm_new_task_cadence" not in st.session_state:
     st.session_state.tm_new_task_cadence = CADENCE_OPTIONS[0]
 if "tm_reset_add_form" not in st.session_state:
     st.session_state.tm_reset_add_form = False
+if "tm_task_log_delete_confirm_open" not in st.session_state:
+    st.session_state.tm_task_log_delete_confirm_open = False
+if "tm_task_log_delete_confirm_rendered" not in st.session_state:
+    st.session_state.tm_task_log_delete_confirm_rendered = False
+if "tm_task_log_delete_payload" not in st.session_state:
+    st.session_state.tm_task_log_delete_payload = None
 
 # Reset add-form widget values only before widgets are instantiated in the run.
 if st.session_state.tm_reset_add_form:
@@ -594,6 +600,105 @@ def _save_task_log_task_name_changes(changes_df: pd.DataFrame) -> tuple[int, int
     return updated_rows, touched_files
 
 
+def _delete_task_log_rows(delete_df: pd.DataFrame) -> tuple[int, int]:
+    """Delete selected task-log rows from their original parquet files."""
+    if delete_df.empty:
+        return 0, 0
+
+    deleted_rows = 0
+    touched_files = 0
+    for source_file, group in delete_df.groupby("__source_file"):
+        file_path = Path(str(source_file))
+        if not file_path.exists():
+            LOGGER.warning("Task log source file no longer exists for delete: %s", file_path)
+            continue
+
+        try:
+            file_df = pd.read_parquet(file_path)
+        except Exception as exc:
+            LOGGER.warning("Failed to read task log source file for delete '%s': %s", file_path, exc)
+            continue
+        if file_df.empty:
+            continue
+
+        drop_index_labels: set[int] = set()
+        for _, row in group.iterrows():
+            target_index = None
+            try:
+                row_idx = int(row.get("__row_idx"))
+            except (TypeError, ValueError):
+                row_idx = -1
+            if 0 <= row_idx < len(file_df):
+                target_index = file_df.index[row_idx]
+
+            if target_index is None:
+                task_id = str(row.get("TaskID") or "").strip()
+                if task_id and "TaskID" in file_df.columns:
+                    task_id_series = file_df["TaskID"].fillna("").astype(str).str.strip()
+                    matches = file_df.index[task_id_series.eq(task_id)]
+                    if len(matches) > 0:
+                        target_index = matches[0]
+
+            if target_index is not None:
+                drop_index_labels.add(target_index)
+
+        if not drop_index_labels:
+            continue
+
+        remaining_df = file_df.drop(index=list(drop_index_labels))
+        deleted_rows += len(drop_index_labels)
+        touched_files += 1
+
+        if remaining_df.empty:
+            try:
+                file_path.unlink(missing_ok=True)
+            except Exception as exc:
+                LOGGER.warning("Failed to remove emptied task log source file '%s': %s", file_path, exc)
+                _write_tasks_parquet(file_path, remaining_df.reset_index(drop=True))
+        else:
+            _write_tasks_parquet(file_path, remaining_df.reset_index(drop=True))
+
+    return deleted_rows, touched_files
+
+
+@st.dialog("Confirm Delete")
+def confirm_task_log_delete_dialog() -> None:
+    payload = st.session_state.get("tm_task_log_delete_payload")
+    if not isinstance(payload, pd.DataFrame) or payload.empty:
+        st.error("No rows selected for deletion.")
+        st.session_state.tm_task_log_delete_confirm_open = False
+        st.session_state.tm_task_log_delete_confirm_rendered = False
+        st.session_state.tm_task_log_delete_payload = None
+        return
+
+    st.warning(f"You are about to delete {len(payload):,} task log row(s).")
+    preview_cols = [c for c in ["Entry Date", "FullName", "TaskName", "Notes"] if c in payload.columns]
+    if preview_cols:
+        st.dataframe(payload[preview_cols], hide_index=True, width="stretch")
+
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        if st.button("Confirm Delete", type="primary", width="stretch", key="tm_task_log_confirm_delete_btn"):
+            deleted_rows, touched_files = _delete_task_log_rows(payload)
+            _load_task_log_entries.clear()
+            utils.load_all_completed_tasks.clear()
+            st.session_state.tm_task_log_delete_confirm_open = False
+            st.session_state.tm_task_log_delete_confirm_rendered = False
+            st.session_state.tm_task_log_delete_payload = None
+            if deleted_rows > 0:
+                st.success(f"Deleted {deleted_rows} row(s) across {touched_files} file(s).")
+            else:
+                st.info("No rows were deleted.")
+            st.rerun()
+
+    with cancel_col:
+        if st.button("Cancel", width="stretch", key="tm_task_log_cancel_delete_btn"):
+            st.session_state.tm_task_log_delete_confirm_open = False
+            st.session_state.tm_task_log_delete_confirm_rendered = False
+            st.session_state.tm_task_log_delete_payload = None
+            st.rerun()
+
+
 def render_task_log_section() -> None:
     try:
         df = _load_task_log_entries(config.COMPLETED_TASKS_DIR)
@@ -724,25 +829,30 @@ def render_task_log_section() -> None:
         sorted_df = filtered_df
     working_df = sorted_df[display_cols + ["TaskID", "__source_file", "__row_idx"]].reset_index(drop=True)
     view_df = working_df[display_cols].copy()
+    editor_input_df = view_df.copy()
+    editor_input_df.insert(0, "Select", False)
     st.caption(f"Rows: {len(view_df):,} (of {len(df):,})")
 
     edited_view_df = st.data_editor(
-        view_df,
+        editor_input_df,
         hide_index=True,
         width="stretch",
         key="tm_task_log_editor",
         column_config={
             "TaskName": st.column_config.TextColumn("TaskName", required=True),
+            "Select": st.column_config.CheckboxColumn("Select", default=False),
         },
-        disabled=[c for c in view_df.columns if c != "TaskName"],
+        disabled=[c for c in editor_input_df.columns if c not in {"TaskName", "Select"}],
     )
 
-    base_task_series = view_df["TaskName"].fillna("").astype(str).str.strip()
+    base_task_series = editor_input_df["TaskName"].fillna("").astype(str).str.strip()
     new_task_series = edited_view_df["TaskName"].fillna("").astype(str).str.strip()
     changed_mask = new_task_series.ne(base_task_series)
     has_changes = bool(changed_mask.any())
+    delete_mask = edited_view_df["Select"].fillna(False).astype(bool)
+    has_deletes = bool(delete_mask.any())
 
-    save_col, refresh_col = st.columns([1, 1])
+    save_col, delete_col, refresh_col = st.columns([1, 1, 1])
     with save_col:
         if st.button("Save Task Log Edits", type="primary", width="stretch", disabled=not has_changes):
             changes = working_df.loc[changed_mask, ["TaskID", "__source_file", "__row_idx"]].copy()
@@ -760,11 +870,26 @@ def render_task_log_section() -> None:
                 else:
                     st.info("No rows were updated.")
 
+    with delete_col:
+        if st.button("Delete Selected", type="secondary", width="stretch", disabled=not has_deletes):
+            delete_payload = working_df.loc[
+                delete_mask,
+                ["TaskID", "__source_file", "__row_idx", "Entry Date", "FullName", "TaskName", "Notes"],
+            ].copy()
+            st.session_state.tm_task_log_delete_payload = delete_payload
+            st.session_state.tm_task_log_delete_confirm_open = True
+            st.session_state.tm_task_log_delete_confirm_rendered = False
+            st.rerun()
+
     with refresh_col:
         if st.button("Refresh Task Log", width="stretch"):
             _load_task_log_entries.clear()
             utils.load_all_completed_tasks.clear()
             st.rerun()
+
+    if st.session_state.tm_task_log_delete_confirm_open and not st.session_state.tm_task_log_delete_confirm_rendered:
+        st.session_state.tm_task_log_delete_confirm_rendered = True
+        confirm_task_log_delete_dialog()
 
 
 macro_logistics, macro_project_services, macro_general = st.tabs(

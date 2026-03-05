@@ -818,7 +818,8 @@ def render_exports_view() -> None:
             filtered["Department"].fillna("").astype(str).str.strip().eq(selected_department)
         ]
 
-    st.dataframe(filtered, hide_index=True, width="stretch")
+    display_df = filtered.drop(columns=["User"], errors="ignore")
+    st.dataframe(display_df, hide_index=True, width="stretch")
 
     csv_bytes = filtered.to_csv(index=False).encode("utf-8")
     st.download_button(
