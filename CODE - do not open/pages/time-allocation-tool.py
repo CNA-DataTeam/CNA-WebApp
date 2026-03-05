@@ -502,6 +502,17 @@ def render_input_view(
     number_of_accounts = int(max(1, st.session_state.get("ta_detailed_count", 1) or 1))
     st.session_state["ta_detailed_count"] = number_of_accounts
 
+    for idx in range(number_of_accounts):
+        account_key = f"ta_detailed_account_{idx}"
+        duration_key = f"ta_detailed_duration_{idx}"
+        channel_key = f"ta_detailed_channel_{idx}"
+        if account_key not in st.session_state:
+            st.session_state[account_key] = ""
+        if duration_key not in st.session_state:
+            st.session_state[duration_key] = "00:00"
+        if channel_key not in st.session_state:
+            st.session_state[channel_key] = CHANNEL_OPTIONS[DEFAULT_CHANNEL_INDEX]
+
     preview_seconds: list[int] = []
     for idx in range(number_of_accounts):
         duration_value = st.session_state.get(f"ta_detailed_duration_{idx}", "00:00")
@@ -524,7 +535,6 @@ def render_input_view(
         with c2:
             duration = st.text_input(
                 "Time Duration",
-                value="00:00",
                 key=f"ta_detailed_duration_{idx}",
             )
         with c3:
@@ -534,7 +544,6 @@ def render_input_view(
             channel = st.selectbox(
                 "Channel",
                 options=CHANNEL_OPTIONS,
-                index=DEFAULT_CHANNEL_INDEX,
                 key=f"ta_detailed_channel_{idx}",
             )
         with c5:
