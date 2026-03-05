@@ -26,20 +26,10 @@ import utils
 # ============================================================
 # PAGE CONFIG / HEADER
 # ============================================================
-st.set_page_config(page_title="Packaging Estimator", layout="wide")
+PAGE_TITLE = utils.get_registry_page_title(__file__, "Packaging Estimator")
+st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
-
-logo_b64 = utils.get_logo_base64(str(config.LOGO_PATH))
-st.markdown(
-    f"""
-    <div class="header-row">
-        <img class="header-logo" src="data:image/png;base64,{logo_b64}" />
-        <h1 class="header-title">LS - Packaging Estimator</h1>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.divider()
+utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
 
 # ============================================================
 # CONSTANTS

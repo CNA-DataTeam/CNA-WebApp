@@ -17,13 +17,14 @@ import config
 import utils
 
 LOGGER = utils.get_page_logger("Task Analytics")
+PAGE_TITLE = utils.get_registry_page_title(__file__, "Tasks Analytics")
 
 
 # ============================================================
 # PAGE CONFIG (SAFE AT IMPORT)
 # ============================================================
 st.set_page_config(
-    page_title="Task Tracker - Analytics",
+    page_title=PAGE_TITLE,
     layout="wide",
 )
 utils.log_page_open_once("task_analytics_page", LOGGER)
@@ -293,17 +294,7 @@ def main() -> None:
     else:
         df["PartiallyComplete"] = df["PartiallyComplete"].fillna(False).astype(bool)
 
-    logo_b64 = utils.get_logo_base64(str(config.LOGO_PATH))
-    st.markdown(
-        f"""
-        <div class="header-row">
-            <img class="header-logo" src="data:image/png;base64,{logo_b64}" />
-            <h1 class="header-title">LS - Tasks Analytics</h1>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.divider()
+    utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
 
     filtered_df, user_filter = main_filters(df)
     LOGGER.info("Filter result | source_rows=%s filtered_rows=%s", len(df), len(filtered_df))

@@ -48,6 +48,7 @@ Outputs:
 from __future__ import annotations
 import base64
 import getpass
+import html
 import inspect
 import logging
 import re
@@ -321,6 +322,69 @@ def get_logo_base64(logo_path: str) -> str:
         return base64.b64encode(data).decode("utf-8")
     except Exception:
         return ""
+
+
+@lru_cache(maxsize=1)
+def _registry_title_map() -> dict[str, str]:
+    """Build a normalized path->title map from page_registry."""
+    try:
+        import page_registry
+    except Exception:
+        return {}
+
+    mapping: dict[str, str] = {}
+    section_pages = getattr(page_registry, "SECTION_PAGES", {})
+    if not isinstance(section_pages, dict):
+        section_pages = {}
+
+    for entries in section_pages.values():
+        for entry in entries:
+            rel_path = str(getattr(entry, "path", "")).replace("\\", "/").strip().lower()
+            title = str(getattr(entry, "title", "")).strip()
+            if rel_path and title:
+                mapping[rel_path] = title
+
+    home_entry = getattr(page_registry, "HOME_PAGE", None)
+    if home_entry is not None:
+        rel_path = str(getattr(home_entry, "path", "")).replace("\\", "/").strip().lower()
+        title = str(getattr(home_entry, "title", "")).strip()
+        if rel_path and title:
+            mapping[rel_path] = title
+    return mapping
+
+
+def get_registry_page_title(source_file: str | Path, fallback_title: str) -> str:
+    """
+    Resolve page title from page_registry using the source file path.
+    Falls back to fallback_title when no registry match is found.
+    """
+    fallback = str(fallback_title).strip() or "Page"
+    try:
+        source_norm = Path(source_file).resolve().as_posix().lower()
+        for rel_path, title in _registry_title_map().items():
+            if source_norm.endswith(f"/{rel_path}") or source_norm.endswith(rel_path):
+                return title
+    except Exception:
+        pass
+    return fallback
+
+
+def render_page_header(page_title: str, logo_path: str | Path | None = None, show_divider: bool = True) -> None:
+    """Render the standard logo + page title header."""
+    logo_value = logo_path if logo_path is not None else config.LOGO_PATH
+    logo_b64 = get_logo_base64(str(logo_value))
+    safe_title = html.escape(str(page_title).strip() or "Page")
+    st.markdown(
+        f"""
+        <div class="header-row">
+            <img class="header-logo" src="data:image/png;base64,{logo_b64}" />
+            <h1 class="header-title">{safe_title}</h1>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if show_divider:
+        st.divider()
 
 @lru_cache(maxsize=1)
 def find_task_tracker_root() -> Path:
@@ -742,35 +806,75 @@ def load_users_table() -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def get_user_department(user_login: str, users_df: pd.DataFrame | None = None) -> str:
-    """Return the department for a given user login, or empty string if unknown."""
+def get_user_department(
+    user_login: str,
+    users_df: pd.DataFrame | None = None,
+    full_name: str | None = None,
+) -> str:
+    """Return the department for a given user, or empty string if unknown."""
     lookup_user = str(user_login).strip().lower()
     lookup_key = _normalize_login_key(user_login)
     if not lookup_user:
         return ""
 
+    def _resolve(df_local: pd.DataFrame) -> str:
+        if df_local.empty:
+            return ""
+
+        user_col = _find_column_by_alias(
+            df_local,
+            ["User", "UserLogin", "Login", "Username", "User Name", "NetworkLogin", "SamAccountName"],
+        )
+        dept_col = _find_column_by_alias(df_local, ["Department", "Dept"])
+        if not dept_col:
+            return ""
+
+        matched = pd.DataFrame()
+        if user_col:
+            user_series = df_local[user_col].astype(str).str.strip().str.lower()
+            user_key_series = user_series.map(_normalize_login_key)
+            matched = df_local[(user_series == lookup_user) | (user_key_series == lookup_key)]
+
+        if matched.empty:
+            email_col = _find_column_by_alias(df_local, ["Email", "EmailAddress", "E-mail"])
+            if email_col:
+                email_key_series = (
+                    df_local[email_col].fillna("").astype(str).str.strip().str.lower().map(_normalize_login_key)
+                )
+                matched = df_local[email_key_series == lookup_key]
+
+        if matched.empty and full_name and str(full_name).strip():
+            full_col = _find_column_by_alias(df_local, ["Full Name", "FullName", "Name"])
+            if full_col:
+                lookup_name = str(full_name).strip().lower()
+                name_series = df_local[full_col].fillna("").astype(str).str.strip().str.lower()
+                matched = df_local[name_series == lookup_name]
+
+        if matched.empty:
+            return ""
+
+        dept_series = matched[dept_col].dropna().astype(str).str.strip()
+        dept_series = dept_series[dept_series != ""]
+        if dept_series.empty:
+            return ""
+        return str(dept_series.iloc[0])
+
     df = users_df.copy() if isinstance(users_df, pd.DataFrame) else load_users_table()
-    if df.empty:
-        return ""
+    department = _resolve(df)
+    if department:
+        return department
 
-    user_col = _find_column_by_alias(
-        df,
-        ["User", "UserLogin", "Login", "Username", "User Name", "NetworkLogin", "SamAccountName"],
-    )
-    dept_col = _find_column_by_alias(df, ["Department", "Dept"])
-    if not user_col or not dept_col:
-        return ""
+    # If cache is stale or mismatched, retry with a direct parquet read.
+    if users_df is None:
+        try:
+            users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
+            if users_parquet.exists():
+                fresh_df = pd.read_parquet(users_parquet)
+                return _resolve(fresh_df)
+        except Exception:
+            pass
 
-    user_series = df[user_col].astype(str).str.strip().str.lower()
-    user_key_series = user_series.map(_normalize_login_key)
-    matched = df[(user_series == lookup_user) | (user_key_series == lookup_key)]
-    if matched.empty:
-        return ""
-
-    value = matched.iloc[0].get(dept_col)
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    return str(value).strip()
+    return ""
 
 
 def is_user_admin(user_login: str, users_df: pd.DataFrame | None = None) -> bool:

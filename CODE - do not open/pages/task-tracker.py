@@ -72,9 +72,10 @@ except Exception as exc:
         return None
 
 LOGGER = utils.get_page_logger("Task Tracker")
+PAGE_TITLE = utils.get_registry_page_title(__file__, "Task Tracker")
 
 # Page configuration
-st.set_page_config(page_title="Task Tracker", layout="wide")
+st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 utils.log_page_open_once("task_tracker_page", LOGGER)
 if "_task_tracker_render_logged" not in st.session_state:
     st.session_state._task_tracker_render_logged = True
@@ -94,7 +95,6 @@ COMPLETED_TASKS_DIR = config.COMPLETED_TASKS_DIR
 LIVE_ACTIVITY_DIR = config.LIVE_ACTIVITY_DIR
 ARCHIVED_TASKS_DIR = config.ARCHIVED_TASKS_DIR
 PERSONNEL_DIR = config.PERSONNEL_DIR
-LOGO_PATH = config.LOGO_PATH
 
 # Session state initialization
 DEFAULT_STATE = {
@@ -123,6 +123,7 @@ DEFAULT_STATE = {
     "review_archive_open": False,
     "review_archive_rendered": False,
     "ended_from_paused": False,
+    "active_task_name": "",
 }
 # Ensure all default keys are set
 for k, v in DEFAULT_STATE.items():
@@ -184,11 +185,13 @@ def reset_all():
 
 def start_task():
     """Start a new task timing."""
+    selected_task = str(st.session_state.get(f"task_{st.session_state.reset_counter}", "") or "").strip()
     LOGGER.info(
         "Started task timer | task='%s' cadence='%s'",
-        st.session_state.get(f"task_{st.session_state.reset_counter}", ""),
+        selected_task,
         st.session_state.selected_cadence,
     )
+    st.session_state.active_task_name = selected_task
     st.session_state.state = "running"
     st.session_state.start_utc = utils.now_utc()
     st.session_state.end_utc = None
@@ -315,10 +318,27 @@ def build_task_record(user_login: str, full_name: str, task_name: str, cadence: 
         "AppVersion": config.APP_VERSION,
     }
 
+
+def get_effective_task_name(current_task_name: str) -> str:
+    """Return the best non-empty task name to use for save/log operations."""
+    candidates = [
+        current_task_name,
+        st.session_state.get("active_task_name", ""),
+        st.session_state.get("live_task_name", ""),
+        st.session_state.get("last_task_name", ""),
+        st.session_state.get("restored_task_name", ""),
+    ]
+    for candidate in candidates:
+        task_value = str(candidate or "").strip()
+        if task_value:
+            return task_value
+    return ""
+
 # Confirmation dialog for task submission
 @st.dialog("Submit?")
 def confirm_submit(user_login, full_name, user_key, task_name, selected_account):
     """Modal confirmation dialog for submitting a completed task."""
+    task_name = get_effective_task_name(task_name)
     st.caption(f"**User:** {full_name}")
     st.caption(f"**Task:** {task_name}")
     st.caption(f"**Cadence:** {st.session_state.selected_cadence}")
@@ -341,6 +361,10 @@ def confirm_submit(user_login, full_name, user_key, task_name, selected_account)
     left, right = st.columns(2)
     with left:
         if st.button("Submit", type="primary", width="stretch"):
+            if not task_name:
+                LOGGER.warning("Submit blocked because task name is blank.")
+                st.error("Task name is required. Please reset and select a task again.")
+                return
             if edited_duration.strip() == current_duration:
                 parsed_duration = effective_duration_seconds
             record = build_task_record(
@@ -470,17 +494,7 @@ def live_activity_section():
         st.dataframe(display_cols, hide_index=True, width="stretch")
 
 # Header
-logo_b64 = utils.get_logo_base64(str(LOGO_PATH))
-st.markdown(
-    f"""
-    <div class="header-row">
-        <img class="header-logo" src="data:image/png;base64,{logo_b64}" />
-        <h1 class="header-title">LS - Task Tracker</h1>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.divider()
+utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
 if st.session_state.get("uploaded"):
     LOGGER.info("Showing upload success toast.")
     st.toast("Upload Successful", icon="✅")
@@ -543,25 +557,51 @@ with mid_col:
         if st.session_state.restored_task_name in task_options:
             st.session_state[task_key] = st.session_state.restored_task_name
     task_name = st.selectbox("Task", task_options, disabled=inputs_locked, key=task_key)
+    effective_task_name = get_effective_task_name(task_name)
     CADENCE_ORDER = ["Daily", "Weekly", "Periodic"]
     available_cadences = []
     if task_name:
         available_cadences = tasks_df.loc[tasks_df["TaskName"] == task_name, "TaskCadence"].dropna().unique().tolist()
+    ordered_available_cadences = [c for c in CADENCE_ORDER if c in available_cadences]
     # Auto-select cadence if needed
     if task_name and st.session_state.state == "idle":
         if task_name != st.session_state.last_task_name:
             st.session_state.selected_cadence = None
             st.session_state.last_task_name = task_name
-        if st.session_state.selected_cadence not in available_cadences:
-            st.session_state.selected_cadence = next((c for c in CADENCE_ORDER if c in available_cadences), None)
-    st.caption("Cadence")
-    cad_cols = st.columns(3)
-    for col, cadence in zip(cad_cols, CADENCE_ORDER):
-        is_selected = st.session_state.selected_cadence == cadence
-        disabled = (not task_name) or (cadence not in available_cadences) or (inputs_locked and not is_selected)
-        with col:
-            st.button(cadence, disabled=disabled, type="primary" if is_selected else "secondary",
-                      key=f"cad_{cadence}_{st.session_state.reset_counter}", on_click=select_cadence, args=(cadence,), width="stretch")
+        if st.session_state.selected_cadence not in ordered_available_cadences:
+            st.session_state.selected_cadence = next((c for c in CADENCE_ORDER if c in ordered_available_cadences), None)
+    cadence_pills_key = (
+        f"cad_pills_{st.session_state.reset_counter}_"
+        f"{utils.sanitize_key(task_name) if task_name else 'none'}"
+    )
+    if not task_name:
+        cadence_options = CADENCE_ORDER
+        cadence_default = None
+        cadence_disabled = True
+    elif ordered_available_cadences:
+        cadence_options = ordered_available_cadences
+        cadence_default = (
+            st.session_state.selected_cadence
+            if st.session_state.selected_cadence in ordered_available_cadences
+            else ordered_available_cadences[0]
+        )
+        cadence_disabled = inputs_locked
+    else:
+        cadence_options = CADENCE_ORDER
+        cadence_default = None
+        cadence_disabled = True
+
+    cadence_choice = st.pills(
+        "Cadence",
+        cadence_options,
+        selection_mode="single",
+        default=cadence_default,
+        key=cadence_pills_key,
+        disabled=cadence_disabled,
+        width="stretch",
+    )
+    if cadence_choice in ordered_available_cadences:
+        st.session_state.selected_cadence = cadence_choice
     st.text_area("Notes (optional)", key="notes", height=120)
 
 with right_col:
@@ -605,7 +645,7 @@ with right_col:
             "Archive",
             width="stretch",
             on_click=archive_task,
-            args=(user_login, full_name, user_key, task_name, selected_account),
+            args=(user_login, full_name, user_key, effective_task_name, selected_account),
         )
     if archived_count > 0:
         if st.button(
@@ -621,10 +661,14 @@ with right_col:
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Upload", type="primary", width="stretch"):
-                st.session_state.submit_partially_complete = st.session_state.get("partially_complete", False)
-                st.session_state.confirm_open = True
-                st.session_state.confirm_rendered = False
-                st.rerun()
+                if not effective_task_name:
+                    LOGGER.warning("Upload blocked because effective task name is blank.")
+                    st.error("Task name is missing. Please reset and select a task again.")
+                else:
+                    st.session_state.submit_partially_complete = st.session_state.get("partially_complete", False)
+                    st.session_state.confirm_open = True
+                    st.session_state.confirm_rendered = False
+                    st.rerun()
         with c2:
             st.button("Reset", width="stretch", on_click=reset_all)
     if st.session_state.state != "idle":
@@ -635,10 +679,10 @@ with right_col:
             st.toggle("Partially complete", key="partially_complete", label_visibility="collapsed")
 
 # Save live activity after input changes (to broadcast running task to others)
-if st.session_state.state in ("running", "paused") and not st.session_state.live_activity_saved and task_name and st.session_state.selected_cadence:
+if st.session_state.state in ("running", "paused") and not st.session_state.live_activity_saved and effective_task_name and st.session_state.selected_cadence:
     utils.save_live_activity(
         LIVE_ACTIVITY_DIR, user_key, user_login, full_name,
-        task_name, st.session_state.selected_cadence, selected_account,
+        effective_task_name, st.session_state.selected_cadence, selected_account,
         st.session_state.covering_for, st.session_state.notes,
         st.session_state.start_utc,
         state=st.session_state.state,
@@ -646,12 +690,12 @@ if st.session_state.state in ("running", "paused") and not st.session_state.live
         pause_start_utc=st.session_state.pause_start_utc,
     )
     st.session_state.live_activity_saved = True
-    st.session_state.live_task_name = task_name
+    st.session_state.live_task_name = effective_task_name
     st.session_state.live_cadence = st.session_state.selected_cadence
     st.session_state.live_account = selected_account
     LOGGER.info(
         "Live activity saved | task='%s' cadence='%s' state='%s'",
-        task_name,
+        effective_task_name,
         st.session_state.selected_cadence,
         st.session_state.state,
     )
@@ -659,7 +703,7 @@ if st.session_state.state in ("running", "paused") and not st.session_state.live
 # Open confirmation modal if triggered
 if st.session_state.confirm_open and not st.session_state.get("confirm_rendered"):
     st.session_state.confirm_rendered = True
-    confirm_submit(user_login, full_name, user_key, task_name, selected_account)
+    confirm_submit(user_login, full_name, user_key, effective_task_name, selected_account)
 if st.session_state.review_archive_open and not st.session_state.get("review_archive_rendered"):
     st.session_state.review_archive_rendered = True
     review_archived_tasks_dialog(user_login, full_name, user_key)

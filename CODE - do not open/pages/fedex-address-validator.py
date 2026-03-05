@@ -35,12 +35,13 @@ import config
 import utils
 
 LOGGER = utils.get_page_logger("FedEx Address Validator")
+PAGE_TITLE = utils.get_registry_page_title(__file__, "FedEx Address Validator")
 
 # ============================================================
 # PAGE CONFIG (MUST BE FIRST STREAMLIT CALL)
 # ============================================================
 st.set_page_config(
-    page_title="FedEx Address Validator",
+    page_title=PAGE_TITLE,
     layout="wide",
 )
 utils.log_page_open_once("fedex_address_validator_page", LOGGER)
@@ -53,20 +54,7 @@ if "_fedex_render_logged" not in st.session_state:
 # ============================================================
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 
-LOGO_PATH = config.LOGO_PATH
-logo_b64 = utils.get_logo_base64(str(LOGO_PATH))
-
-st.markdown(
-    f"""
-    <div class="header-row">
-        <img class="header-logo" src="data:image/png;base64,{logo_b64}" />
-        <h1 class="header-title">LS - FedEx Address Validator</h1>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.divider()
+utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
 
 
 # ============================================================
