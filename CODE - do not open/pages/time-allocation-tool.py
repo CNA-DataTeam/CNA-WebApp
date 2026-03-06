@@ -35,6 +35,7 @@ LOGGER = utils.get_page_logger("Time Allocation Tool")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Time Allocation Tool")
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+utils.render_app_logo()
 utils.log_page_open_once("time_allocation_tool_page", LOGGER)
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 
@@ -827,7 +828,7 @@ def render_exports_view() -> None:
             filtered["Department"].fillna("").astype(str).str.strip().eq(selected_department)
         ]
 
-    display_df = filtered.drop(columns=["User"], errors="ignore")
+    display_df = filtered.drop(columns=["User", "Source File"], errors="ignore")
     st.dataframe(display_df, hide_index=True, width="stretch")
 
     csv_bytes = filtered.to_csv(index=False).encode("utf-8")
@@ -841,7 +842,7 @@ def render_exports_view() -> None:
 
 
 # Header
-utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+utils.render_page_header(PAGE_TITLE)
 
 user_login = utils.get_os_user()
 full_name = utils.get_full_name_for_user(None, user_login)

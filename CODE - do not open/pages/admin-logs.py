@@ -22,6 +22,7 @@ LOGGER = utils.get_page_logger("Admin Logs")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Logging")
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+utils.render_app_logo()
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 utils.log_page_open_once("admin_logs_page", LOGGER)
 
@@ -30,7 +31,7 @@ if not utils.is_current_user_admin():
     st.error("Access denied. This page is available to admin users only.")
     st.stop()
 
-utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+utils.render_page_header(PAGE_TITLE)
 
 LOGS_ROOT = Path(config.LOGS_ROOT_DIR)
 LOG_FILE_NAME = str(config.LOG_USER_FILE_NAME)

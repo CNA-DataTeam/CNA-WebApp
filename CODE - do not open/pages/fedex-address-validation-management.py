@@ -22,6 +22,7 @@ LOGGER = utils.get_page_logger("FedEx Validator Management")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "FedEx Validator Management")
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+utils.render_app_logo()
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 utils.log_page_open_once("fedex_validation_management_page", LOGGER)
 
@@ -30,7 +31,7 @@ if not utils.is_current_user_admin():
     st.error("Access denied. This page is available to admin users only.")
     st.stop()
 
-utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+utils.render_page_header(PAGE_TITLE)
 
 PARQUET_PATH = Path(config.ADDRESS_VALIDATION_RESULTS_FILE).with_suffix(".parquet")
 CSV_PATH = Path(config.ADDRESS_VALIDATION_RESULTS_FILE).with_suffix(".csv")

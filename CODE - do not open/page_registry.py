@@ -1,7 +1,7 @@
 """
 page_registry.py
 
-Single source of truth for sidebar navigation and home-page cards.
+Single source of truth for app navigation and home-page cards.
 Add new pages here so they appear in both app.py and home.py.
 """
 

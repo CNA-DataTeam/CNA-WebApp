@@ -24,8 +24,9 @@ LOGGER = utils.get_page_logger("Tasks Management")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Content Management")
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+utils.render_app_logo()
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
-utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+utils.render_page_header(PAGE_TITLE)
 
 utils.log_page_open_once("tasks_management_page", LOGGER)
 if "_tasks_management_render_logged" not in st.session_state:

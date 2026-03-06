@@ -1,5 +1,6 @@
 pywin32
 streamlit
+streamlit-navigation-bar
 streamlit-calendar
 pandas
 pyarrow

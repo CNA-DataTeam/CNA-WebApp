@@ -24,6 +24,7 @@ st.set_page_config(
     page_title=PAGE_TITLE,
     layout="wide",
 )
+utils.render_app_logo()
 utils.log_page_open_once("home_page", LOGGER)
 if "_home_render_logged" not in st.session_state:
     st.session_state._home_render_logged = True
@@ -44,7 +45,7 @@ st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 # ============================================================
 # HEADER
 # ============================================================
-utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+utils.render_page_header(PAGE_TITLE)
 
 # ============================================================
 # APPLICATION CARDS (REAL NAVIGATION)

@@ -27,6 +27,7 @@ st.set_page_config(
     page_title=PAGE_TITLE,
     layout="wide",
 )
+utils.render_app_logo()
 utils.log_page_open_once("task_analytics_page", LOGGER)
 
 # ============================================================
@@ -294,7 +295,7 @@ def main() -> None:
     else:
         df["PartiallyComplete"] = df["PartiallyComplete"].fillna(False).astype(bool)
 
-    utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+    utils.render_page_header(PAGE_TITLE)
 
     filtered_df, user_filter = main_filters(df)
     LOGGER.info("Filter result | source_rows=%s filtered_rows=%s", len(df), len(filtered_df))

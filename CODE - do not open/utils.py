@@ -16,7 +16,6 @@ What it does:
         * UserContext + get_user_context() -> permission-ready user metadata
     - Styling/assets:
         * get_global_css() -> str (cached CSS)
-        * get_logo_base64(path) -> str base64 (cached)
     - Parquet I/O (atomic, schema-driven):
         * atomic_write_parquet(df, path, schema) -> writes parquet safely
         * build_out_dir(completed_dir, user_key, ts) -> Path partitioned by date
@@ -48,10 +47,12 @@ Outputs:
 from __future__ import annotations
 import base64
 import getpass
+import hashlib
 import html
 import inspect
 import logging
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -219,6 +220,14 @@ def get_global_css() -> str:
     [data-testid="stToolbar"] button[data-testid="stBaseButton-header"]:last-of-type {
         display: none !important;
     }
+    /* Sidebar navigation sizing */
+    [data-testid="stSidebar"] [data-testid="stPageLink"] p,
+    [data-testid="stSidebar"] [data-testid="stPageLink"] span {
+        font-size: 0.92rem !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
+        font-size: 0.72rem !important;
+    }
     /* Header styling */
     .header-row {
         display: flex;
@@ -227,10 +236,6 @@ def get_global_css() -> str:
         gap: 14px;
         margin-top: 10px;
         margin-bottom: 6px;
-    }
-    .header-logo {
-        width: 80px;
-        height: auto;
     }
     .header-title {
         margin: 0 !important;
@@ -314,14 +319,80 @@ def get_global_css() -> str:
     </style>
     """
 
-@st.cache_data
-def get_logo_base64(logo_path: str) -> str:
-    """Return base64-encoded string of the logo image (cached)."""
+
+@lru_cache(maxsize=4)
+def get_app_logo_path(logo_path: str | Path | None = None) -> str | None:
+    """Return the configured app logo path when the asset exists."""
     try:
-        data = Path(logo_path).read_bytes()
-        return base64.b64encode(data).decode("utf-8")
+        source_path = Path(logo_path if logo_path is not None else config.LOGO_PATH)
+        if not source_path.exists():
+            return None
+        return str(source_path)
     except Exception:
-        return ""
+        return None
+
+
+def render_app_logo(logo_path: str | Path | None = None) -> None:
+    """Render the shared app logo in Streamlit chrome when supported."""
+    image_path = get_app_logo_path(logo_path)
+    if image_path is None or not hasattr(st, "logo"):
+        return
+    try:
+        st.logo(image_path)
+    except Exception:
+        return
+
+
+@lru_cache(maxsize=4)
+def get_nav_logo_svg_path(logo_path: str | Path | None = None) -> str | None:
+    """Return an absolute SVG path compatible with streamlit-navigation-bar."""
+    source_path = Path(logo_path if logo_path is not None else config.LOGO_PATH)
+    try:
+        if not source_path.exists():
+            return None
+        if source_path.suffix.lower() == ".svg":
+            return str(source_path.resolve())
+
+        width = 240
+        height = 64
+        try:
+            from PIL import Image
+
+            with Image.open(source_path) as image:
+                width, height = image.size
+        except Exception:
+            pass
+
+        suffix = source_path.suffix.lower()
+        if suffix in {".jpg", ".jpeg"}:
+            mime_type = "image/jpeg"
+        elif suffix == ".gif":
+            mime_type = "image/gif"
+        elif suffix == ".webp":
+            mime_type = "image/webp"
+        else:
+            mime_type = "image/png"
+
+        image_b64 = base64.b64encode(source_path.read_bytes()).decode("utf-8")
+        cache_key = hashlib.sha1(
+            f"{source_path}|{source_path.stat().st_mtime_ns}|{source_path.stat().st_size}".encode("utf-8")
+        ).hexdigest()[:12]
+        output_dir = Path(tempfile.gettempdir()) / "cna-webapp"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"navbar-logo-{cache_key}.svg"
+        if not output_path.exists():
+            output_path.write_text(
+                (
+                    f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+                    'preserveAspectRatio="xMinYMid meet">'
+                    f'<image width="{width}" height="{height}" '
+                    f'href="data:{mime_type};base64,{image_b64}" /></svg>'
+                ),
+                encoding="utf-8",
+            )
+        return str(output_path.resolve())
+    except Exception:
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -369,15 +440,12 @@ def get_registry_page_title(source_file: str | Path, fallback_title: str) -> str
     return fallback
 
 
-def render_page_header(page_title: str, logo_path: str | Path | None = None, show_divider: bool = True) -> None:
-    """Render the standard logo + page title header."""
-    logo_value = logo_path if logo_path is not None else config.LOGO_PATH
-    logo_b64 = get_logo_base64(str(logo_value))
+def render_page_header(page_title: str, show_divider: bool = True) -> None:
+    """Render the standard page title header."""
     safe_title = html.escape(str(page_title).strip() or "Page")
     st.markdown(
         f"""
         <div class="header-row">
-            <img class="header-logo" src="data:image/png;base64,{logo_b64}" />
             <h1 class="header-title">{safe_title}</h1>
         </div>
         """,

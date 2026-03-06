@@ -19,7 +19,6 @@ What it does:
 
 Key utils used (inputs -> outputs):
     - utils.get_global_css() -> str
-    - utils.get_logo_base64(logo_path) -> str
     - utils.get_os_user() -> str
     - utils.get_full_name_for_user(None, user_login) -> str
     - utils.load_all_user_full_names() -> list[str]
@@ -76,6 +75,7 @@ PAGE_TITLE = utils.get_registry_page_title(__file__, "Task Tracker")
 
 # Page configuration
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+utils.render_app_logo()
 utils.log_page_open_once("task_tracker_page", LOGGER)
 if "_task_tracker_render_logged" not in st.session_state:
     st.session_state._task_tracker_render_logged = True
@@ -494,7 +494,7 @@ def live_activity_section():
         st.dataframe(display_cols, hide_index=True, width="stretch")
 
 # Header
-utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+utils.render_page_header(PAGE_TITLE)
 if st.session_state.get("uploaded"):
     LOGGER.info("Showing upload success toast.")
     st.toast("Upload Successful", icon="✅")

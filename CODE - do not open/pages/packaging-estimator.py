@@ -28,8 +28,9 @@ import utils
 # ============================================================
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Packaging Estimator")
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+utils.render_app_logo()
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
-utils.render_page_header(PAGE_TITLE, config.LOGO_PATH)
+utils.render_page_header(PAGE_TITLE)
 
 # ============================================================
 # CONSTANTS
