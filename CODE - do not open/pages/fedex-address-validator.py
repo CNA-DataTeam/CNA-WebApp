@@ -66,6 +66,21 @@ EMAIL_SUBJECT = "Clark National Accounts - Residential Status Dispute"
 ROW_ID_COL = "__source_row_id"
 BASE_RESIDENTIAL_MATCH_VALUES = {"mismatch", "mixed"}
 BASE_RESIDENTIAL_MATCH_COLUMNS = ("ResidentialStatusMatch", "Residential Match")
+DISPUTE_AMOUNT_COLUMNS = ("Dispute Amount", "DisputeAmount")
+TABLE_INTRO_CAPTION = (
+    'The following Tracking Numbers were charged a "Residential Delivery fee"; they were checked '
+    "using Web's Address Validation API, and the API did not confirm a residential status for the "
+    "address they shipped to."
+)
+
+if "fedex_mark_disputed_confirm_open" not in st.session_state:
+    st.session_state.fedex_mark_disputed_confirm_open = False
+if "fedex_mark_disputed_confirm_rendered" not in st.session_state:
+    st.session_state.fedex_mark_disputed_confirm_rendered = False
+if "fedex_mark_disputed_row_ids" not in st.session_state:
+    st.session_state.fedex_mark_disputed_row_ids = []
+if "fedex_mark_disputed_success" not in st.session_state:
+    st.session_state.fedex_mark_disputed_success = False
 
 
 # ============================================================
@@ -162,6 +177,14 @@ def format_currency_display(value: object) -> str:
     if pd.isna(num):
         return ""
     return f"${num:,.2f}"
+
+
+def sum_currency_values(rows: pd.DataFrame, candidates: Tuple[str, ...]) -> float:
+    """Sum the first matching currency-like column from the provided dataframe."""
+    currency_col = next((col for col in candidates if col in rows.columns), None)
+    if not currency_col:
+        return 0.0
+    return float(pd.to_numeric(rows[currency_col], errors="coerce").fillna(0).sum())
 
 
 def _first_present(row: pd.Series, candidates: List[str]) -> str:
@@ -285,6 +308,40 @@ def open_email(to_addr: str, subject: str, body: str) -> Tuple[bool, str]:
             except Exception:
                 pass
 
+
+@st.dialog("Confirm")
+def confirm_mark_as_disputed_dialog() -> None:
+    """Prompt before persisting the disputed flag for the visible rows."""
+    st.write("Are you sure you want to mark these orders as disputed?")
+
+    confirm_col, cancel_col = st.columns(2)
+    with confirm_col:
+        if st.button(
+            "Confirm",
+            type="primary",
+            width="stretch",
+            key="fedex_confirm_mark_disputed_button",
+        ):
+            pending_row_ids = st.session_state.get("fedex_mark_disputed_row_ids", [])
+            try:
+                mark_rows_as_disputed(RESULTS_CSV_FILE, pending_row_ids)
+                load_results.clear()
+                LOGGER.info("Marked %s displayed row(s) as disputed.", len(pending_row_ids))
+                st.session_state.fedex_mark_disputed_success = True
+                st.session_state.fedex_mark_disputed_confirm_open = False
+                st.session_state.fedex_mark_disputed_confirm_rendered = False
+                st.session_state.fedex_mark_disputed_row_ids = []
+                st.rerun()
+            except Exception as exc:
+                LOGGER.exception("Failed to mark rows as disputed: %s", exc)
+                st.error(f"Failed to mark rows as disputed: {exc}")
+    with cancel_col:
+        if st.button("Cancel", width="stretch", key="fedex_cancel_mark_disputed_button"):
+            st.session_state.fedex_mark_disputed_confirm_open = False
+            st.session_state.fedex_mark_disputed_confirm_rendered = False
+            st.session_state.fedex_mark_disputed_row_ids = []
+            st.rerun()
+
 # ============================================================
 # COLUMN FILTERING AND RENAMING
 # ============================================================
@@ -350,6 +407,8 @@ if tracking_col:
 # Format Net Charge Amount as currency for display.
 if "Net Charge Amount" in display_df.columns:
     display_df["Net Charge Amount"] = display_df["Net Charge Amount"].apply(format_currency_display)
+if "Dispute Amount" in display_df.columns:
+    display_df["Dispute Amount"] = display_df["Dispute Amount"].apply(format_currency_display)
 
 # Move Classification before Match Type / Residential Match.
 classification_col = next((c for c in ["Classification", "classification"] if c in display_df.columns), None)
@@ -376,17 +435,39 @@ with st.expander("Filters", expanded=True):
         (c for c in ["InvoiceDate", "Invoice Date", "Invoice_Date"] if c in display_df.columns),
         None,
     )
+    residential_match_options = (
+        sorted(display_df["Residential Match"].dropna().astype(str).unique().tolist())
+        if "Residential Match" in display_df.columns
+        else []
+    )
+    classification_options = (
+        sorted(display_df[classification_col].dropna().astype(str).unique().tolist())
+        if classification_col
+        else []
+    )
 
-    left_col, right_col = st.columns(2)
-    with left_col:
+    top_left_col, top_right_col = st.columns(2)
+    with top_left_col:
         status_filter = st.multiselect(
             "Residential Match",
-            sorted(display_df["Residential Match"].dropna().astype(str).unique().tolist()),
+            residential_match_options,
+            disabled="Residential Match" not in display_df.columns,
+            key="fedex_residential_match_filter",
         )
+    with top_right_col:
+        classification_filter = st.multiselect(
+            "Classification",
+            classification_options,
+            disabled=classification_col is None,
+            key="fedex_classification_filter",
+        )
+
+    bottom_left_col, bottom_right_col = st.columns(2)
+    with bottom_left_col:
         service_options = sorted(display_df[service_col].dropna().astype(str).unique().tolist()) if service_col else []
         service_filter = st.multiselect("Service Type", service_options, disabled=service_col is None)
 
-    with right_col:
+    with bottom_right_col:
         if invoice_date_col:
             invoice_dates = pd.to_datetime(df[invoice_date_col], errors="coerce").dropna()
             if invoice_dates.empty:
@@ -414,6 +495,8 @@ with st.expander("Filters", expanded=True):
 view_df = display_df
 if service_filter and service_col:
     view_df = view_df[view_df[service_col].fillna("").astype(str).isin(service_filter)]
+if classification_filter and classification_col:
+    view_df = view_df[view_df[classification_col].fillna("").astype(str).isin(classification_filter)]
 if invoice_date_col:
     if isinstance(invoice_date_range, (tuple, list)) and len(invoice_date_range) == 2:
         start_date, end_date = invoice_date_range
@@ -431,6 +514,7 @@ _start_date_text = str(start_date) if "start_date" in locals() else ""
 _end_date_text = str(end_date) if "end_date" in locals() else ""
 filter_signature = (
     tuple(sorted(status_filter)),
+    tuple(sorted(classification_filter)),
     tuple(sorted(service_filter)),
     _start_date_text,
     _end_date_text,
@@ -438,8 +522,9 @@ filter_signature = (
 if st.session_state.get("_fedex_filter_signature") != filter_signature:
     st.session_state._fedex_filter_signature = filter_signature
     LOGGER.info(
-        "Filters updated | status=%s services=%s date_range=%s..%s",
+        "Filters updated | status=%s classification=%s services=%s date_range=%s..%s",
         len(status_filter),
+        len(classification_filter),
         len(service_filter),
         _start_date_text,
         _end_date_text,
@@ -464,16 +549,27 @@ for row_id in visible_row_ids:
         LOGGER.warning("Skipping invalid visible row id: %r", row_id)
 
 table_df = view_df.drop(columns=[ROW_ID_COL], errors="ignore")
+total_dispute_amount = sum_currency_values(visible_rows_for_actions, DISPUTE_AMOUNT_COLUMNS)
 
-btn_col1, btn_col2, btn_col3, btn_spacer = st.columns([2.4, 2.4, 2.4, 6.8], width="stretch")
-with btn_col1:
-    generate_dispute_clicked = st.button("Generate Dispute File", key="generate_dispute")
-with btn_col2:
-    send_email_clicked = st.button("Send Email to FedEx", key="send_email")
-with btn_col3:
-    mark_disputed_clicked = st.button("Mark as Disputed", key="mark_disputed")
+if st.session_state.get("fedex_mark_disputed_success"):
+    st.success("Displayed rows marked as disputed.")
+    st.session_state.fedex_mark_disputed_success = False
 
-st.caption(f"{len(table_df):,} rows loaded")
+st.caption(TABLE_INTRO_CAPTION)
+
+summary_col1, summary_col2, summary_spacer, action_col = st.columns([1.8, 2.2, 3.2, 4.8], width="stretch")
+with summary_col1:
+    st.metric("Orders", f"{len(table_df):,}")
+with summary_col2:
+    st.metric("Total Amount to Dispute", format_currency_display(total_dispute_amount))
+with action_col:
+    action_btn1, action_btn2, action_btn3 = st.columns(3)
+    with action_btn1:
+        generate_dispute_clicked = st.button("Generate Dispute File", key="generate_dispute", width="stretch")
+    with action_btn2:
+        send_email_clicked = st.button("Send Email to FedEx", key="send_email", width="stretch")
+    with action_btn3:
+        mark_disputed_clicked = st.button("Mark as Disputed", key="mark_disputed", width="stretch")
 
 st.dataframe(
     table_df,
@@ -532,18 +628,19 @@ if send_email_clicked:
 
 if mark_disputed_clicked:
     LOGGER.info("Decision: Mark as Disputed clicked.")
-    try:
-        if not visible_source_indices:
-            st.warning("No rows are currently displayed to mark as disputed.")
-        else:
-            mark_rows_as_disputed(RESULTS_CSV_FILE, visible_source_indices)
-            load_results.clear()
-            LOGGER.info("Marked %s displayed row(s) as disputed.", len(visible_source_indices))
-            st.success("Displayed rows marked as disputed.")
-            st.rerun(scope="app")
-    except Exception as exc:
-        LOGGER.exception("Failed to mark rows as disputed: %s", exc)
-        st.error(f"Failed to mark rows as disputed: {exc}")
+    if not visible_source_indices:
+        st.warning("No rows are currently displayed to mark as disputed.")
+    else:
+        st.session_state.fedex_mark_disputed_row_ids = visible_source_indices
+        st.session_state.fedex_mark_disputed_confirm_open = True
+        st.session_state.fedex_mark_disputed_confirm_rendered = False
+
+if (
+    st.session_state.fedex_mark_disputed_confirm_open
+    and not st.session_state.fedex_mark_disputed_confirm_rendered
+):
+    st.session_state.fedex_mark_disputed_confirm_rendered = True
+    confirm_mark_as_disputed_dialog()
 
 st.caption("Emails open as editable drafts in Outlook desktop. Download the dispute Excel separately.")
 
