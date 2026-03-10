@@ -283,6 +283,8 @@ def main() -> None:
         st.error("You are not authorized to view this page.")
         return
 
+    utils.render_page_header(PAGE_TITLE)
+
     df = utils.load_all_completed_tasks(config.COMPLETED_TASKS_DIR)
     if df.empty:
         LOGGER.info("No completed task data available for analytics.")
@@ -294,8 +296,6 @@ def main() -> None:
         df["PartiallyComplete"] = False
     else:
         df["PartiallyComplete"] = df["PartiallyComplete"].fillna(False).astype(bool)
-
-    utils.render_page_header(PAGE_TITLE)
 
     filtered_df, user_filter = main_filters(df)
     LOGGER.info("Filter result | source_rows=%s filtered_rows=%s", len(df), len(filtered_df))

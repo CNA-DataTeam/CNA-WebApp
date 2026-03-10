@@ -182,6 +182,15 @@ def _initialize_state(force_reload: bool = False) -> None:
     LOGGER.info("Loaded tasks parquet | path='%s' rows=%s", TASKS_PARQUET_PATH, len(full_df))
 
 
+def _tasks_state_needs_reload() -> bool:
+    return (
+        st.session_state.get("tm_state_version") != TM_STATE_VERSION
+        or "tm_original_full_df" not in st.session_state
+        or "tm_working_full_df" not in st.session_state
+        or "tm_column_map" not in st.session_state
+    )
+
+
 def _has_pending_changes() -> bool:
     original = st.session_state.tm_original_full_df.reset_index(drop=True)
     working = st.session_state.tm_working_full_df.reset_index(drop=True)
@@ -277,7 +286,11 @@ def confirm_update_dialog() -> None:
 
 def render_tasks_section() -> None:
     try:
-        _initialize_state()
+        if _tasks_state_needs_reload():
+            with st.spinner("Loading task definitions..."):
+                _initialize_state()
+        else:
+            _initialize_state()
     except Exception as exc:
         LOGGER.exception("Failed to initialize tasks editor: %s", exc)
         st.error(f"Failed to load tasks.parquet: {exc}")
@@ -515,7 +528,7 @@ def render_users_section() -> None:
     st.dataframe(filtered_df, hide_index=True, width="stretch")
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner="Loading task log...")
 def _load_task_log_entries(completed_dir: Path) -> pd.DataFrame:
     files = list(completed_dir.glob("user=*/year=*/month=*/day=*/*.parquet"))
     if not files:

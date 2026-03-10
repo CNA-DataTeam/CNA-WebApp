@@ -737,7 +737,7 @@ if not recent_df.empty:
         recent_df["PartiallyComplete"] = pd.Series([pd.NA] * len(recent_df), dtype="boolean")
     else:
         recent_df["PartiallyComplete"] = recent_df["PartiallyComplete"].astype("boolean")
-    recent_df["Partially Completed?"] = recent_df["PartiallyComplete"].fillna(False).astype(bool)
+    recent_df["Part. Completed?"] = recent_df["PartiallyComplete"].fillna(False).astype(bool)
     if "Notes" not in recent_df.columns:
         recent_df["Notes"] = ""
     recent_df["Notes"] = recent_df["Notes"].fillna("")
@@ -746,15 +746,15 @@ if not recent_df.empty:
     recent_df["DisplayUser"] = recent_df["FullName"].fillna("").astype(str).str.strip()
     mask_blank = recent_df["DisplayUser"].eq("")
     recent_df.loc[mask_blank, "DisplayUser"] = recent_df.loc[mask_blank, "UserLogin"].fillna("").astype(str)
-    display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[["User", "Task", "Partially Completed?", "Uploaded", "Duration", "Notes"]]
+    display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"]]
     st.dataframe(
         display_df,
         hide_index=True,
         width="stretch",
         column_config={
-            "Partially Completed?": st.column_config.CheckboxColumn("Partially Completed?", disabled=True, width= 30),
+            "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", disabled=True, width="small"),
             "Notes": st.column_config.TextColumn("Notes", width="large"),
-            "Uploaded": st.column_config.TextColumn("Uploaded", width=1),
+            "Uploaded": st.column_config.TextColumn("Uploaded", width="small"),
         },
     )
 else:

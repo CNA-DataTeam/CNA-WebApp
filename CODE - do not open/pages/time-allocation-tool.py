@@ -64,7 +64,7 @@ def _empty_to_none(value: object) -> str | None:
     return text if text else None
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner="Loading saved allocations...")
 def load_time_allocation_exports(base_dir: Path) -> pd.DataFrame:
     """Load all saved time-allocation parquet files from the output directory."""
     files = sorted(base_dir.glob("*.parquet"), reverse=True)

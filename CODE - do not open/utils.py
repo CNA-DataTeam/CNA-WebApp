@@ -241,6 +241,13 @@ def get_global_css() -> str:
         margin: 0 !important;
         text-align: center;
     }
+    .header-subtitle {
+        text-align: center;
+        font-style: italic;
+        margin-top: -0.35rem;
+        margin-bottom: 0.5rem;
+        color: #4d4d4d;
+    }
     /* App navigation card styling */
     .app-card {
         border: 1px solid #E6E6E6;
@@ -440,14 +447,51 @@ def get_registry_page_title(source_file: str | Path, fallback_title: str) -> str
     return fallback
 
 
+@lru_cache(maxsize=1)
+def _registry_quote_map() -> dict[str, str]:
+    """Build a normalized title->quote map from page_registry."""
+    try:
+        import page_registry
+    except Exception:
+        return {}
+
+    mapping: dict[str, str] = {}
+    section_pages = getattr(page_registry, "SECTION_PAGES", {})
+    if not isinstance(section_pages, dict):
+        section_pages = {}
+
+    for entries in section_pages.values():
+        for entry in entries:
+            title = str(getattr(entry, "title", "")).strip()
+            quote = str(getattr(entry, "quote", "")).strip()
+            if title and quote:
+                mapping[title] = quote
+
+    home_entry = getattr(page_registry, "HOME_PAGE", None)
+    if home_entry is not None:
+        title = str(getattr(home_entry, "title", "")).strip()
+        quote = str(getattr(home_entry, "quote", "")).strip()
+        if title and quote:
+            mapping[title] = quote
+    return mapping
+
+
+def get_registry_page_quote(page_title: str) -> str:
+    """Resolve page quote from page_registry using the page title."""
+    return _registry_quote_map().get(str(page_title).strip(), "")
+
+
 def render_page_header(page_title: str, show_divider: bool = True) -> None:
     """Render the standard page title header."""
     safe_title = html.escape(str(page_title).strip() or "Page")
+    safe_quote = html.escape(get_registry_page_quote(page_title))
+    subtitle_html = f'<div class="header-subtitle">{safe_quote}</div>' if safe_quote else ""
     st.markdown(
         f"""
         <div class="header-row">
             <h1 class="header-title">{safe_title}</h1>
         </div>
+        {subtitle_html}
         """,
         unsafe_allow_html=True,
     )
@@ -722,7 +766,7 @@ def load_recent_tasks(completed_dir: Path, user_key: str | None = None, limit: i
         return pd.DataFrame()
     return df.sort_values("StartTimestampUTC", ascending=False).head(limit)
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=300, show_spinner="Loading analytics history...")
 def load_all_completed_tasks(base_dir: Path) -> pd.DataFrame:
     """Load all completed task records from the CompletedTasks directory."""
     files = list(base_dir.glob("user=*/year=*/month=*/day=*/*.parquet"))

@@ -17,6 +17,7 @@ class PageEntry:
     icon: str
     caption: str
     admin_only: bool = False
+    quote: str = ""
 
 
 HOME_PAGE = PageEntry(
@@ -24,6 +25,7 @@ HOME_PAGE = PageEntry(
     title="Home",
     icon="\U0001F3E0",
     caption="Landing page.",
+    quote='"There\'s no place like home screen."',
 )
 
 
@@ -63,12 +65,14 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             title="Task Tracker",
             icon="\U0001F552",
             caption="Log daily operational tasks, track elapsed time, manage cadence, and view live activity.",
+            quote='"Big Brother is watching you"',
         ),
         PageEntry(
             path="pages/task-tracker-analytics.py",
             title="Tasks Analytics",
             icon="\U0001F4CA",
             caption="Review team performance and task completion trends with filters for user and date.",
+            quote='"Show me the metrics!"',
         ),
     ],
     "Work in Progress": [
@@ -77,18 +81,21 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             title="Packaging Estimator",
             icon="\U0001F4E6",
             caption="Estimate package counts and grouped dimensions from item lists.",
+            quote='"We\'re gonna need a bigger box."',
         ),
         PageEntry(
             path="pages/time-allocation-tool.py",
             title="Time Allocation Tool (TAT)",
             icon="\u23F1\uFE0F",
             caption="Capture account-level time allocations by percentage or detailed duration.",
+            quote='"Putting labor where it belongs."',
         ),
         PageEntry(
             path="pages/fedex-address-validator.py",
             title="FedEx Address Validator",
             icon="\u2705",
             caption="Validate addresses and export standardized results for review.",
+            quote='"Don\'t let em overcharge us!"',
         ),
     ],
 }

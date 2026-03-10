@@ -52,12 +52,15 @@ utils.render_page_header(PAGE_TITLE)
 # ============================================================
 def render_nav_card(column, page_path: str, label: str, icon: str, caption: str) -> None:
     with column:
-        st.page_link(
-            page_path,
-            label=label,
-            icon=icon,
-        )
-        st.caption(caption)
+        _spacer_col, content_col = st.columns([0.08, 0.92], vertical_alignment="top")
+        with content_col:
+            st.space(size="small")
+            st.page_link(
+                page_path,
+                label=label,
+                icon=icon,
+            )
+            st.caption(caption)
 
 
 visible_sections = page_registry.get_visible_sections(IS_ADMIN_USER)

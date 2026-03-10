@@ -225,7 +225,7 @@ def build_attachment_df(rows: pd.DataFrame) -> pd.DataFrame:
                 axis=1,
             ),
             "Amount Billed": pd.to_numeric(rows.get("Net Charge Amount"), errors="coerce"),
-            "Credit Requested": 2.38,
+            "Credit Requested": pd.to_numeric(rows.get("Dispute Amount"), errors="coerce"),
             "Reason": dispute_reason,
         }
     )
