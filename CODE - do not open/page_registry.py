@@ -97,6 +97,13 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             caption="Validate addresses and export standardized results for review.",
             quote='"Don\'t let em overcharge us!"',
         ),
+        PageEntry(
+            path="pages/stocking-agreement-generator.py",
+            title="Stocking Agreement Generator",
+            icon="\U0001F4DD",
+            caption="Fill agreement templates and export polished Word or PDF documents.",
+            quote='"Contracts without the copy-and-paste pain."',
+        ),
     ],
 }
 

@@ -4,10 +4,9 @@ Purpose:
 
 What it does:
     - Enforces access control.
-    - Loads ALL completed tasks from partitioned parquet.
+    - Loads analytics-ready completed task history.
     - Provides filters.
     - Renders KPIs and charts.
-    - Shows user vs team performance when applicable.
 """
 
 import streamlit as st
@@ -42,11 +41,6 @@ def format_duration(seconds: float) -> str:
     if seconds < 3600:
         return f"{round(seconds / 60, 1)} min"
     return f"{round(seconds / 3600, 2)} hr"
-
-
-@st.cache_data(ttl=300)
-def load_targets_placeholder() -> pd.DataFrame:
-    return pd.DataFrame({"TaskName": [], "TargetSeconds": []})
 
 
 # ============================================================
@@ -95,9 +89,6 @@ def main_filters(df: pd.DataFrame) -> pd.DataFrame:
 
     filtered_df = df.copy()
 
-    if user_filter != "All":
-        filtered_df = filtered_df[filtered_df["FullName"] == user_filter]
-
     if task_filter:
         filtered_df = filtered_df[filtered_df["TaskName"].isin(task_filter)]
 
@@ -115,6 +106,8 @@ def main_filters(df: pd.DataFrame) -> pd.DataFrame:
     filtered_df = filtered_df[
         (filtered_df["Date"] >= start_date) & (filtered_df["Date"] <= end_date)
     ]
+    if user_filter != "All":
+        filtered_df = filtered_df[filtered_df["FullName"] == user_filter]
 
     filter_signature = (
         user_filter,
@@ -136,7 +129,7 @@ def main_filters(df: pd.DataFrame) -> pd.DataFrame:
             end_date,
         )
 
-    return filtered_df, user_filter
+    return filtered_df
 
 
 # ============================================================
@@ -235,41 +228,6 @@ def main_charts(filtered_df: pd.DataFrame) -> None:
 # ============================================================
 # SECTION 3 — PERFORMANCE REVIEW
 # ============================================================
-def main_performance_review(filtered_df: pd.DataFrame, user_filter: str) -> None:
-    if user_filter == "All":
-        return
-
-    st.divider()
-    st.subheader("Performance Review", anchor=False)
-
-    user_df = filtered_df[filtered_df["FullName"] == user_filter]
-    team_df = filtered_df[filtered_df["FullName"] != user_filter]
-
-    user_counts = (
-        user_df.groupby("TaskName")
-        .size()
-        .reset_index(name="Completed")
-    )
-
-    team_avg = (
-        team_df.groupby(["TaskName", "FullName"])
-        .size()
-        .groupby("TaskName")
-        .mean()
-        .reset_index(name="Team Average")
-    )
-
-    comp_df = (
-        user_counts
-        .merge(team_avg, on="TaskName", how="left")
-        .assign(Target="TBD")
-        .sort_values("Completed", ascending=False)
-        .rename(columns={"TaskName": "Task"})
-    )
-
-    st.dataframe(comp_df, hide_index=True, width="stretch")
-
-
 # ============================================================
 # MAIN ENTRY (ONLY PLACE HEAVY WORK STARTS)
 # ============================================================
@@ -285,7 +243,7 @@ def main() -> None:
 
     utils.render_page_header(PAGE_TITLE)
 
-    df = utils.load_all_completed_tasks(config.COMPLETED_TASKS_DIR)
+    df = utils.load_completed_tasks_for_analytics(config.COMPLETED_TASKS_DIR)
     if df.empty:
         LOGGER.info("No completed task data available for analytics.")
         st.warning("No completed task data available.")
@@ -297,7 +255,7 @@ def main() -> None:
     else:
         df["PartiallyComplete"] = df["PartiallyComplete"].fillna(False).astype(bool)
 
-    filtered_df, user_filter = main_filters(df)
+    filtered_df = main_filters(df)
     LOGGER.info("Filter result | source_rows=%s filtered_rows=%s", len(df), len(filtered_df))
 
     if filtered_df.empty:
@@ -306,7 +264,6 @@ def main() -> None:
         return
 
     main_charts(filtered_df)
-    main_performance_review(filtered_df, user_filter)
 
 
 # ============================================================

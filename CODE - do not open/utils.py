@@ -785,6 +785,246 @@ def load_all_completed_tasks(base_dir: Path) -> pd.DataFrame:
         st.error(f"Failed to load completed tasks: {e}")
         return pd.DataFrame()
 
+
+@st.cache_data(ttl=300, show_spinner="Loading analytics history...")
+def load_completed_tasks_for_analytics(base_dir: Path) -> pd.DataFrame:
+    """Load only the columns required by the analytics page."""
+    analytics_cols = [
+        "StartTimestampUTC",
+        "DurationSeconds",
+        "PartiallyComplete",
+        "FullName",
+        "TaskName",
+        "TaskCadence",
+    ]
+    base_path = Path(base_dir)
+    if not base_path.exists():
+        return pd.DataFrame(columns=analytics_cols + ["Date"])
+
+    try:
+        dataset = ds.dataset(base_path, format="parquet", partitioning="hive")
+        available_cols = set(dataset.schema.names)
+        selected_cols = [col for col in analytics_cols if col in available_cols]
+        if not selected_cols:
+            return pd.DataFrame(columns=analytics_cols + ["Date"])
+
+        df = dataset.to_table(columns=selected_cols).to_pandas()
+    except Exception as e:
+        get_page_logger("Shared Utilities").exception("Failed to load analytics task history: %s", e)
+        st.error(f"Failed to load analytics task history: {e}")
+        return pd.DataFrame(columns=analytics_cols + ["Date"])
+
+    if df.empty:
+        return pd.DataFrame(columns=analytics_cols + ["Date"])
+
+    for col in analytics_cols:
+        if col not in df.columns:
+            if col == "DurationSeconds":
+                df[col] = 0
+            elif col == "PartiallyComplete":
+                df[col] = False
+            else:
+                df[col] = ""
+
+    df["StartTimestampUTC"] = pd.to_datetime(df["StartTimestampUTC"], utc=True, errors="coerce")
+    df = df[df["StartTimestampUTC"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=analytics_cols + ["Date"])
+
+    df["DurationSeconds"] = pd.to_numeric(df["DurationSeconds"], errors="coerce").fillna(0)
+    df["PartiallyComplete"] = df["PartiallyComplete"].fillna(False).astype(bool)
+    df["FullName"] = df["FullName"].fillna("").astype(str).str.strip()
+    df["TaskName"] = df["TaskName"].fillna("").astype(str).str.strip()
+    df["TaskCadence"] = df["TaskCadence"].fillna("").astype(str).str.strip().str.title()
+    df["Date"] = df["StartTimestampUTC"].dt.date
+    return df[analytics_cols + ["Date"]].reset_index(drop=True)
+
+
+def _current_month_end_timestamp() -> pd.Timestamp:
+    eastern_now = pd.Timestamp(to_eastern(now_utc())).tz_localize(None)
+    return (eastern_now + pd.offsets.MonthEnd(0)).normalize()
+
+
+def _extract_task_definitions(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["TaskName", "TaskCadence", "IsActive"])
+
+    task_col = _find_column_by_alias(df, ["TaskName", "Task Name"]) or "TaskName"
+    cadence_col = _find_column_by_alias(df, ["TaskCadence", "Task Cadence"]) or "TaskCadence"
+    active_col = _find_column_by_alias(df, ["IsActive", "Is Active"]) or "IsActive"
+
+    working_df = df.copy()
+    if task_col not in working_df.columns:
+        working_df[task_col] = ""
+    if cadence_col not in working_df.columns:
+        working_df[cadence_col] = ""
+    if active_col not in working_df.columns:
+        working_df[active_col] = True
+
+    definitions_df = working_df[[task_col, cadence_col, active_col]].copy()
+    definitions_df.columns = ["TaskName", "TaskCadence", "IsActive"]
+    definitions_df["TaskName"] = definitions_df["TaskName"].fillna("").astype(str).str.strip()
+    definitions_df["TaskCadence"] = definitions_df["TaskCadence"].fillna("").astype(str).str.strip().str.title()
+    definitions_df = definitions_df[definitions_df["TaskName"].ne("")].copy()
+    if definitions_df.empty:
+        return pd.DataFrame(columns=["TaskName", "TaskCadence", "IsActive"])
+
+    return definitions_df.drop_duplicates(subset=["TaskName", "TaskCadence"], keep="first").reset_index(drop=True)
+
+
+def _extract_existing_target_months(df: pd.DataFrame) -> list[pd.Timestamp]:
+    if df.empty:
+        return []
+    month_col = _find_column_by_alias(
+        df,
+        ["TargetMonthEnd", "Target Month End", "TargetMonth", "MonthEnd", "Month"],
+    )
+    if not month_col or month_col not in df.columns:
+        return []
+
+    month_series = pd.to_datetime(df[month_col], errors="coerce").dropna()
+    if month_series.empty:
+        return []
+    return sorted({pd.Timestamp(value).normalize() for value in month_series.tolist()})
+
+
+def compute_monthly_task_targets(completed_df: pd.DataFrame) -> pd.DataFrame:
+    target_cols = [
+        "TaskName",
+        "TaskCadence",
+        "TargetMonthEnd",
+        "CompletedTasks",
+        "DistinctUsers",
+        "Target",
+    ]
+    if completed_df.empty or "StartTimestampUTC" not in completed_df.columns:
+        return pd.DataFrame(columns=target_cols)
+
+    df = completed_df.copy()
+    if "PartiallyComplete" not in df.columns:
+        df["PartiallyComplete"] = False
+    df["PartiallyComplete"] = df["PartiallyComplete"].fillna(False).astype(bool)
+    df = df[~df["PartiallyComplete"]].copy()
+    if df.empty:
+        return pd.DataFrame(columns=target_cols)
+
+    if "TaskName" not in df.columns:
+        return pd.DataFrame(columns=target_cols)
+    if "TaskCadence" not in df.columns:
+        df["TaskCadence"] = ""
+    if "UserLogin" not in df.columns:
+        df["UserLogin"] = ""
+    if "FullName" not in df.columns:
+        df["FullName"] = ""
+
+    df["TaskName"] = df["TaskName"].fillna("").astype(str).str.strip()
+    df["TaskCadence"] = df["TaskCadence"].fillna("").astype(str).str.strip().str.title()
+    df = df[df["TaskName"].ne("")].copy()
+    if df.empty:
+        return pd.DataFrame(columns=target_cols)
+
+    user_login_series = df["UserLogin"].fillna("").astype(str).str.strip().str.lower()
+    full_name_series = df["FullName"].fillna("").astype(str).str.strip().str.lower()
+    df["__completed_user_key"] = user_login_series.where(user_login_series.ne(""), full_name_series)
+    df["__completed_user_key"] = df["__completed_user_key"].where(
+        df["__completed_user_key"].ne(""),
+        "__unknown_user__",
+    )
+
+    start_local = pd.to_datetime(df["StartTimestampUTC"], utc=True, errors="coerce")
+    df = df[start_local.notna()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=target_cols)
+
+    start_local = start_local.loc[df.index].dt.tz_convert(EASTERN_TZ).dt.tz_localize(None)
+    df["TargetMonthEnd"] = start_local.dt.to_period("M").dt.to_timestamp(how="end").dt.normalize()
+
+    targets_df = (
+        df.groupby(["TaskName", "TaskCadence", "TargetMonthEnd"], as_index=False)
+        .agg(
+            CompletedTasks=("TaskName", "size"),
+            DistinctUsers=("__completed_user_key", "nunique"),
+        )
+    )
+    targets_df["Target"] = (
+        targets_df["CompletedTasks"]
+        .div(targets_df["DistinctUsers"].replace(0, pd.NA))
+        .fillna(0.0)
+        .round(2)
+    )
+    return targets_df[target_cols].sort_values(
+        ["TargetMonthEnd", "TaskName", "TaskCadence"],
+        ascending=[False, True, True],
+    ).reset_index(drop=True)
+
+
+def sync_tasks_parquet_targets(
+    tasks_parquet_path: Path | None = None,
+    completed_dir: Path | None = None,
+    task_definitions_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    tasks_parquet = Path(tasks_parquet_path) if tasks_parquet_path is not None else Path(config.PERSONNEL_DIR) / "tasks.parquet"
+    completed_root = Path(completed_dir) if completed_dir is not None else config.COMPLETED_TASKS_DIR
+
+    if task_definitions_df is not None:
+        raw_df = task_definitions_df.copy(deep=True)
+        if tasks_parquet.exists():
+            existing_months = _extract_existing_target_months(pd.read_parquet(tasks_parquet))
+        else:
+            existing_months = []
+    else:
+        if not tasks_parquet.exists():
+            raise FileNotFoundError(f"tasks.parquet not found at '{tasks_parquet}'.")
+        raw_df = pd.read_parquet(tasks_parquet)
+        existing_months = _extract_existing_target_months(raw_df)
+
+    definitions_df = _extract_task_definitions(raw_df)
+    completed_df = load_all_completed_tasks(completed_root)
+    target_history_df = compute_monthly_task_targets(completed_df)
+
+    month_values = sorted(
+        {
+            *existing_months,
+            *(
+                pd.Timestamp(value).normalize()
+                for value in target_history_df["TargetMonthEnd"].dropna().tolist()
+            ),
+        }
+    )
+    if not month_values:
+        month_values = [_current_month_end_timestamp()]
+
+    if definitions_df.empty:
+        output_df = pd.DataFrame(
+            columns=["TaskName", "TaskCadence", "TargetMonthEnd", "Target", "IsActive"]
+        )
+    else:
+        months_df = pd.DataFrame({"TargetMonthEnd": month_values})
+        definitions_df["__join_key"] = 1
+        months_df["__join_key"] = 1
+        output_df = definitions_df.merge(months_df, on="__join_key", how="inner").drop(columns="__join_key")
+        output_df = output_df.merge(
+            target_history_df[["TaskName", "TaskCadence", "TargetMonthEnd", "Target"]],
+            on=["TaskName", "TaskCadence", "TargetMonthEnd"],
+            how="left",
+        )
+        output_df["Target"] = output_df["Target"].fillna(0.0).astype(float).round(2)
+        output_df = output_df[["TaskName", "TaskCadence", "TargetMonthEnd", "Target", "IsActive"]]
+
+    output_df = output_df.sort_values(
+        ["TaskName", "TaskCadence", "TargetMonthEnd"],
+        ascending=[True, True, False],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    tasks_parquet.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = tasks_parquet.with_name(f"{tasks_parquet.stem}.{uuid.uuid4().hex}.tmp")
+    output_df.to_parquet(tmp_path, index=False)
+    tmp_path.replace(tasks_parquet)
+    load_tasks.clear()
+    return output_df
+
+
 @st.cache_data(ttl=3600)
 def load_user_fullname_map(tasks_xlsx_path: str | None = None) -> dict[str, str]:
     """
@@ -1059,14 +1299,18 @@ def load_tasks(tasks_xlsx_path: str | None = None) -> pd.DataFrame:
         return pd.DataFrame()
     if df.empty:
         return pd.DataFrame()
-    # Keep startup output clean/consistent
-    if "IsActive" in df.columns:
-        df = df[df["IsActive"].astype(int) == 1].copy()
-    if "TaskName" in df.columns:
-        df["TaskName"] = df["TaskName"].astype(str).str.strip()
-    if "TaskCadence" in df.columns:
-        df["TaskCadence"] = df["TaskCadence"].astype(str).str.strip().str.title()
-    return df
+
+    definitions_df = _extract_task_definitions(df)
+    if definitions_df.empty:
+        return pd.DataFrame()
+
+    if "IsActive" in definitions_df.columns:
+        active_mask = definitions_df["IsActive"].map(_coerce_bool_like)
+        definitions_df = definitions_df[active_mask].copy()
+
+    definitions_df["TaskName"] = definitions_df["TaskName"].astype(str).str.strip()
+    definitions_df["TaskCadence"] = definitions_df["TaskCadence"].astype(str).str.strip().str.title()
+    return definitions_df.reset_index(drop=True)
 
 @st.cache_data(ttl=3600)
 def load_accounts(accounts_dir: str) -> list[str]:

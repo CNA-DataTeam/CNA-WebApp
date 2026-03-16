@@ -43,7 +43,7 @@ TASKS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "tasks.parquet"
 USERS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "users.parquet"
 CADENCE_OPTIONS = ["Daily", "Weekly", "Periodic"]
 EDITABLE_COLUMNS = ["TaskName", "TaskCadence"]
-TM_STATE_VERSION = 3
+TM_STATE_VERSION = 4
 
 if "tm_confirm_open" not in st.session_state:
     st.session_state.tm_confirm_open = False
@@ -106,11 +106,23 @@ def _write_tasks_parquet(path: Path, df: pd.DataFrame) -> None:
     tmp_path.replace(path)
 
 
+def _get_file_signature(path: Path) -> tuple[int, int] | None:
+    if not path.exists():
+        return None
+    stat = path.stat()
+    return int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size)
+
+
 def _resolve_column_map(full_df: pd.DataFrame) -> dict[str, str]:
     return {
         "TaskName": _resolve_existing_column(full_df, ["TaskName", "Task Name"]) or "TaskName",
         "TaskCadence": _resolve_existing_column(full_df, ["TaskCadence", "Task Cadence"]) or "TaskCadence",
         "IsActive": _resolve_existing_column(full_df, ["IsActive", "Is Active"]) or "IsActive",
+        "TargetMonthEnd": _resolve_existing_column(
+            full_df,
+            ["TargetMonthEnd", "Target Month End", "TargetMonth", "MonthEnd", "Month"],
+        ) or "TargetMonthEnd",
+        "Target": _resolve_existing_column(full_df, ["Target", "TaskTarget"]) or "Target",
     }
 
 
@@ -137,6 +149,26 @@ def _get_view_df(full_df: pd.DataFrame, col_map: dict[str, str]) -> pd.DataFrame
     return view_df.reset_index(drop=True)
 
 
+def _get_task_definition_df(full_df: pd.DataFrame, col_map: dict[str, str]) -> pd.DataFrame:
+    task_col = col_map["TaskName"]
+    cadence_col = col_map["TaskCadence"]
+    active_col = col_map["IsActive"]
+
+    definitions_df = full_df.copy()
+    if task_col not in definitions_df.columns:
+        definitions_df[task_col] = ""
+    if cadence_col not in definitions_df.columns:
+        definitions_df[cadence_col] = ""
+    if active_col not in definitions_df.columns:
+        definitions_df[active_col] = True
+
+    definitions_df = definitions_df[[task_col, cadence_col, active_col]].copy()
+    definitions_df[task_col] = definitions_df[task_col].fillna("").astype(str).str.strip()
+    definitions_df[cadence_col] = definitions_df[cadence_col].fillna("").astype(str).str.strip().str.title()
+    definitions_df = definitions_df[definitions_df[task_col].ne("")].copy()
+    return definitions_df.drop_duplicates(subset=[task_col, cadence_col], keep="first").reset_index(drop=True)
+
+
 def _format_new_is_active(raw_value: bool, active_series: pd.Series) -> object:
     clean_series = active_series.dropna()
     if clean_series.empty:
@@ -160,12 +192,60 @@ def _format_new_is_active(raw_value: bool, active_series: pd.Series) -> object:
     return bool(raw_value)
 
 
+def _current_month_end() -> pd.Timestamp:
+    eastern_now = pd.Timestamp(utils.to_eastern(utils.now_utc())).tz_localize(None)
+    return (eastern_now + pd.offsets.MonthEnd(0)).normalize()
+
+
+def _get_stored_monthly_targets(full_df: pd.DataFrame, col_map: dict[str, str]) -> pd.DataFrame:
+    month_col = col_map["TargetMonthEnd"]
+    target_col = col_map["Target"]
+    task_col = col_map["TaskName"]
+    cadence_col = col_map["TaskCadence"]
+
+    if month_col not in full_df.columns or target_col not in full_df.columns:
+        return pd.DataFrame(columns=["TaskName", "TaskCadence", "TargetMonthEnd", "Target"])
+
+    targets_df = full_df[[task_col, cadence_col, month_col, target_col]].copy()
+    targets_df.columns = ["TaskName", "TaskCadence", "TargetMonthEnd", "Target"]
+    targets_df["TaskName"] = targets_df["TaskName"].fillna("").astype(str).str.strip()
+    targets_df["TaskCadence"] = targets_df["TaskCadence"].fillna("").astype(str).str.strip().str.title()
+    targets_df["TargetMonthEnd"] = pd.to_datetime(targets_df["TargetMonthEnd"], errors="coerce").dt.normalize()
+    targets_df["Target"] = pd.to_numeric(targets_df["Target"], errors="coerce").fillna(0.0).round(2)
+    targets_df = targets_df.dropna(subset=["TargetMonthEnd"])
+    return targets_df.sort_values(
+        ["TargetMonthEnd", "TaskName", "TaskCadence"],
+        ascending=[False, True, True],
+    ).reset_index(drop=True)
+
+
+def _get_target_month_options(targets_df: pd.DataFrame) -> list[pd.Timestamp]:
+    if not targets_df.empty and "TargetMonthEnd" in targets_df.columns:
+        month_options = sorted(
+            {
+                pd.Timestamp(value).normalize()
+                for value in targets_df["TargetMonthEnd"].dropna().tolist()
+            },
+            reverse=True,
+        )
+        if month_options:
+            return month_options
+    return [_current_month_end()]
+
+
+def _format_target_month_label(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return pd.Timestamp(value).strftime("%B %Y")
+
+
 def _initialize_state(force_reload: bool = False) -> None:
     state_version_mismatch = st.session_state.get("tm_state_version") != TM_STATE_VERSION
     missing_state = (
         "tm_original_full_df" not in st.session_state
         or "tm_working_full_df" not in st.session_state
         or "tm_column_map" not in st.session_state
+        or "tm_stored_targets_df" not in st.session_state
     )
     if not force_reload and not missing_state and not state_version_mismatch:
         return
@@ -173,13 +253,30 @@ def _initialize_state(force_reload: bool = False) -> None:
     full_df = _load_tasks_parquet(TASKS_PARQUET_PATH)
     col_map = _resolve_column_map(full_df)
     full_df = _ensure_required_columns(full_df, col_map)
+    if col_map["TargetMonthEnd"] not in full_df.columns or col_map["Target"] not in full_df.columns:
+        full_df = utils.sync_tasks_parquet_targets(
+            tasks_parquet_path=TASKS_PARQUET_PATH,
+            completed_dir=config.COMPLETED_TASKS_DIR,
+        )
+        col_map = _resolve_column_map(full_df)
+        full_df = _ensure_required_columns(full_df, col_map)
 
-    st.session_state.tm_original_full_df = full_df.copy(deep=True)
-    st.session_state.tm_working_full_df = full_df.copy(deep=True)
+    definitions_df = _get_task_definition_df(full_df, col_map)
+    stored_targets_df = _get_stored_monthly_targets(full_df, col_map)
+
+    st.session_state.tm_original_full_df = definitions_df.copy(deep=True)
+    st.session_state.tm_working_full_df = definitions_df.copy(deep=True)
     st.session_state.tm_column_map = col_map
+    st.session_state.tm_stored_targets_df = stored_targets_df.copy(deep=True)
     st.session_state.tm_state_version = TM_STATE_VERSION
+    st.session_state.tm_tasks_signature = _get_file_signature(TASKS_PARQUET_PATH)
 
-    LOGGER.info("Loaded tasks parquet | path='%s' rows=%s", TASKS_PARQUET_PATH, len(full_df))
+    LOGGER.info(
+        "Loaded tasks parquet | path='%s' stored_rows=%s task_definitions=%s",
+        TASKS_PARQUET_PATH,
+        len(full_df),
+        len(definitions_df),
+    )
 
 
 def _tasks_state_needs_reload() -> bool:
@@ -188,6 +285,8 @@ def _tasks_state_needs_reload() -> bool:
         or "tm_original_full_df" not in st.session_state
         or "tm_working_full_df" not in st.session_state
         or "tm_column_map" not in st.session_state
+        or "tm_stored_targets_df" not in st.session_state
+        or st.session_state.get("tm_tasks_signature") != _get_file_signature(TASKS_PARQUET_PATH)
     )
 
 
@@ -221,14 +320,21 @@ def _compute_change_summary() -> tuple[int, int]:
 
 def _apply_update() -> None:
     updated_df = st.session_state.tm_working_full_df.copy(deep=True)
-    _write_tasks_parquet(TASKS_PARQUET_PATH, updated_df)
-
-    st.session_state.tm_original_full_df = updated_df.copy(deep=True)
-    st.session_state.tm_working_full_df = updated_df.copy(deep=True)
+    stored_df = utils.sync_tasks_parquet_targets(
+        tasks_parquet_path=TASKS_PARQUET_PATH,
+        completed_dir=config.COMPLETED_TASKS_DIR,
+        task_definitions_df=updated_df,
+    )
+    col_map = _resolve_column_map(stored_df)
+    refreshed_definitions_df = _get_task_definition_df(stored_df, col_map)
+    st.session_state.tm_original_full_df = refreshed_definitions_df.copy(deep=True)
+    st.session_state.tm_working_full_df = refreshed_definitions_df.copy(deep=True)
+    st.session_state.tm_column_map = col_map
+    st.session_state.tm_stored_targets_df = _get_stored_monthly_targets(stored_df, col_map)
+    st.session_state.tm_tasks_signature = _get_file_signature(TASKS_PARQUET_PATH)
     st.session_state.tm_updated_toast = True
-    utils.load_tasks.clear()
 
-    LOGGER.info("tasks.parquet updated | path='%s' rows=%s", TASKS_PARQUET_PATH, len(updated_df))
+    LOGGER.info("tasks.parquet updated | path='%s' rows=%s", TASKS_PARQUET_PATH, len(stored_df))
 
 
 def _get_users_view_df(users_df: pd.DataFrame) -> pd.DataFrame:
@@ -304,15 +410,28 @@ def render_tasks_section() -> None:
     working_full_df = st.session_state.tm_working_full_df.copy(deep=True)
     view_df = _get_view_df(working_full_df, col_map)
     view_df["__row_pos"] = view_df.index.astype(int)
+    monthly_targets_df = st.session_state.tm_stored_targets_df.copy(deep=True)
+    target_month_options = _get_target_month_options(monthly_targets_df)
 
-    filter_left, filter_right = st.columns(2)
+    target_month_key = "tm_filter_target_month"
+    selected_target_month = st.session_state.get(target_month_key)
+    if selected_target_month is not None:
+        try:
+            selected_target_month = pd.Timestamp(selected_target_month).normalize()
+        except Exception:
+            selected_target_month = None
+    if selected_target_month not in target_month_options:
+        selected_target_month = target_month_options[0]
+        st.session_state[target_month_key] = selected_target_month
+
+    filter_left, filter_mid, filter_right = st.columns(3)
     with filter_left:
         task_name_filter = st.text_input(
             "Filter by Task Name",
             key="tm_filter_task_name",
             placeholder="Search task name",
         )
-    with filter_right:
+    with filter_mid:
         cadence_options = sorted(
             c for c in view_df["Task Cadence"].dropna().astype(str).str.strip().unique().tolist() if c
         )
@@ -321,8 +440,29 @@ def render_tasks_section() -> None:
             options=cadence_options,
             key="tm_filter_task_cadence",
         )
+    with filter_right:
+        selected_target_month = st.selectbox(
+            "Month Name",
+            options=target_month_options,
+            key=target_month_key,
+            format_func=_format_target_month_label,
+        )
 
     filtered_view_df = view_df.copy()
+    if not monthly_targets_df.empty:
+        targets_for_month_df = monthly_targets_df[
+            monthly_targets_df["TargetMonthEnd"].dt.normalize().eq(pd.Timestamp(selected_target_month).normalize())
+        ][["TaskName", "TaskCadence", "Target"]].copy()
+    else:
+        targets_for_month_df = pd.DataFrame(columns=["TaskName", "TaskCadence", "Target"])
+    filtered_view_df = filtered_view_df.merge(
+        targets_for_month_df.rename(columns={"TaskName": "Task Name", "TaskCadence": "Task Cadence"}),
+        on=["Task Name", "Task Cadence"],
+        how="left",
+    )
+    filtered_view_df["Target"] = filtered_view_df["Target"].fillna(0.0).astype(float)
+    filtered_view_df["Target Month"] = pd.Timestamp(selected_target_month).normalize()
+
     if task_name_filter and task_name_filter.strip():
         needle = task_name_filter.strip().lower()
         name_series = filtered_view_df["Task Name"].fillna("").astype(str).str.lower()
@@ -331,8 +471,10 @@ def render_tasks_section() -> None:
         cadence_series = filtered_view_df["Task Cadence"].fillna("").astype(str)
         filtered_view_df = filtered_view_df[cadence_series.isin(selected_cadences)]
 
-    display_df = filtered_view_df[["Task Name", "Task Cadence"]].copy()
-    st.caption(f"Rows: {len(display_df):,} (of {len(view_df):,})")
+    display_df = filtered_view_df[["Task Name", "Task Cadence", "Target"]].copy()
+    st.caption(
+        f"Rows: {len(display_df):,} (of {len(view_df):,}) | Targets for {_format_target_month_label(selected_target_month)}"
+    )
 
     selected_view_rows: list[int] = []
     selected_row_positions: list[int] = []
@@ -341,13 +483,23 @@ def render_tasks_section() -> None:
             display_df,
             width="stretch",
             hide_index=True,
+            column_config={
+                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+            },
             on_select="rerun",
             selection_mode="multi-row",
         )
         if event is not None and hasattr(event, "selection"):
             selected_view_rows = list(getattr(event.selection, "rows", []) or [])
     except TypeError:
-        st.dataframe(display_df, width="stretch", hide_index=True)
+        st.dataframe(
+            display_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+            },
+        )
         row_options = list(range(len(display_df)))
         selected_view_rows = st.multiselect(
             "Select rows to delete",
@@ -696,6 +848,12 @@ def confirm_task_log_delete_dialog() -> None:
             deleted_rows, touched_files = _delete_task_log_rows(payload)
             _load_task_log_entries.clear()
             utils.load_all_completed_tasks.clear()
+            utils.load_completed_tasks_for_analytics.clear()
+            if deleted_rows > 0:
+                utils.sync_tasks_parquet_targets(
+                    tasks_parquet_path=TASKS_PARQUET_PATH,
+                    completed_dir=config.COMPLETED_TASKS_DIR,
+                )
             st.session_state.tm_task_log_delete_confirm_open = False
             st.session_state.tm_task_log_delete_confirm_rendered = False
             st.session_state.tm_task_log_delete_payload = None
@@ -878,7 +1036,12 @@ def render_task_log_section() -> None:
                 updated_rows, touched_files = _save_task_log_task_name_changes(changes)
                 _load_task_log_entries.clear()
                 utils.load_all_completed_tasks.clear()
+                utils.load_completed_tasks_for_analytics.clear()
                 if updated_rows > 0:
+                    utils.sync_tasks_parquet_targets(
+                        tasks_parquet_path=TASKS_PARQUET_PATH,
+                        completed_dir=config.COMPLETED_TASKS_DIR,
+                    )
                     st.success(f"Saved {updated_rows} row update(s) across {touched_files} file(s).")
                     st.rerun()
                 else:
@@ -899,6 +1062,7 @@ def render_task_log_section() -> None:
         if st.button("Refresh Task Log", width="stretch"):
             _load_task_log_entries.clear()
             utils.load_all_completed_tasks.clear()
+            utils.load_completed_tasks_for_analytics.clear()
             st.rerun()
 
     if st.session_state.tm_task_log_delete_confirm_open and not st.session_state.tm_task_log_delete_confirm_rendered:
