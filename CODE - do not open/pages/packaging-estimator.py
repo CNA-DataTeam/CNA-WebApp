@@ -39,6 +39,8 @@ utils.render_page_header(PAGE_TITLE)
 # ============================================================
 INPUT_MODE_UPLOAD = "Upload File"
 INPUT_MODE_PASTE = "Paste from Excel (tab-separated)"
+DESTINATION_MODE_WAREHOUSE = "One of Our Warehouses"
+DESTINATION_MODE_ADDRESS = "Specific Address"
 US_STATE_CODES = [
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
     "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
@@ -74,7 +76,6 @@ def load_packaging_config() -> dict[str, Any]:
         if isinstance(runtime_cfg.get("shipping_calculator_api"), dict)
         else {}
     )
-    api_cfg = runtime_cfg.get("api", {}) if isinstance(runtime_cfg.get("api"), dict) else {}
     ui_cfg = runtime_cfg.get("ui", {}) if isinstance(runtime_cfg.get("ui"), dict) else {}
 
     parquet_path = str(
@@ -99,13 +100,6 @@ def load_packaging_config() -> dict[str, Any]:
     )
     shipping_calc_user_id = int(shipping_calc_cfg.get("user_id", 130326) or 130326)
     shipping_calc_company_type = str(shipping_calc_cfg.get("company_type", "Warehouse")).strip() or "Warehouse"
-    api_endpoint = str(
-        api_cfg.get(
-            "endpoint",
-            "https://shippingcalculator-api.dev.clarkinc.biz/api/warehousepackager/estimatePacking",
-        )
-    ).strip()
-    api_timeout_seconds = int(api_cfg.get("timeout_seconds", 30) or 30)
     default_warehouse = int(ui_cfg.get("default_warehouse", 105) or 105)
     default_marginal_length = float(ui_cfg.get("default_marginal_length", 0.0) or 0.0)
     default_marginal_width = float(ui_cfg.get("default_marginal_width", 0.0) or 0.0)
@@ -132,10 +126,6 @@ def load_packaging_config() -> dict[str, Any]:
             "force_common_carrier": bool(shipping_calc_cfg.get("force_common_carrier", False)),
             "exclude_lift_gate_fee": bool(shipping_calc_cfg.get("exclude_lift_gate_fee", True)),
             "bypass_matrix": bool(shipping_calc_cfg.get("bypass_matrix", False)),
-        },
-        "api": {
-            "endpoint": api_endpoint,
-            "timeout_seconds": api_timeout_seconds,
         },
         "ui": {
             "default_warehouse": default_warehouse,
@@ -676,18 +666,188 @@ def normalize_country_code(value: Any) -> str:
     return normalized or "US"
 
 
-def build_verified_item_records(
-    verified_df: pd.DataFrame,
+def build_shipping_request_options(overrides: dict[str, Any] | None = None) -> dict[str, bool]:
+    shipping_cfg = PAGE_CONFIG.get("shipping_calculator_api", {})
+    defaults = {
+        "has_lift_gate": bool(shipping_cfg.get("has_lift_gate", False)),
+        "force_common_carrier": bool(shipping_cfg.get("force_common_carrier", False)),
+        "exclude_lift_gate_fee": bool(shipping_cfg.get("exclude_lift_gate_fee", True)),
+        "bypass_matrix": bool(shipping_cfg.get("bypass_matrix", False)),
+    }
+    if not isinstance(overrides, dict):
+        return defaults
+
+    normalized: dict[str, bool] = {}
+    for key, default in defaults.items():
+        raw_value = overrides.get(key, default)
+        if isinstance(raw_value, bool):
+            normalized[key] = raw_value
+        else:
+            normalized[key] = str(raw_value).strip().lower() in {"1", "true", "t", "yes", "y"}
+    return normalized
+
+
+def normalize_shipping_address(
+    raw_address: dict[str, Any] | None,
+    *,
+    company_type_default: str | None = None,
+) -> dict[str, Any]:
+    address = raw_address if isinstance(raw_address, dict) else {}
+    country_code = normalize_country_code(address.get("Country", "US"))
+    default_company_type = str(company_type_default).strip() if company_type_default is not None else ""
+
+    return {
+        "StreetAddress1": str(address.get("StreetAddress1", "")).strip(),
+        "StreetAddress2": str(address.get("StreetAddress2", "")).strip(),
+        "City": str(address.get("City", "")).strip(),
+        "State": str(address.get("State", "")).strip().upper(),
+        "ZipCode": str(address.get("ZipCode", "")).strip(),
+        "Country": country_code,
+        "IsCommercial": bool(address.get("IsCommercial", True)),
+        "IsDomestic": country_code == "US",
+        "IsRestrictedExpeditedShipping": bool(address.get("IsRestrictedExpeditedShipping", False)),
+        "CompanyType": str(address.get("CompanyType", default_company_type)).strip(),
+    }
+
+
+def validate_shipping_address(
+    raw_address: dict[str, Any] | None,
+    *,
+    company_type_default: str | None = None,
+) -> dict[str, Any]:
+    address = normalize_shipping_address(raw_address, company_type_default=company_type_default)
+    missing_labels = {
+        "StreetAddress1": "street address",
+        "City": "city",
+        "State": "state/province",
+        "ZipCode": "ZIP/postal code",
+        "Country": "country",
+    }
+    missing_fields = [
+        label for field, label in missing_labels.items() if not str(address.get(field, "")).strip()
+    ]
+    if missing_fields:
+        raise ValueError(
+            "Destination is missing required field(s): " + ", ".join(missing_fields) + "."
+        )
+    return address
+
+
+def build_shipping_address_from_warehouse(warehouse_details: dict[str, str]) -> dict[str, Any]:
+    if not warehouse_details:
+        raise ValueError("Select a valid warehouse destination before running the estimate.")
+
+    shipping_cfg = PAGE_CONFIG.get("shipping_calculator_api", {})
+    return validate_shipping_address(
+        {
+            "StreetAddress1": warehouse_details.get("LocationAddress1", ""),
+            "StreetAddress2": warehouse_details.get("LocationName", ""),
+            "City": warehouse_details.get("LocationCity", ""),
+            "State": warehouse_details.get("LocationState", ""),
+            "ZipCode": warehouse_details.get("LocationZipCode", ""),
+            "Country": warehouse_details.get("LocationCountry", "US"),
+            "IsCommercial": True,
+            "IsRestrictedExpeditedShipping": False,
+            "CompanyType": str(shipping_cfg.get("company_type", "Warehouse")).strip() or "Warehouse",
+        },
+        company_type_default=str(shipping_cfg.get("company_type", "Warehouse")).strip() or "Warehouse",
+    )
+
+
+def format_shipping_address(address: dict[str, Any] | None) -> str:
+    normalized = normalize_shipping_address(address)
+    locality = ", ".join(part for part in [normalized["City"], normalized["State"]] if part)
+    if normalized["ZipCode"]:
+        locality = f"{locality} {normalized['ZipCode']}".strip() if locality else normalized["ZipCode"]
+
+    description_parts = [
+        normalized["StreetAddress1"],
+        normalized["StreetAddress2"],
+        locality,
+        normalized["Country"],
+    ]
+    return " | ".join(part for part in description_parts if part) or "Destination details unavailable"
+
+
+def format_shipping_request_options(options: dict[str, Any] | None) -> str:
+    normalized = build_shipping_request_options(options if isinstance(options, dict) else None)
+    return ", ".join(
+        [
+            f"HasLiftGate={normalized['has_lift_gate']}",
+            f"ForceCommonCarrier={normalized['force_common_carrier']}",
+            f"ExcludeLiftGateFee={normalized['exclude_lift_gate_fee']}",
+            f"BypassMatrix={normalized['bypass_matrix']}",
+        ]
+    )
+
+
+def get_preferred_row_value(
+    row: dict[str, Any],
+    *keys: str,
+    default: Any = None,
+) -> Any:
+    for key in keys:
+        if key not in row:
+            continue
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except Exception:
+            pass
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                continue
+            return stripped
+        return value
+    return default
+
+
+def normalize_shipping_type_code(
+    shipping_type: Any,
+    calculated_shipping_type: Any = None,
+) -> str:
+    normalized = str(shipping_type or "").strip().upper()
+    if normalized in {"M", "P"}:
+        return normalized
+
+    calculated_normalized = normalize_col_name(str(calculated_shipping_type or ""))
+    if calculated_normalized == "commoncarrier":
+        return "P"
+    if calculated_normalized in {"ground", "fasttrack"}:
+        return "M"
+    return "M"
+
+
+def normalize_carrier_ship_type_code(
+    carrier_ship_type: Any,
+    calculated_shipping_type: Any = None,
+) -> str:
+    normalized = str(carrier_ship_type or "").strip().upper()
+    if normalized in {"U", "C"}:
+        return normalized
+
+    calculated_normalized = normalize_col_name(str(calculated_shipping_type or ""))
+    if calculated_normalized == "commoncarrier":
+        return "C"
+    return "U"
+
+
+def build_shipping_item_records(
+    source_df: pd.DataFrame,
     requested_df: pd.DataFrame,
     perishable_type_overrides: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    if verified_df.empty:
+    if source_df.empty:
         return []
 
     ui_cfg = PAGE_CONFIG.get("ui", {})
     item_cfg = PAGE_CONFIG.get("item_info", {})
     item_col = str(item_cfg.get("item_number_column", "ItemNumber")).strip() or "ItemNumber"
-    resolved_item_col = resolve_item_column_name(item_col, verified_df.columns.tolist())
+    resolved_item_col = resolve_item_column_name(item_col, source_df.columns.tolist())
 
     quantity_map = {
         normalize_item_number(row.ItemNumber): int(row.Quantity)
@@ -709,8 +869,8 @@ def build_verified_item_records(
             if item_number and perishable_code in PERISHABLE_CODE_TO_LABEL:
                 normalized_overrides[item_number] = perishable_code
 
-    verified_items: list[dict[str, Any]] = []
-    for row in verified_df.to_dict(orient="records"):
+    shipping_items: list[dict[str, Any]] = []
+    for row in source_df.to_dict(orient="records"):
         item_number = normalize_item_number(row.get(resolved_item_col))
         if not item_number:
             continue
@@ -718,52 +878,102 @@ def build_verified_item_records(
         if quantity <= 0:
             continue
 
-        length = to_float(row.get("LengthInInches"), 0.0)
-        width = to_float(row.get("WidthInInches"), 0.0)
-        height = to_float(row.get("HeightInInches"), 0.0)
-        volume = to_float(row.get("AverageVolume"), length * width * height)
+        calculated_shipping_type = get_preferred_row_value(row, "CalculatedShippingType", default="")
+        shipping_type = normalize_shipping_type_code(
+            get_preferred_row_value(row, "ShippingType"),
+            calculated_shipping_type,
+        )
+        carrier_ship_type = normalize_carrier_ship_type_code(
+            get_preferred_row_value(row, "CarrierShipType"),
+            calculated_shipping_type,
+        )
+        length = to_float(get_preferred_row_value(row, "Length", "LengthInInches"), 0.0)
+        width = to_float(get_preferred_row_value(row, "Width", "WidthInInches"), 0.0)
+        height = to_float(get_preferred_row_value(row, "Height", "HeightInInches"), 0.0)
+        volume = to_float(
+            get_preferred_row_value(row, "Volume", "AverageVolume"),
+            length * width * height,
+        )
         perishable_type = normalized_overrides.get(item_number, default_perishable_type)
+        vendor_id = str(get_preferred_row_value(row, "VendorCode", default="") or "").strip()
+        vendor_drop_ship_zip = str(
+            get_preferred_row_value(row, "VendorDropShipZip", default="") or ""
+        ).strip()
+        is_common_carrier = (
+            carrier_ship_type == "C"
+            or normalize_col_name(str(calculated_shipping_type or "")) == "commoncarrier"
+        )
 
-        verified_items.append(
+        shipping_items.append(
             {
                 "item_number": item_number,
                 "quantity": quantity,
                 "length": length,
                 "width": width,
                 "height": height,
-                "weight": to_float(row.get("WeightInPounds"), 0.0),
-                "is_repack": coerce_verified_value(row.get("IsRepackRequired")),
-                "is_repositional": coerce_verified_value(row.get("IsRepositionable")),
+                "weight": to_float(get_preferred_row_value(row, "Weight", "WeightInPounds"), 0.0),
                 "break_quantity": to_int(row.get("BreakQuantity"), 0),
-                "marginal_length": default_marginal_length,
-                "marginal_height": default_marginal_height,
-                "marginal_width": default_marginal_width,
-                "can_be_nested": coerce_verified_value(row.get("Can Nest?")),
+                "shipping_type": shipping_type,
+                "carrier_ship_type": carrier_ship_type,
+                "is_common_carrier": is_common_carrier,
+                "is_ormd": coerce_verified_value(get_preferred_row_value(row, "IsOrmd")),
+                "is_hazardous": coerce_verified_value(get_preferred_row_value(row, "IsHazardous")),
+                "is_free_shipping": coerce_verified_value(get_preferred_row_value(row, "IsFreeShipping")),
+                "fits_liftgate": coerce_verified_value(
+                    get_preferred_row_value(row, "FitsLiftgate", default=True)
+                ),
                 "volume": volume,
+                "restricted_expedited_shipping": coerce_verified_value(
+                    get_preferred_row_value(row, "RestrictedExpeditedShipping")
+                ),
+                "oversize_fee": to_float(get_preferred_row_value(row, "OversizeFee"), 0.0),
+                "vendor_id": vendor_id,
+                "vendor_drop_ship_zip": vendor_drop_ship_zip,
+                "is_drop_ship": coerce_verified_value(get_preferred_row_value(row, "IsDropShip")),
                 "perishable_type": perishable_type,
+                "marginal_length": to_float(
+                    get_preferred_row_value(row, "MarginalLength"),
+                    default_marginal_length,
+                ),
+                "marginal_height": to_float(
+                    get_preferred_row_value(row, "MarginalHeight"),
+                    default_marginal_height,
+                ),
+                "marginal_width": to_float(
+                    get_preferred_row_value(row, "MarginalWidth"),
+                    default_marginal_width,
+                ),
+                "is_repack": coerce_verified_value(
+                    get_preferred_row_value(row, "IsRepack", "IsRepackRequired")
+                ),
+                "is_repositional": coerce_verified_value(
+                    get_preferred_row_value(row, "IsRepositional", "IsRepositionable")
+                ),
+                "can_be_nested": coerce_verified_value(
+                    get_preferred_row_value(row, "CanBeNested", "Can Nest?")
+                ),
+                "is_air_restricted": coerce_verified_value(
+                    get_preferred_row_value(row, "IsAirRestricted")
+                ),
             }
         )
 
-    return verified_items
+    return shipping_items
 
 
 def build_shipping_calculator_payload(
-    verified_items: list[dict[str, Any]],
-    staging_warehouse_details: dict[str, str],
+    shipping_items: list[dict[str, Any]],
+    shipping_address: dict[str, Any],
+    shipping_request_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not verified_items:
+    if not shipping_items:
         return {}
-    if not staging_warehouse_details:
-        raise ValueError("Staging warehouse details could not be resolved.")
+    validated_address = validate_shipping_address(shipping_address)
 
     shipping_cfg = PAGE_CONFIG.get("shipping_calculator_api", {})
-    destination_state = str(staging_warehouse_details.get("LocationState", "")).strip().upper()
-    if not destination_state:
-        raise ValueError("Staging warehouse state is required for the shipping calculator request.")
-
-    country_code = normalize_country_code(staging_warehouse_details.get("LocationCountry", "US"))
+    request_options = build_shipping_request_options(shipping_request_options)
     products: list[dict[str, Any]] = []
-    for item in verified_items:
+    for item in shipping_items:
         products.append(
             {
                 "KitComponentDetails": [],
@@ -771,28 +981,28 @@ def build_shipping_calculator_payload(
                 "Weight": item["weight"],
                 "Quantity": item["quantity"],
                 "BreakQuantity": item["break_quantity"],
-                "ShippingType": "M",
-                "CarrierShipType": "U",
+                "ShippingType": item["shipping_type"],
+                "CarrierShipType": item["carrier_ship_type"],
                 "PerishableType": item["perishable_type"],
-                "IsCommonCarrier": False,
-                "IsOrmd": False,
-                "IsHazardous": False,
-                "IsFreeShipping": False,
+                "IsCommonCarrier": item["is_common_carrier"],
+                "IsOrmd": item["is_ormd"],
+                "IsHazardous": item["is_hazardous"],
+                "IsFreeShipping": item["is_free_shipping"],
                 "ShippingRateOverrideAmount": 0,
                 "IsM1T": False,
                 "MaximumGroundQuantity": 0,
-                "FitsLiftgate": True,
+                "FitsLiftgate": item["fits_liftgate"],
                 "Volume": item["volume"],
                 "IsOutletItem": False,
-                "RestrictedExpeditedShipping": False,
+                "RestrictedExpeditedShipping": item["restricted_expedited_shipping"],
                 "FreightClass": 1,
-                "OversizeFee": 0,
-                "VendorId": "",
-                "VendorDropShipZip": "",
+                "OversizeFee": item["oversize_fee"],
+                "VendorId": item["vendor_id"],
+                "VendorDropShipZip": item["vendor_drop_ship_zip"],
                 "VendorDropShipState": "",
                 "VendorDropShipCity": "",
                 "VendorDropShipAddressLine1": "",
-                "IsDropShip": False,
+                "IsDropShip": item["is_drop_ship"],
                 "Length": item["length"],
                 "Width": item["width"],
                 "Height": item["height"],
@@ -814,7 +1024,7 @@ def build_shipping_calculator_payload(
                 "OrderNumber": 0,
                 "IsNetCostDiscount": False,
                 "IsAccessory": False,
-                "IsAirRestricted": False,
+                "IsAirRestricted": item["is_air_restricted"],
                 "IsLtlOversize": False,
             }
         )
@@ -825,60 +1035,16 @@ def build_shipping_calculator_payload(
         ).strip() or "WebstaurantStore",
         "Products": products,
         "CustomerInfo": {
-            "ShippingAddress": {
-                "StreetAddress1": str(staging_warehouse_details.get("LocationAddress1", "")).strip(),
-                "StreetAddress2": "",
-                "City": str(staging_warehouse_details.get("LocationCity", "")).strip(),
-                "State": destination_state,
-                "ZipCode": str(staging_warehouse_details.get("LocationZipCode", "")).strip(),
-                "Country": country_code,
-                "IsCommercial": True,
-                "IsDomestic": country_code == "US",
-                "IsRestrictedExpeditedShipping": False,
-                "CompanyType": str(shipping_cfg.get("company_type", "Warehouse")).strip() or "Warehouse",
-            },
+            "ShippingAddress": validated_address,
             "ExcludedCarriers": [],
             "HasLimitedAccessOverride": False,
             "UserId": int(shipping_cfg.get("user_id", 130326) or 130326),
         },
-        "HasLiftGate": bool(shipping_cfg.get("has_lift_gate", False)),
-        "ForceCommonCarrier": bool(shipping_cfg.get("force_common_carrier", False)),
-        "ExcludeLiftGateFee": bool(shipping_cfg.get("exclude_lift_gate_fee", True)),
-        "BypassMatrix": bool(shipping_cfg.get("bypass_matrix", False)),
+        "HasLiftGate": request_options["has_lift_gate"],
+        "ForceCommonCarrier": request_options["force_common_carrier"],
+        "ExcludeLiftGateFee": request_options["exclude_lift_gate_fee"],
+        "BypassMatrix": request_options["bypass_matrix"],
     }
-
-
-def build_packaging_payload(
-    verified_items: list[dict[str, Any]],
-    source_warehouse_number: int,
-) -> list[dict[str, Any]]:
-    if not verified_items:
-        return []
-
-    payload: list[dict[str, Any]] = []
-    for item in verified_items:
-        payload.append(
-            {
-                "warehouseNumber": int(source_warehouse_number),
-                "itemNumber": item["item_number"],
-                "quantity": item["quantity"],
-                "length": item["length"],
-                "width": item["width"],
-                "height": item["height"],
-                "weight": item["weight"],
-                "isRepack": item["is_repack"],
-                "isRepositional": item["is_repositional"],
-                "breakQuantity": item["break_quantity"],
-                "marginalLength": item["marginal_length"],
-                "marginalHeight": item["marginal_height"],
-                "marginalWidth": item["marginal_width"],
-                "canBeNested": item["can_be_nested"],
-                "volume": item["volume"],
-                "perishableType": item["perishable_type"],
-            }
-        )
-
-    return payload
 
 
 def post_json_request(
@@ -936,38 +1102,41 @@ def call_shipping_calculator_api(payload: dict[str, Any]) -> tuple[Any, str]:
     )
 
 
-def call_packaging_api(payload: list[dict[str, Any]], destination_state: str) -> tuple[Any, str]:
-    if not payload:
-        return None, ""
-
-    api_cfg = PAGE_CONFIG.get("api", {})
-    endpoint = str(api_cfg.get("endpoint", "")).strip()
-    timeout_seconds = int(api_cfg.get("timeout_seconds", 30) or 30)
-    if not endpoint:
-        return None, "API endpoint is not configured."
-
-    separator = "&" if "?" in endpoint else "?"
-    url = f"{endpoint}{separator}destinationState={quote(destination_state)}"
-    return post_json_request(url=url, payload=payload, timeout_seconds=timeout_seconds)
-
-
 def is_ground_shipping_option(option: dict[str, Any]) -> bool:
     search_text = " ".join(
         str(option.get(key, "")).strip()
-        for key in ("Method", "MethodName", "CarrierName")
+        for key in ("Method", "MethodName", "MatrixMethodName", "CarrierName", "Carrier", "Option Type")
     ).lower()
     return "ground" in search_text
+
+
+def is_common_carrier_shipping_option(option: dict[str, Any]) -> bool:
+    if bool(option.get("IsCommonCarrier")):
+        return True
+    search_text = " ".join(
+        str(option.get(key, "")).strip()
+        for key in ("Method", "MethodName", "MatrixMethodName", "CarrierName", "Carrier", "Option Type")
+    ).lower()
+    return "common carrier" in search_text
+
+
+def get_shipping_option_preference_rank(option: dict[str, Any]) -> int:
+    if is_ground_shipping_option(option):
+        return 0
+    if is_common_carrier_shipping_option(option):
+        return 1
+    return 2
 
 
 def build_shipping_source_candidate(
     quote: dict[str, Any],
     option: dict[str, Any],
     option_type: str,
+    quote_index: int,
 ) -> dict[str, Any]:
     warehouse_number = normalize_warehouse_number(quote.get("WarehouseNumber"))
     delivery_days = to_int(option.get("DeliveryDays"), 0)
     cost = to_float(option.get("Cost"), 0.0)
-    net_charge = to_float(option.get("NetCharge"), 0.0)
     warehouse_state = str(quote.get("OriginState", "")).strip().upper()
 
     return {
@@ -980,16 +1149,20 @@ def build_shipping_source_candidate(
         "Option Type": option_type,
         "Carrier": str(option.get("CarrierName", "")).strip() or option_type,
         "Method": str(option.get("Method", option.get("MethodName", option_type))).strip() or option_type,
+        "Method Guid": str(option.get("MethodGuid", "")).strip(),
         "Cost": cost,
-        "Net Charge": net_charge,
         "Delivery Days": delivery_days if delivery_days > 0 else "",
         "Identifier": str(option.get("Identifier", "")).strip(),
-        "_SortCharge": net_charge if net_charge > 0 else cost if cost > 0 else float("inf"),
+        "Quote Index": quote_index,
+        "_SortCost": cost,
         "_SortDeliveryDays": delivery_days if delivery_days > 0 else 9999,
     }
 
 
-def extract_shipping_source_candidates(api_response: Any) -> list[dict[str, Any]]:
+def extract_shipping_source_candidates(
+    api_response: Any,
+    include_all_methods: bool = True,
+) -> list[dict[str, Any]]:
     if not isinstance(api_response, dict):
         return []
 
@@ -999,16 +1172,16 @@ def extract_shipping_source_candidates(api_response: Any) -> list[dict[str, Any]
 
     candidates: list[dict[str, Any]] = []
     seen_keys: set[tuple[Any, ...]] = set()
-    for quote in quotes:
+    for quote_index, quote in enumerate(quotes, start=1):
         if not isinstance(quote, dict):
             continue
         if quote.get("HasResult") is False:
             continue
 
         option_groups = [
+            ("Parcel", quote.get("Options", []), False),
             ("Common Carrier", quote.get("CommonCarrierOptions", []), True),
-            ("Ground", quote.get("Options", []), False),
-            ("Ground", quote.get("FedExOptions", []), False),
+            ("FedEx", quote.get("FedExOptions", []), False),
         ]
         for option_type, options, accept_all in option_groups:
             if not isinstance(options, list):
@@ -1016,10 +1189,15 @@ def extract_shipping_source_candidates(api_response: Any) -> list[dict[str, Any]
             for option in options:
                 if not isinstance(option, dict):
                     continue
-                if not accept_all and not is_ground_shipping_option(option):
+                if not include_all_methods and not accept_all and not is_ground_shipping_option(option):
                     continue
 
-                candidate = build_shipping_source_candidate(quote, option, option_type)
+                candidate = build_shipping_source_candidate(
+                    quote,
+                    option,
+                    option_type,
+                    quote_index=quote_index,
+                )
                 dedupe_token = candidate["Identifier"] or "|".join(
                     [
                         str(candidate["Warehouse Number"]),
@@ -1027,7 +1205,6 @@ def extract_shipping_source_candidates(api_response: Any) -> list[dict[str, Any]
                         candidate["Carrier"],
                         candidate["Method"],
                         f"{candidate['Cost']:.4f}",
-                        f"{candidate['Net Charge']:.4f}",
                     ]
                 )
                 dedupe_key = (candidate["Warehouse Number"], dedupe_token)
@@ -1039,17 +1216,239 @@ def extract_shipping_source_candidates(api_response: Any) -> list[dict[str, Any]
     return sorted(
         candidates,
         key=lambda row: (
-            row["_SortCharge"],
+            row["_SortCost"],
             row["_SortDeliveryDays"],
             to_int(row.get("Warehouse Number"), 999999),
         ),
     )
 
 
-def select_shipping_source_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-    if not candidates:
+def build_shipping_method_key(method: dict[str, Any] | None) -> str:
+    if not isinstance(method, dict):
+        return ""
+    method_guid = str(method.get("Method Guid", "")).strip()
+    method_name = str(method.get("Method Name", "")).strip()
+    carrier = str(method.get("Carrier", "")).strip()
+    return method_guid or "|".join(part for part in [method_name, carrier] if part)
+
+
+def extract_available_shipping_methods(
+    api_response: Any,
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    methods: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+
+    if isinstance(api_response, dict):
+        raw_methods = api_response.get("ShippingMethodsAvailableForUserSelection", [])
+        if isinstance(raw_methods, list):
+            for entry in raw_methods:
+                if not isinstance(entry, dict):
+                    continue
+                method_name = str(entry.get("MethodName", entry.get("MatrixMethodName", ""))).strip()
+                method_guid = str(entry.get("MethodGuid", "")).strip()
+                if not method_name and not method_guid:
+                    continue
+
+                identifiers = [
+                    str(value).strip()
+                    for value in entry.get("ShippingQuoteOptionIdentifiers", [])
+                    if str(value).strip()
+                ]
+                method = {
+                    "Method Name": method_name or method_guid,
+                    "Method Guid": method_guid,
+                    "Carrier": "",
+                    "Delivery Days": to_int(entry.get("DeliveryDays"), 0),
+                    "Cost": to_float(entry.get("Cost"), 0.0),
+                    "Identifiers": identifiers,
+                }
+                method_key = build_shipping_method_key(method)
+                if method_key and method_key not in seen_keys:
+                    seen_keys.add(method_key)
+                    methods.append(method)
+
+    if methods:
+        return sorted(
+            methods,
+            key=lambda row: (
+                to_float(row.get("Cost"), float("inf")),
+                to_int(row.get("Delivery Days"), 9999),
+                str(row.get("Method Name", "")),
+            ),
+        )
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        identifier = str(candidate.get("Identifier", "")).strip()
+        method = {
+            "Method Name": str(candidate.get("Method", "")).strip(),
+            "Method Guid": str(candidate.get("Method Guid", "")).strip(),
+            "Carrier": str(candidate.get("Carrier", "")).strip(),
+            "Delivery Days": to_int(candidate.get("Delivery Days"), 0),
+            "Cost": to_float(candidate.get("Cost"), 0.0),
+            "Identifiers": [identifier] if identifier else [],
+        }
+        method_key = build_shipping_method_key(method)
+        if not method_key:
+            continue
+
+        existing = grouped.get(method_key)
+        if existing is None or (
+            to_float(method.get("Cost"), float("inf")),
+            to_int(method.get("Delivery Days"), 9999),
+        ) < (
+            to_float(existing.get("Cost"), float("inf")),
+            to_int(existing.get("Delivery Days"), 9999),
+        ):
+            grouped[method_key] = method
+        elif identifier:
+            merged_identifiers = set(existing.get("Identifiers", []))
+            merged_identifiers.add(identifier)
+            existing["Identifiers"] = sorted(merged_identifiers)
+
+    return sorted(
+        grouped.values(),
+        key=lambda row: (
+            to_float(row.get("Cost"), float("inf")),
+            to_int(row.get("Delivery Days"), 9999),
+            str(row.get("Method Name", "")),
+        ),
+    )
+
+
+def format_shipping_method_option(method: dict[str, Any]) -> str:
+    method_name = str(method.get("Method Name", "")).strip() or "Unknown Method"
+    delivery_days = to_int(method.get("Delivery Days"), 0)
+    cost = to_float(method.get("Internal Shipping Cost", method.get("Cost", 0.0)), 0.0)
+    parts: list[str] = [method_name]
+    if delivery_days > 0:
+        parts.append(f"{delivery_days} day{'s' if delivery_days != 1 else ''}")
+    if "Internal Shipping Cost" in method or cost > 0:
+        parts.append(f"${cost:,.2f} cost")
+    return " | ".join(parts)
+
+
+def candidate_matches_shipping_method(candidate: dict[str, Any], method: dict[str, Any] | None) -> bool:
+    if not method:
+        return True
+
+    method_identifiers = {str(value).strip() for value in method.get("Identifiers", []) if str(value).strip()}
+    candidate_identifier = str(candidate.get("Identifier", "")).strip()
+    if method_identifiers and candidate_identifier and candidate_identifier in method_identifiers:
+        return True
+
+    method_guid = str(method.get("Method Guid", "")).strip().lower()
+    candidate_guid = str(candidate.get("Method Guid", "")).strip().lower()
+    if method_guid and candidate_guid:
+        return method_guid == candidate_guid
+
+    method_name = str(method.get("Method Name", "")).strip().lower()
+    candidate_method = str(candidate.get("Method", "")).strip().lower()
+    if method_name and candidate_method:
+        return method_name == candidate_method
+
+    return False
+
+
+def filter_shipping_candidates_by_method(
+    candidates: list[dict[str, Any]],
+    method: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not method:
+        return list(candidates)
+    return [candidate for candidate in candidates if candidate_matches_shipping_method(candidate, method)]
+
+
+def select_shipping_source_candidate(
+    candidates: list[dict[str, Any]],
+    method: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    filtered_candidates = filter_shipping_candidates_by_method(candidates, method)
+    if not filtered_candidates:
+        filtered_candidates = candidates
+    if not filtered_candidates:
         return None
-    return candidates[0]
+    return sorted(
+        filtered_candidates,
+        key=lambda row: (
+            row.get("_SortCost", float("inf")),
+            row.get("_SortDeliveryDays", 9999),
+            to_int(row.get("Warehouse Number"), 999999),
+        ),
+    )[0]
+
+
+def get_default_shipping_method(
+    available_methods: list[dict[str, Any]],
+    selected_candidate: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not available_methods:
+        return None
+    preferred_methods = sorted(
+        available_methods,
+        key=lambda method: (
+            to_float(method.get("Internal Shipping Cost", method.get("Cost", float("inf"))), float("inf")),
+            to_int(method.get("Delivery Days"), 9999),
+            str(method.get("Method Name", "")),
+        ),
+    )
+    if not selected_candidate:
+        return preferred_methods[0] if preferred_methods else available_methods[0]
+
+    preferred_guid = str(selected_candidate.get("Method Guid", "")).strip().lower()
+    preferred_identifier = str(selected_candidate.get("Identifier", "")).strip()
+    preferred_method_name = str(selected_candidate.get("Method", "")).strip().lower()
+    for method in available_methods:
+        identifiers = {str(value).strip() for value in method.get("Identifiers", []) if str(value).strip()}
+        method_guid = str(method.get("Method Guid", "")).strip().lower()
+        method_name = str(method.get("Method Name", "")).strip().lower()
+        if preferred_identifier and preferred_identifier in identifiers:
+            return method
+        if preferred_guid and method_guid and preferred_guid == method_guid:
+            return method
+        if preferred_method_name and method_name and preferred_method_name == method_name:
+            return method
+    return preferred_methods[0] if preferred_methods else available_methods[0]
+
+
+def select_preferred_shipping_candidates(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+
+    grouped_candidates: dict[tuple[Any, Any], list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        group_key = (
+            to_int(candidate.get("Quote Index"), 0),
+            normalize_warehouse_number(candidate.get("Warehouse Number")),
+        )
+        grouped_candidates.setdefault(group_key, []).append(candidate)
+
+    preferred_candidates: list[dict[str, Any]] = []
+    for group_candidates in grouped_candidates.values():
+        preferred_candidates.append(
+            sorted(
+                group_candidates,
+                key=lambda candidate: (
+                    to_float(candidate.get("Cost"), float("inf")),
+                    to_int(candidate.get("Delivery Days"), 9999),
+                    str(candidate.get("Method", "")),
+                    str(candidate.get("Carrier", "")),
+                ),
+            )[0]
+        )
+
+    return sorted(
+        preferred_candidates,
+        key=lambda candidate: (
+            to_int(candidate.get("Quote Index"), 0),
+            normalize_warehouse_number(candidate.get("Warehouse Number")) or 999999,
+        ),
+    )
 
 
 def build_source_warehouse_details(candidate: dict[str, Any] | None) -> dict[str, str]:
@@ -1072,29 +1471,469 @@ def build_source_warehouse_details(candidate: dict[str, Any] | None) -> dict[str
     }
 
 
-def build_shipping_source_options_df(candidates: list[dict[str, Any]]) -> pd.DataFrame:
+def filter_internal_transfer_candidates(
+    candidates: list[dict[str, Any]],
+    destination_warehouse_number: int | None,
+) -> list[dict[str, Any]]:
+    if destination_warehouse_number is None:
+        return list(candidates)
+    return [
+        candidate
+        for candidate in candidates
+        if normalize_warehouse_number(candidate.get("Warehouse Number")) != int(destination_warehouse_number)
+    ]
+
+
+def calculate_internal_shipping_cost(
+    method: dict[str, Any] | None,
+    candidates: list[dict[str, Any]],
+    destination_warehouse_number: int | None,
+) -> float:
+    if method:
+        raw_cost = to_float(method.get("Cost"), 0.0)
+        if destination_warehouse_number is None:
+            return raw_cost
+        method_candidates = filter_shipping_candidates_by_method(candidates, method)
+        excluded_cost = sum(
+            to_float(candidate.get("Cost"), 0.0)
+            for candidate in method_candidates
+            if normalize_warehouse_number(candidate.get("Warehouse Number")) == int(destination_warehouse_number)
+        )
+        return max(0.0, raw_cost - excluded_cost)
+
+    internal_candidates = filter_internal_transfer_candidates(candidates, destination_warehouse_number)
+    chosen_candidate = select_shipping_source_candidate(internal_candidates)
+    if chosen_candidate:
+        return to_float(chosen_candidate.get("Cost"), 0.0)
+    if candidates and destination_warehouse_number is not None:
+        return 0.0
+    return 0.0
+
+
+def decorate_shipping_methods_for_destination(
+    methods: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    destination_warehouse_number: int | None,
+) -> list[dict[str, Any]]:
+    decorated_methods: list[dict[str, Any]] = []
+    for method in methods:
+        method_copy = dict(method)
+        method_candidates = filter_shipping_candidates_by_method(candidates, method_copy)
+        included_candidates = filter_internal_transfer_candidates(method_candidates, destination_warehouse_number)
+        method_copy["Internal Shipping Cost"] = calculate_internal_shipping_cost(
+            method_copy,
+            candidates,
+            destination_warehouse_number,
+        )
+        method_copy["Included Source Warehouses"] = sorted(
+            {
+                to_int(candidate.get("Warehouse Number"), 0)
+                for candidate in included_candidates
+                if to_int(candidate.get("Warehouse Number"), 0) > 0
+            }
+        )
+        method_copy["Excluded Source Warehouses"] = sorted(
+            {
+                to_int(candidate.get("Warehouse Number"), 0)
+                for candidate in method_candidates
+                if to_int(candidate.get("Warehouse Number"), 0) > 0
+                and destination_warehouse_number is not None
+                and to_int(candidate.get("Warehouse Number"), 0) == int(destination_warehouse_number)
+            }
+        )
+        decorated_methods.append(method_copy)
+
+    return sorted(
+        decorated_methods,
+        key=lambda row: (
+            to_float(row.get("Internal Shipping Cost"), float("inf")),
+            to_int(row.get("Delivery Days"), 9999),
+            str(row.get("Method Name", "")),
+        ),
+    )
+
+
+def build_shipping_source_options_df(
+    candidates: list[dict[str, Any]],
+    destination_warehouse_number: int | None = None,
+) -> pd.DataFrame:
     if not candidates:
         return pd.DataFrame(
-            columns=["Warehouse", "Option Type", "Carrier", "Method", "Delivery Days", "Cost", "Net Charge"]
+            columns=[
+                "Source Warehouse",
+                "Option Type",
+                "Carrier",
+                "Method",
+                "Delivery Days",
+                "API Cost",
+                "Internal Shipping Cost",
+            ]
         )
 
     rows: list[dict[str, Any]] = []
     for candidate in candidates:
         warehouse_details = build_source_warehouse_details(candidate)
         warehouse_label = format_warehouse_option(warehouse_details)
+        candidate_warehouse_number = normalize_warehouse_number(candidate.get("Warehouse Number"))
+        candidate_cost = to_float(candidate.get("Cost"), 0.0)
+        internal_cost = (
+            0.0
+            if destination_warehouse_number is not None
+            and candidate_warehouse_number == int(destination_warehouse_number)
+            else candidate_cost
+        )
         rows.append(
             {
-                "Warehouse": warehouse_label,
+                "Source Warehouse": warehouse_label,
                 "Option Type": candidate.get("Option Type", ""),
                 "Carrier": candidate.get("Carrier", ""),
                 "Method": candidate.get("Method", ""),
                 "Delivery Days": candidate.get("Delivery Days", ""),
-                "Cost": candidate.get("Cost", 0.0),
-                "Net Charge": candidate.get("Net Charge", 0.0),
+                "API Cost": candidate_cost,
+                "Internal Shipping Cost": internal_cost,
             }
         )
 
     return pd.DataFrame(rows)
+
+
+def extract_shipping_quote_for_candidate(
+    api_response: Any,
+    candidate: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not candidate or not isinstance(api_response, dict):
+        return None
+
+    quotes = api_response.get("ShippingQuotePerZipCode")
+    if not isinstance(quotes, list):
+        return None
+
+    quote_index = to_int(candidate.get("Quote Index"), 0)
+    if quote_index > 0 and quote_index <= len(quotes):
+        quote = quotes[quote_index - 1]
+        if isinstance(quote, dict):
+            return quote
+
+    candidate_identifier = str(candidate.get("Identifier", "")).strip()
+    candidate_warehouse_number = normalize_warehouse_number(candidate.get("Warehouse Number"))
+    for quote in quotes:
+        if not isinstance(quote, dict):
+            continue
+        quote_warehouse_number = normalize_warehouse_number(quote.get("WarehouseNumber"))
+        if candidate_warehouse_number is not None and quote_warehouse_number == candidate_warehouse_number:
+            return quote
+
+        for option_collection_name in ("Options", "FedExOptions", "CommonCarrierOptions"):
+            option_collection = quote.get(option_collection_name, [])
+            if not isinstance(option_collection, list):
+                continue
+            for option in option_collection:
+                if not isinstance(option, dict):
+                    continue
+                if candidate_identifier and str(option.get("Identifier", "")).strip() == candidate_identifier:
+                    return quote
+
+    return None
+
+
+def build_shipping_package_tables(
+    api_response: Any,
+    candidate: dict[str, Any] | None,
+) -> tuple[pd.DataFrame, dict[int, pd.DataFrame]]:
+    quote = extract_shipping_quote_for_candidate(api_response, candidate)
+    if not quote:
+        return pd.DataFrame(columns=["Package Number", "Items", "Length", "Width", "Height", "Volume", "Weight", "Container"]), {}
+
+    raw_packages: list[dict[str, Any]] = []
+    for collection_name in ("ParcelPackages", "CarrierPackages"):
+        collection = quote.get(collection_name, [])
+        if isinstance(collection, list):
+            raw_packages.extend([package for package in collection if isinstance(package, dict)])
+
+    if not raw_packages:
+        return pd.DataFrame(columns=["Package Number", "Items", "Length", "Width", "Height", "Volume", "Weight", "Container"]), {}
+
+    package_rows: list[dict[str, Any]] = []
+    item_tables: dict[int, pd.DataFrame] = {}
+    package_number = 0
+
+    for package in raw_packages:
+        repeat_count = max(1, to_int(package.get("PackageQuantity"), 1))
+        length = to_float(package.get("Length"), 0.0)
+        width = to_float(package.get("Width"), 0.0)
+        height = to_float(package.get("Height"), 0.0)
+        volume = to_float(package.get("Volume"), 0.0)
+        weight = to_float(package.get("Weight"), 0.0)
+        container_name = str(package.get("ContainerName", "")).strip()
+        products = package.get("Products", [])
+
+        item_rows: list[dict[str, Any]] = []
+        if isinstance(products, list):
+            for product in products:
+                if not isinstance(product, dict):
+                    continue
+                item_number = normalize_item_number(product.get("ItemNumber"))
+                quantity = to_float(product.get("Quantity"), 0.0)
+                product_length = to_float(product.get("Length"), 0.0)
+                product_width = to_float(product.get("Width"), 0.0)
+                product_height = to_float(product.get("Height"), 0.0)
+                per_unit_volume = to_float(
+                    product.get("Volume"),
+                    product_length * product_width * product_height,
+                )
+                total_volume = per_unit_volume * quantity
+                total_weight = to_float(product.get("Weight"), 0.0) * quantity
+                if item_number and quantity > 0:
+                    item_rows.append(
+                        {
+                            "Item Number": item_number,
+                            "Quantity": quantity,
+                            "Volume": total_volume,
+                            "Weight": total_weight,
+                        }
+                    )
+
+        items_count = int(sum(to_float(item.get("Quantity"), 0.0) for item in item_rows))
+        for _ in range(repeat_count):
+            package_number += 1
+            package_rows.append(
+                {
+                    "Package Number": package_number,
+                    "Items": items_count,
+                    "Length": length,
+                    "Width": width,
+                    "Height": height,
+                    "Volume": volume,
+                    "Weight": weight,
+                    "Container": container_name,
+                }
+            )
+            if item_rows:
+                item_df = pd.DataFrame(item_rows).copy()
+                item_df["Quantity"] = _safe_numeric(item_df["Quantity"]).fillna(0.0)
+                item_df["Volume"] = _safe_numeric(item_df["Volume"]).fillna(0.0)
+                item_df["Weight"] = _safe_numeric(item_df["Weight"]).fillna(0.0)
+                item_df = (
+                    item_df.groupby("Item Number", as_index=False)[["Quantity", "Volume", "Weight"]]
+                    .sum()
+                    .sort_values("Item Number")
+                    .reset_index(drop=True)
+                )
+                item_tables[package_number] = item_df
+
+    package_df = pd.DataFrame(package_rows)
+    if package_df.empty:
+        return pd.DataFrame(columns=["Package Number", "Items", "Length", "Width", "Height", "Volume", "Weight", "Container"]), {}
+
+    package_df["Package Number"] = _safe_numeric(package_df["Package Number"]).fillna(0).astype(int)
+    package_df["Items"] = _safe_numeric(package_df["Items"]).fillna(0).astype(int)
+    package_df["Length"] = _safe_numeric(package_df["Length"]).fillna(0.0)
+    package_df["Width"] = _safe_numeric(package_df["Width"]).fillna(0.0)
+    package_df["Height"] = _safe_numeric(package_df["Height"]).fillna(0.0)
+    package_df["Volume"] = _safe_numeric(package_df["Volume"]).fillna(0.0)
+    package_df["Weight"] = _safe_numeric(package_df["Weight"]).fillna(0.0)
+    package_df = package_df.sort_values("Package Number").reset_index(drop=True)
+    return package_df, item_tables
+
+
+def build_shipping_method_package_tables(
+    api_response: Any,
+    candidates: list[dict[str, Any]],
+    method: dict[str, Any] | None,
+    destination_warehouse_number: int | None = None,
+) -> tuple[pd.DataFrame, dict[int, pd.DataFrame]]:
+    method_candidates = filter_shipping_candidates_by_method(candidates, method)
+    if not method_candidates:
+        method_candidates = list(candidates)
+
+    included_candidates = filter_internal_transfer_candidates(
+        method_candidates,
+        destination_warehouse_number,
+    )
+    if not included_candidates:
+        return (
+            pd.DataFrame(
+                columns=[
+                    "Package Number",
+                    "Source Warehouse",
+                    "Items",
+                    "Length",
+                    "Width",
+                    "Height",
+                    "Volume",
+                    "Weight",
+                    "Container",
+                ]
+            ),
+            {},
+        )
+
+    combined_package_frames: list[pd.DataFrame] = []
+    combined_item_tables: dict[int, pd.DataFrame] = {}
+    next_package_number = 1
+
+    for candidate in included_candidates:
+        package_df, item_tables = build_shipping_package_tables(api_response, candidate)
+        if package_df.empty:
+            continue
+
+        warehouse_number = normalize_warehouse_number(candidate.get("Warehouse Number"))
+        renumbered_package_df = package_df.copy()
+        number_map: dict[int, int] = {}
+        for original_package_number in renumbered_package_df["Package Number"].astype(int).tolist():
+            if original_package_number not in number_map:
+                number_map[original_package_number] = next_package_number
+                next_package_number += 1
+
+        renumbered_package_df["Package Number"] = renumbered_package_df["Package Number"].map(
+            lambda value: number_map.get(to_int(value, 0), to_int(value, 0))
+        )
+        renumbered_package_df.insert(
+            1,
+            "Source Warehouse",
+            warehouse_number if warehouse_number is not None else "",
+        )
+        combined_package_frames.append(renumbered_package_df)
+
+        for original_package_number, item_df in item_tables.items():
+            new_package_number = number_map.get(to_int(original_package_number, 0))
+            if not new_package_number or item_df.empty:
+                continue
+            combined_item_tables[new_package_number] = item_df.copy()
+
+    if not combined_package_frames:
+        return (
+            pd.DataFrame(
+                columns=[
+                    "Package Number",
+                    "Source Warehouse",
+                    "Items",
+                    "Length",
+                    "Width",
+                    "Height",
+                    "Volume",
+                    "Weight",
+                    "Container",
+                ]
+            ),
+            {},
+        )
+
+    combined_package_df = (
+        pd.concat(combined_package_frames, ignore_index=True)
+        .sort_values("Package Number")
+        .reset_index(drop=True)
+    )
+    return combined_package_df, combined_item_tables
+
+
+def build_shipping_package_allocation_df(
+    api_response: Any,
+    candidates: list[dict[str, Any]],
+) -> pd.DataFrame:
+    preferred_candidates = select_preferred_shipping_candidates(candidates if isinstance(candidates, list) else [])
+    if not preferred_candidates:
+        return pd.DataFrame(
+            columns=[
+                "Package Number",
+                "Item Number",
+                "Method",
+                "Quantity",
+                "Volume",
+                "Source Warehouse",
+                "Delivery Days",
+                "Carrier",
+                "Package Cost Allocation by Volume",
+            ]
+        )
+
+    allocation_rows: list[dict[str, Any]] = []
+
+    for candidate in preferred_candidates:
+        if not isinstance(candidate, dict):
+            continue
+
+        package_df, item_tables = build_shipping_package_tables(api_response, candidate)
+        if package_df.empty or not item_tables:
+            continue
+
+        candidate_cost = to_float(candidate.get("Cost"), 0.0)
+        total_quote_package_volume = float(
+            _safe_numeric(package_df.get("Volume", pd.Series(dtype="float64"))).fillna(0.0).sum()
+        )
+        source_warehouse_number = normalize_warehouse_number(candidate.get("Warehouse Number"))
+        source_warehouse_display = str(source_warehouse_number or "").strip()
+        method_name = str(candidate.get("Method", "")).strip()
+        carrier_name = str(candidate.get("Carrier", "")).strip()
+        delivery_days = to_int(candidate.get("Delivery Days"), 0)
+
+        for package_row in package_df.to_dict(orient="records"):
+            package_number = to_int(package_row.get("Package Number"), 0)
+            if package_number <= 0:
+                continue
+
+            package_volume = to_float(package_row.get("Volume"), 0.0)
+            estimated_package_cost = (
+                candidate_cost * (package_volume / total_quote_package_volume)
+                if total_quote_package_volume > 0 and package_volume > 0
+                else 0.0
+            )
+            item_df = item_tables.get(package_number, pd.DataFrame())
+            if item_df.empty:
+                continue
+
+            package_item_total_volume = float(
+                _safe_numeric(item_df.get("Volume", pd.Series(dtype="float64"))).fillna(0.0).sum()
+            )
+
+            for item_row in item_df.to_dict(orient="records"):
+                item_volume = to_float(item_row.get("Volume"), 0.0)
+                allocated_cost = (
+                    estimated_package_cost * (item_volume / package_item_total_volume)
+                    if package_item_total_volume > 0 and item_volume > 0
+                    else 0.0
+                )
+                allocation_rows.append(
+                    {
+                        "Package Number": package_number,
+                        "Item Number": str(item_row.get("Item Number", "")).strip(),
+                        "Method": method_name,
+                        "Quantity": to_float(item_row.get("Quantity"), 0.0),
+                        "Volume": item_volume,
+                        "Source Warehouse": source_warehouse_display,
+                        "Delivery Days": delivery_days,
+                        "Carrier": carrier_name,
+                        "Package Cost Allocation by Volume": allocated_cost,
+                    }
+                )
+
+    if not allocation_rows:
+        return pd.DataFrame(
+            columns=[
+                "Package Number",
+                "Item Number",
+                "Method",
+                "Quantity",
+                "Volume",
+                "Source Warehouse",
+                "Delivery Days",
+                "Carrier",
+                "Package Cost Allocation by Volume",
+            ]
+        )
+
+    allocation_df = pd.DataFrame(allocation_rows)
+    allocation_df["Package Number"] = _safe_numeric(allocation_df["Package Number"]).fillna(0).astype(int)
+    allocation_df["Quantity"] = _safe_numeric(allocation_df["Quantity"]).fillna(0.0)
+    allocation_df["Volume"] = _safe_numeric(allocation_df["Volume"]).fillna(0.0)
+    allocation_df["Delivery Days"] = _safe_numeric(allocation_df["Delivery Days"]).fillna(0).astype(int)
+    allocation_df["Package Cost Allocation by Volume"] = (
+        _safe_numeric(allocation_df["Package Cost Allocation by Volume"]).fillna(0.0).round(2)
+    )
+    return allocation_df.sort_values(
+        ["Source Warehouse", "Method", "Carrier", "Delivery Days", "Package Number", "Item Number"],
+        kind="stable",
+    ).reset_index(drop=True)
 
 
 def normalize_api_response_to_df(api_response: Any) -> pd.DataFrame:
@@ -1591,7 +2430,17 @@ def format_measurement_dataframe(
 
     display_df = df.copy()
 
-    dimension_columns = ["LengthInInches", "WidthInInches", "HeightInInches", "length", "width", "height"]
+    dimension_columns = [
+        "LengthInInches",
+        "WidthInInches",
+        "HeightInInches",
+        "Length",
+        "Width",
+        "Height",
+        "length",
+        "width",
+        "height",
+    ]
     weight_columns = ["WeightInPounds", "weight", "Weight"]
     volume_columns = ["AverageVolume", "volume", "Volume"]
 
@@ -1612,6 +2461,12 @@ def format_measurement_dataframe(
         rename_map["WidthInInches"] = f"Width ({dim_label})"
     if "HeightInInches" in display_df.columns:
         rename_map["HeightInInches"] = f"Height ({dim_label})"
+    if "Length" in display_df.columns and f"Length ({dim_label})" not in display_df.columns:
+        rename_map["Length"] = f"Length ({dim_label})"
+    if "Width" in display_df.columns and f"Width ({dim_label})" not in display_df.columns:
+        rename_map["Width"] = f"Width ({dim_label})"
+    if "Height" in display_df.columns and f"Height ({dim_label})" not in display_df.columns:
+        rename_map["Height"] = f"Height ({dim_label})"
     if "WeightInPounds" in display_df.columns:
         rename_map["WeightInPounds"] = f"Weight ({weight_label})"
     if "AverageVolume" in display_df.columns:
@@ -1632,6 +2487,40 @@ def format_measurement_dataframe(
         rename_map["Volume"] = f"Volume ({volume_label})"
 
     return display_df.rename(columns=rename_map)
+
+
+def strip_shipping_charge_fields(value: Any) -> Any:
+    excluded_fields = {
+        "computednewrate",
+        "computedrate",
+        "customershippingprice",
+        "customizedflatmarkup",
+        "discount",
+        "grossprofit",
+        "itemgrossprofit",
+        "listnetcharge",
+        "markuppercent",
+        "matrixgrossprofit",
+        "matrixratecharge",
+        "maxratecharge",
+        "minratecharge",
+        "netcharge",
+        "originalgrossprofit",
+        "productamountcharged",
+        "productgrossprofit",
+        "rate",
+        "shippingnetcharge",
+        "targetgrossprofit",
+    }
+    if isinstance(value, dict):
+        return {
+            key: strip_shipping_charge_fields(item)
+            for key, item in value.items()
+            if normalize_col_name(str(key)) not in excluded_fields
+        }
+    if isinstance(value, list):
+        return [strip_shipping_charge_fields(item) for item in value]
+    return value
 
 
 # ============================================================
@@ -1669,19 +2558,20 @@ def reset_estimation_results(results: dict[str, Any]) -> dict[str, Any]:
     updated_results = dict(results)
     updated_results.update(
         {
-            "verified_items": [],
+            "shipping_items": [],
             "shipping_calc_payload": {},
             "shipping_calc_response": None,
             "shipping_calc_error": "",
             "shipping_source_candidates": [],
             "selected_source_candidate": {},
-            "staging_warehouse_number": "",
-            "staging_warehouse_details": {},
+            "destination_mode": "",
+            "destination_label": "",
+            "destination_warehouse_number": "",
+            "destination_warehouse_details": {},
+            "shipping_address": {},
+            "shipping_request_options": {},
             "source_warehouse_number": "",
             "source_warehouse_details": {},
-            "api_payload": [],
-            "api_response": None,
-            "api_error": "",
             "destination_state": "",
         }
     )
@@ -1690,42 +2580,51 @@ def reset_estimation_results(results: dict[str, Any]) -> dict[str, Any]:
 
 def run_estimation_for_results(
     base_results: dict[str, Any],
-    staging_warehouse_number: int,
-    staging_warehouse_details: dict[str, str],
+    destination_mode: str,
+    shipping_address: dict[str, Any],
+    destination_label: str = "",
+    destination_warehouse_number: int | None = None,
+    destination_warehouse_details: dict[str, str] | None = None,
+    shipping_request_options: dict[str, Any] | None = None,
     perishable_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    if not staging_warehouse_details:
-        raise ValueError("Select a valid staging warehouse from the warehouse lookup before running the estimate.")
-
-    destination_state = str(staging_warehouse_details.get("LocationState", "")).strip().upper()
+    validated_address = validate_shipping_address(shipping_address)
+    destination_state = str(validated_address.get("State", "")).strip().upper()
     if not destination_state:
-        raise ValueError("The selected staging warehouse is missing a destination state.")
+        raise ValueError("The selected destination is missing a destination state.")
 
     requested_df = base_results.get("requested_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
-    verified_df = base_results.get("verified_df", pd.DataFrame())
-    if verified_df.empty and not base_results.get("matched_df", pd.DataFrame()).empty:
-        verified_df, _ = split_verified_and_non_verified(
-            base_results.get("matched_df", pd.DataFrame()),
-            base_results.get("unmatched_df", pd.DataFrame(columns=["ItemNumber", "Quantity"])),
-        )
+    matched_df = base_results.get("matched_df", pd.DataFrame())
+    if matched_df.empty:
+        matched_df = base_results.get("verified_df", pd.DataFrame())
 
-    verified_items = build_verified_item_records(
-        verified_df,
+    shipping_items = build_shipping_item_records(
+        matched_df,
         requested_df,
         perishable_type_overrides=perishable_overrides,
     )
 
     updated_results = reset_estimation_results(base_results)
-    updated_results["verified_items"] = verified_items
-    updated_results["staging_warehouse_number"] = int(staging_warehouse_number)
-    updated_results["staging_warehouse_details"] = staging_warehouse_details or {}
+    updated_results["shipping_items"] = shipping_items
+    updated_results["destination_mode"] = str(destination_mode).strip()
+    updated_results["destination_label"] = str(destination_label).strip() or format_shipping_address(validated_address)
+    updated_results["destination_warehouse_number"] = (
+        int(destination_warehouse_number) if destination_warehouse_number is not None else ""
+    )
+    updated_results["destination_warehouse_details"] = destination_warehouse_details or {}
+    updated_results["shipping_address"] = validated_address
+    updated_results["shipping_request_options"] = build_shipping_request_options(shipping_request_options)
     updated_results["destination_state"] = destination_state
     updated_results["perishable_overrides"] = perishable_overrides or {}
 
-    if not verified_items:
+    if not shipping_items:
         return updated_results
 
-    shipping_calc_payload = build_shipping_calculator_payload(verified_items, staging_warehouse_details)
+    shipping_calc_payload = build_shipping_calculator_payload(
+        shipping_items,
+        validated_address,
+        shipping_request_options=shipping_request_options,
+    )
     shipping_calc_response, shipping_calc_error = call_shipping_calculator_api(shipping_calc_payload)
     shipping_source_candidates = extract_shipping_source_candidates(shipping_calc_response)
     selected_source_candidate = select_shipping_source_candidate(shipping_source_candidates)
@@ -1736,20 +2635,6 @@ def run_estimation_for_results(
     )
     source_warehouse_details = build_source_warehouse_details(selected_source_candidate)
 
-    packaging_payload: list[dict[str, Any]] = []
-    api_response = None
-    api_error = ""
-    if shipping_calc_error:
-        api_error = "Packaging estimator was skipped because the shipping calculator request failed."
-    elif source_warehouse_number is None:
-        api_error = (
-            "Packaging estimator was skipped because no ground/common-carrier source warehouse "
-            "was returned by the shipping calculator."
-        )
-    else:
-        packaging_payload = build_packaging_payload(verified_items, source_warehouse_number)
-        api_response, api_error = call_packaging_api(packaging_payload, destination_state=destination_state)
-
     updated_results["shipping_calc_payload"] = shipping_calc_payload
     updated_results["shipping_calc_response"] = shipping_calc_response
     updated_results["shipping_calc_error"] = shipping_calc_error
@@ -1757,15 +2642,12 @@ def run_estimation_for_results(
     updated_results["selected_source_candidate"] = selected_source_candidate or {}
     updated_results["source_warehouse_number"] = source_warehouse_number or ""
     updated_results["source_warehouse_details"] = source_warehouse_details
-    updated_results["api_payload"] = packaging_payload
-    updated_results["api_response"] = api_response
-    updated_results["api_error"] = api_error
     return updated_results
 
 
 def build_all_items_summary_dataframe(
     package_item_tables: dict[int, pd.DataFrame],
-    verified_items: list[dict[str, Any]],
+    shipping_items: list[dict[str, Any]],
 ) -> pd.DataFrame:
     all_item_frames: list[pd.DataFrame] = []
 
@@ -1786,7 +2668,7 @@ def build_all_items_summary_dataframe(
             .reset_index(drop=True)
         )
 
-    if not verified_items:
+    if not shipping_items:
         return pd.DataFrame(columns=["Item Number", "Quantity", "Volume", "Weight"])
 
     fallback_df = pd.DataFrame(
@@ -1797,7 +2679,7 @@ def build_all_items_summary_dataframe(
                 "Volume": item.get("volume", 0.0),
                 "Weight": item.get("weight", 0.0),
             }
-            for item in verified_items
+            for item in shipping_items
         ]
     )
     if fallback_df.empty:
@@ -1814,8 +2696,10 @@ def build_all_items_summary_dataframe(
     )
 
 
-def build_recommendation_signature(
+def build_shipping_recommendation_signature(
     results: dict[str, Any],
+    shipping_request_options: dict[str, Any] | None,
+    selected_method: dict[str, Any] | None,
     perishable_overrides: dict[str, str] | None = None,
 ) -> str:
     requested_df = results.get("requested_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
@@ -1828,26 +2712,54 @@ def build_recommendation_signature(
             .to_dict(orient="records")
         )
 
-    overrides_payload = sorted((perishable_overrides or {}).items())
     payload = {
         "requested_rows": requested_rows,
-        "overrides": overrides_payload,
+        "overrides": sorted((perishable_overrides or {}).items()),
+        "shipping_request_options": build_shipping_request_options(shipping_request_options),
+        "selected_method_key": build_shipping_method_key(selected_method),
     }
     return json.dumps(payload, sort_keys=True)
 
 
-def build_simulation_summary_row(simulation_results: dict[str, Any]) -> dict[str, Any]:
-    selected_source_candidate = simulation_results.get("selected_source_candidate", {}) or {}
-    api_response = simulation_results.get("api_response", None)
-    package_details_df = pd.DataFrame()
-    if api_response is not None:
-        package_details_df = build_package_details_pivot(normalize_api_response_to_df(api_response))
-
-    total_packages = (
-        int(package_details_df["Package Number"].nunique())
-        if not package_details_df.empty and "Package Number" in package_details_df.columns
-        else 0
+def build_shipping_simulation_summary_row(
+    simulation_results: dict[str, Any],
+    selected_method: dict[str, Any] | None,
+) -> dict[str, Any]:
+    shipping_candidates = simulation_results.get("shipping_source_candidates", [])
+    destination_warehouse_number = normalize_warehouse_number(
+        simulation_results.get("destination_warehouse_number")
     )
+    method_candidates = filter_shipping_candidates_by_method(shipping_candidates, selected_method)
+    if not method_candidates:
+        method_candidates = list(shipping_candidates)
+    internal_candidates = filter_internal_transfer_candidates(
+        method_candidates,
+        destination_warehouse_number,
+    )
+    chosen_candidate = select_shipping_source_candidate(internal_candidates)
+    chosen_source_details = (
+        build_source_warehouse_details(chosen_candidate)
+        if chosen_candidate
+        else simulation_results.get("source_warehouse_details", {}) or {}
+    )
+    package_details_df, _ = build_shipping_method_package_tables(
+        simulation_results.get("shipping_calc_response"),
+        shipping_candidates,
+        selected_method,
+        destination_warehouse_number=destination_warehouse_number,
+    )
+    shipping_cost = calculate_internal_shipping_cost(
+        selected_method,
+        shipping_candidates,
+        destination_warehouse_number,
+    )
+    selected_method_name = (
+        str(selected_method.get("Method Name", "")).strip()
+        if isinstance(selected_method, dict)
+        else ""
+    )
+
+    total_packages = int(len(package_details_df)) if not package_details_df.empty else 0
     total_volume = (
         float(_safe_numeric(package_details_df.get("Volume", pd.Series(dtype="float64"))).fillna(0.0).sum())
         if not package_details_df.empty
@@ -1858,60 +2770,77 @@ def build_simulation_summary_row(simulation_results: dict[str, Any]) -> dict[str
         if not package_details_df.empty
         else 0.0
     )
-    shipping_error = str(simulation_results.get("shipping_calc_error", "") or "")
-    packaging_error = str(simulation_results.get("api_error", "") or "")
-    error_message = shipping_error or packaging_error
+    destination_details = simulation_results.get("destination_warehouse_details", {}) or {}
 
     return {
-        "Staging Warehouse": simulation_results.get("staging_warehouse_number", ""),
-        "Staging Location": format_warehouse_option(simulation_results.get("staging_warehouse_details", {}) or {}),
-        "Source Warehouse": simulation_results.get("source_warehouse_number", ""),
-        "Method": str(selected_source_candidate.get("Method", "")).strip(),
-        "Option Type": str(selected_source_candidate.get("Option Type", "")).strip(),
-        "Delivery Days": to_int(selected_source_candidate.get("Delivery Days"), 0),
-        "Shipping Cost": to_float(selected_source_candidate.get("Cost"), 0.0),
-        "Net Charge": to_float(selected_source_candidate.get("Net Charge"), 0.0),
+        "Destination Warehouse": simulation_results.get("destination_warehouse_number", ""),
+        "Destination Location": format_warehouse_option(destination_details),
+        "Source Warehouse": (
+            chosen_candidate.get("Warehouse Number", "")
+            if chosen_candidate
+            else simulation_results.get("source_warehouse_number", "")
+        ),
+        "Source Location": format_warehouse_option(chosen_source_details),
+        "Method": (
+            str(chosen_candidate.get("Method", "")).strip()
+            if chosen_candidate
+            else selected_method_name or "No transfer required"
+        ),
+        "Option Type": str(chosen_candidate.get("Option Type", "")).strip() if chosen_candidate else "",
+        "Delivery Days": to_int(chosen_candidate.get("Delivery Days"), 0) if chosen_candidate else 0,
+        "Shipping Cost": shipping_cost,
         "Packages": total_packages,
         "Total Volume": total_volume,
         "Total Weight": total_weight,
-        "Error": error_message,
+        "Error": str(simulation_results.get("shipping_calc_error", "") or ""),
     }
 
 
-def simulate_staging_warehouse_recommendation(
+def simulate_destination_warehouse_recommendation(
     base_results: dict[str, Any],
-    staging_warehouse_number: int,
+    destination_warehouse_number: int,
+    shipping_request_options: dict[str, Any] | None,
+    selected_method: dict[str, Any] | None,
     perishable_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    staging_warehouse_details = find_warehouse_details(staging_warehouse_number) or {}
+    destination_warehouse_details = find_warehouse_details(destination_warehouse_number) or {}
+    shipping_address = build_shipping_address_from_warehouse(destination_warehouse_details)
     simulation_results = run_estimation_for_results(
         base_results,
-        staging_warehouse_number=staging_warehouse_number,
-        staging_warehouse_details=staging_warehouse_details,
+        destination_mode=DESTINATION_MODE_WAREHOUSE,
+        shipping_address=shipping_address,
+        destination_label=format_warehouse_details(destination_warehouse_details),
+        destination_warehouse_number=destination_warehouse_number,
+        destination_warehouse_details=destination_warehouse_details,
+        shipping_request_options=shipping_request_options,
         perishable_overrides=perishable_overrides,
     )
-    return build_simulation_summary_row(simulation_results)
+    return build_shipping_simulation_summary_row(simulation_results, selected_method)
 
 
-def run_staging_warehouse_simulations(
+def run_destination_warehouse_simulations(
     base_results: dict[str, Any],
-    staging_warehouse_numbers: list[int],
+    destination_warehouse_numbers: list[int],
+    shipping_request_options: dict[str, Any] | None,
+    selected_method: dict[str, Any] | None,
     perishable_overrides: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    if not staging_warehouse_numbers:
+    if not destination_warehouse_numbers:
         return []
 
     simulations: list[dict[str, Any]] = []
-    max_workers = min(6, max(1, len(staging_warehouse_numbers)))
+    max_workers = min(6, max(1, len(destination_warehouse_numbers)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_map = {
             executor.submit(
-                simulate_staging_warehouse_recommendation,
+                simulate_destination_warehouse_recommendation,
                 base_results,
                 warehouse_number,
+                shipping_request_options,
+                selected_method,
                 perishable_overrides,
             ): warehouse_number
-            for warehouse_number in staging_warehouse_numbers
+            for warehouse_number in destination_warehouse_numbers
         }
         for future in as_completed(future_map):
             warehouse_number = future_map[future]
@@ -1920,14 +2849,14 @@ def run_staging_warehouse_simulations(
             except Exception as exc:
                 simulations.append(
                     {
-                        "Staging Warehouse": warehouse_number,
-                        "Staging Location": "",
+                        "Destination Warehouse": warehouse_number,
+                        "Destination Location": "",
                         "Source Warehouse": "",
+                        "Source Location": "",
                         "Method": "",
                         "Option Type": "",
                         "Delivery Days": 0,
                         "Shipping Cost": 0.0,
-                        "Net Charge": 0.0,
                         "Packages": 0,
                         "Total Volume": 0.0,
                         "Total Weight": 0.0,
@@ -1935,27 +2864,43 @@ def run_staging_warehouse_simulations(
                     }
                 )
 
-    return sorted(simulations, key=lambda row: (to_int(row.get("Staging Warehouse"), 999999),))
+    return sorted(simulations, key=lambda row: (to_int(row.get("Destination Warehouse"), 999999),))
 
 
-def pick_cheapest_recommendation(simulations: list[dict[str, Any]]) -> dict[str, Any] | None:
-    valid_rows = [row for row in simulations if not str(row.get("Error", "")).strip()]
+def pick_cheapest_destination_recommendation(
+    simulations: list[dict[str, Any]],
+    current_destination_warehouse_number: int | None,
+) -> dict[str, Any] | None:
+    valid_rows = [
+        row
+        for row in simulations
+        if not str(row.get("Error", "")).strip()
+        and to_int(row.get("Destination Warehouse"), 0) != to_int(current_destination_warehouse_number, 0)
+    ]
     if not valid_rows:
         return None
 
     return min(
         valid_rows,
         key=lambda row: (
-            to_float(row.get("Net Charge"), float("inf")),
+            to_float(row.get("Shipping Cost"), float("inf")),
             to_int(row.get("Delivery Days"), 9999),
             to_int(row.get("Packages"), 9999),
-            to_int(row.get("Staging Warehouse"), 999999),
+            to_int(row.get("Destination Warehouse"), 999999),
         ),
     )
 
 
-def pick_best_overall_recommendation(simulations: list[dict[str, Any]]) -> dict[str, Any] | None:
-    valid_rows = [row for row in simulations if not str(row.get("Error", "")).strip()]
+def pick_best_destination_recommendation(
+    simulations: list[dict[str, Any]],
+    current_destination_warehouse_number: int | None,
+) -> dict[str, Any] | None:
+    valid_rows = [
+        row
+        for row in simulations
+        if not str(row.get("Error", "")).strip()
+        and to_int(row.get("Destination Warehouse"), 0) != to_int(current_destination_warehouse_number, 0)
+    ]
     if not valid_rows:
         return None
 
@@ -1965,8 +2910,8 @@ def pick_best_overall_recommendation(simulations: list[dict[str, Any]]) -> dict[
         .fillna(9999)
         .rank(method="min", ascending=True)
     )
-    ranking_df["NetChargeRank"] = (
-        pd.to_numeric(ranking_df.get("Net Charge"), errors="coerce")
+    ranking_df["ShippingCostRank"] = (
+        pd.to_numeric(ranking_df.get("Shipping Cost"), errors="coerce")
         .fillna(float("inf"))
         .rank(method="min", ascending=True)
     )
@@ -1976,20 +2921,20 @@ def pick_best_overall_recommendation(simulations: list[dict[str, Any]]) -> dict[
         .rank(method="min", ascending=True)
     )
     ranking_df["CombinedRankScore"] = (
-        ranking_df["PackagesRank"] + ranking_df["NetChargeRank"] + ranking_df["DeliveryDaysRank"]
+        ranking_df["PackagesRank"] + ranking_df["ShippingCostRank"] + ranking_df["DeliveryDaysRank"]
     )
-    ranking_df["StagingWarehouseSort"] = pd.to_numeric(
-        ranking_df.get("Staging Warehouse"), errors="coerce"
+    ranking_df["DestinationWarehouseSort"] = pd.to_numeric(
+        ranking_df.get("Destination Warehouse"), errors="coerce"
     ).fillna(999999)
 
-    best_row = (
+    return (
         ranking_df.sort_values(
             by=[
                 "CombinedRankScore",
                 "PackagesRank",
-                "NetChargeRank",
+                "ShippingCostRank",
                 "DeliveryDaysRank",
-                "StagingWarehouseSort",
+                "DestinationWarehouseSort",
             ],
             ascending=True,
             kind="stable",
@@ -1997,15 +2942,6 @@ def pick_best_overall_recommendation(simulations: list[dict[str, Any]]) -> dict[
         .iloc[0]
         .to_dict()
     )
-
-    helper_columns = {
-        "PackagesRank",
-        "NetChargeRank",
-        "DeliveryDaysRank",
-        "CombinedRankScore",
-        "StagingWarehouseSort",
-    }
-    return {key: value for key, value in best_row.items() if key not in helper_columns}
 
 
 # ============================================================
@@ -2339,71 +3275,49 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
     unmatched_df = results.get("unmatched_df", pd.DataFrame(columns=["ItemNumber", "Quantity"]))
     verified_df = results.get("verified_df", pd.DataFrame())
     non_verified_df = results.get("non_verified_df", pd.DataFrame())
-    verified_items = results.get("verified_items", [])
+    shipping_items = results.get("shipping_items", results.get("verified_items", []))
     shipping_calc_error = str(results.get("shipping_calc_error", "") or "")
     shipping_source_candidates = results.get("shipping_source_candidates", [])
     selected_source_candidate = results.get("selected_source_candidate", {})
-    api_payload = results.get("api_payload", [])
-    api_response = results.get("api_response", None)
-    api_error = str(results.get("api_error", "") or "")
+    shipping_calc_payload = results.get("shipping_calc_payload", {})
+    shipping_calc_response = results.get("shipping_calc_response", None)
+    stored_destination_mode = str(results.get("destination_mode", "") or "")
+    stored_destination_label = str(results.get("destination_label", "") or "")
+    stored_destination_warehouse_number = results.get("destination_warehouse_number", "")
+    stored_destination_warehouse_details = results.get("destination_warehouse_details", {})
+    stored_shipping_address = results.get("shipping_address", {})
+    stored_shipping_request_options = results.get("shipping_request_options", {})
     destination_state = str(results.get("destination_state", ""))
-    staging_warehouse_number = results.get("staging_warehouse_number", "")
-    staging_warehouse_details = results.get("staging_warehouse_details", {})
     source_warehouse_number = results.get("source_warehouse_number", "")
     source_warehouse_details = results.get("source_warehouse_details", {})
+    current_destination_warehouse_number = normalize_warehouse_number(stored_destination_warehouse_number)
+    ui_cfg = PAGE_CONFIG.get("ui", {})
+    shipping_cfg = PAGE_CONFIG.get("shipping_calculator_api", {})
+    default_warehouse = int(ui_cfg.get("default_warehouse", 105) or 105)
+    warehouse_options, warehouse_labels = get_available_warehouse_options()
+    default_destination_state = str(ui_cfg.get("default_destination_state", "FL")).strip() or "FL"
+    default_company_type = str(shipping_cfg.get("company_type", "Warehouse")).strip() or "Warehouse"
     dimension_unit = str(st.session_state.get("pe_dimension_unit", "in"))
     weight_unit = str(st.session_state.get("pe_weight_unit", "lb"))
-    dim_label = "in" if dimension_unit == "in" else "cm"
-    weight_label = "lb" if weight_unit == "lb" else "kg"
-    ui_cfg = PAGE_CONFIG.get("ui", {})
-    default_warehouse = int(ui_cfg.get("default_warehouse", 105) or 105)
-    staging_warehouse_options, staging_warehouse_labels = get_available_warehouse_options()
-    recommendation_results: list[dict[str, Any]] = []
-    recommendation_signature = ""
-    recommendation_future = st.session_state.pe_recommendation_future
     volume_label = "in³" if dimension_unit == "in" else "m³"
 
-    if verified_df.empty or not staging_warehouse_options:
-        st.session_state.pe_recommendation_future = None
-        st.session_state.pe_recommendation_signature = ""
-        st.session_state.pe_recommendation_results = []
-    else:
-        recommendation_signature = build_recommendation_signature(results, perishable_overrides)
-        if st.session_state.pe_recommendation_signature != recommendation_signature:
-            st.session_state.pe_recommendation_signature = recommendation_signature
-            st.session_state.pe_recommendation_results = []
-            st.session_state.pe_recommendation_future = RECOMMENDATION_EXECUTOR.submit(
-                run_staging_warehouse_simulations,
-                dict(results),
-                list(staging_warehouse_options),
-                dict(perishable_overrides),
-            )
-            recommendation_future = st.session_state.pe_recommendation_future
-
-        if recommendation_future is not None and recommendation_future.done():
-            try:
-                st.session_state.pe_recommendation_results = recommendation_future.result()
-            except Exception as exc:
-                LOGGER.exception("Recommendation simulations failed: %s", exc)
-                st.session_state.pe_recommendation_results = [
-                    {
-                        "Staging Warehouse": "",
-                        "Staging Location": "",
-                        "Source Warehouse": "",
-                        "Method": "",
-                        "Option Type": "",
-                        "Delivery Days": 0,
-                        "Shipping Cost": 0.0,
-                        "Net Charge": 0.0,
-                        "Packages": 0,
-                        "Total Volume": 0.0,
-                        "Total Weight": 0.0,
-                        "Error": str(exc),
-                    }
-                ]
-            st.session_state.pe_recommendation_future = None
-
-        recommendation_results = st.session_state.pe_recommendation_results
+    units_col_left, units_col_right = st.columns(2)
+    with units_col_left:
+        dimension_unit = st.radio(
+            "Dimensions Unit",
+            options=["in", "cm"],
+            format_func=lambda u: "Inches (in)" if u == "in" else "Centimeters (cm)",
+            horizontal=True,
+            key="pe_dimension_unit",
+        )
+    with units_col_right:
+        weight_unit = st.radio(
+            "Weight Unit",
+            options=["lb", "kg"],
+            format_func=lambda u: "Pounds (lb)" if u == "lb" else "Kilograms (kg)",
+            horizontal=True,
+            key="pe_weight_unit",
+        )
 
     st.divider()
 
@@ -2443,63 +3357,275 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
                 hide_index=True,
             )
 
+    if not matched_df.empty:
+        st.caption("Verified and non-verified tables are shown for reference only. The shipping calculator runs on all matched item records.")
+
     st.divider()
-    st.subheader("Staging Warehouse", anchor=False)
-    selected_staging_warehouse_number = None
-    selected_staging_warehouse_details: dict[str, str] = {}
-    if staging_warehouse_options:
-        selected_warehouse_default = (
-            int(staging_warehouse_number)
-            if str(staging_warehouse_number).strip()
-            and int(staging_warehouse_number) in staging_warehouse_options
-            else default_warehouse
-            if default_warehouse in staging_warehouse_options
-            else staging_warehouse_options[0]
+    st.subheader("Shipping Destination", anchor=False)
+    destination_left_col, destination_right_col = st.columns([1.35, 1], vertical_alignment="top")
+    destination_mode_options = [DESTINATION_MODE_WAREHOUSE, DESTINATION_MODE_ADDRESS]
+    default_destination_mode = (
+        stored_destination_mode
+        if stored_destination_mode in destination_mode_options
+        else DESTINATION_MODE_WAREHOUSE
+        if warehouse_options
+        else DESTINATION_MODE_ADDRESS
+    )
+
+    selected_destination_warehouse_number: int | None = None
+    selected_destination_warehouse_details: dict[str, str] = {}
+
+    with destination_left_col:
+        selected_destination_mode = st.radio(
+            "Ship To",
+            options=destination_mode_options,
+            index=destination_mode_options.index(default_destination_mode),
+            horizontal=True,
+            key="pe_destination_mode",
         )
-        selected_default_index = staging_warehouse_options.index(selected_warehouse_default)
-        selected_staging_warehouse_number = int(
-            st.selectbox(
-                "Choose where the items should be staged",
-                options=staging_warehouse_options,
-                index=selected_default_index,
-                format_func=lambda warehouse: staging_warehouse_labels.get(int(warehouse), str(warehouse)),
-                key="pe_staging_warehouse",
-            )
-        )
-        selected_staging_warehouse_details = (
-            find_warehouse_details(selected_staging_warehouse_number) or {}
-        )
-        if selected_staging_warehouse_details:
-            st.caption(
-                f"Selected staging warehouse: {format_warehouse_details(selected_staging_warehouse_details)}"
-            )
+
+        if selected_destination_mode == DESTINATION_MODE_WAREHOUSE:
+            if warehouse_options:
+                selected_warehouse_default = (
+                    int(stored_destination_warehouse_number)
+                    if str(stored_destination_warehouse_number).strip()
+                    and int(stored_destination_warehouse_number) in warehouse_options
+                    else default_warehouse
+                    if default_warehouse in warehouse_options
+                    else warehouse_options[0]
+                )
+                selected_default_index = warehouse_options.index(selected_warehouse_default)
+                selected_destination_warehouse_number = int(
+                    st.selectbox(
+                        "Choose the warehouse destination",
+                        options=warehouse_options,
+                        index=selected_default_index,
+                        format_func=lambda warehouse: warehouse_labels.get(int(warehouse), str(warehouse)),
+                        key="pe_destination_warehouse",
+                    )
+                )
+                selected_destination_warehouse_details = (
+                    find_warehouse_details(selected_destination_warehouse_number) or {}
+                )
+                if selected_destination_warehouse_details:
+                    st.caption(
+                        f"Selected destination: {format_warehouse_details(selected_destination_warehouse_details)}"
+                    )
+                else:
+                    st.warning("The selected warehouse destination could not be resolved from the warehouse lookup.")
+            else:
+                st.warning("Warehouses parquet could not be loaded, so warehouse destinations are unavailable.")
+
+    normalized_stored_address = normalize_shipping_address(
+        stored_shipping_address,
+        company_type_default="",
+    )
+    manual_country = normalized_stored_address.get("Country", "US") or "US"
+    manual_address_line1 = normalized_stored_address.get("StreetAddress1", "")
+    manual_address_line2 = normalized_stored_address.get("StreetAddress2", "")
+    manual_city = normalized_stored_address.get("City", "")
+    manual_state = normalized_stored_address.get("State", "")
+    manual_zip_code = normalized_stored_address.get("ZipCode", "")
+    manual_is_commercial = bool(normalized_stored_address.get("IsCommercial", True))
+    manual_is_restricted = bool(normalized_stored_address.get("IsRestrictedExpeditedShipping", False))
+
+    with destination_left_col:
+        if selected_destination_mode == DESTINATION_MODE_ADDRESS:
+            manual_top_col, manual_mid_col, manual_right_col = st.columns(3)
+            with manual_top_col:
+                manual_address_line1 = st.text_input(
+                    "Street Address 1",
+                    value=manual_address_line1,
+                    key="pe_ship_street1",
+                )
+            with manual_mid_col:
+                manual_address_line2 = st.text_input(
+                    "Street Address 2",
+                    value=manual_address_line2,
+                    key="pe_ship_street2",
+                )
+            with manual_right_col:
+                manual_city = st.text_input(
+                    "City",
+                    value=manual_city,
+                    key="pe_ship_city",
+                )
+
+            manual_bottom_left, manual_bottom_mid, manual_bottom_right = st.columns(3)
+            with manual_bottom_left:
+                manual_state_fallback = manual_state if manual_state in US_STATE_CODES else default_destination_state
+                normalized_manual_country = normalize_country_code(manual_country or "US")
+                if normalized_manual_country == "US":
+                    manual_state = st.selectbox(
+                        "State",
+                        options=US_STATE_CODES,
+                        index=US_STATE_CODES.index(manual_state_fallback),
+                        key="pe_ship_state_us",
+                    )
+                else:
+                    manual_state = st.text_input(
+                        "State / Province",
+                        value=manual_state,
+                        key="pe_ship_state_other",
+                    ).strip().upper()
+            with manual_bottom_mid:
+                manual_zip_code = st.text_input(
+                    "ZIP / Postal Code",
+                    value=manual_zip_code,
+                    key="pe_ship_zip",
+                )
+            with manual_bottom_right:
+                manual_country = st.text_input(
+                    "Country",
+                    value=manual_country,
+                    key="pe_ship_country",
+                ).strip().upper()
+                normalized_manual_country = normalize_country_code(manual_country or "US")
+
+            manual_option_left, manual_option_right = st.columns(2)
+            with manual_option_left:
+                manual_is_commercial = st.toggle(
+                    "Commercial Address",
+                    value=manual_is_commercial,
+                    key="pe_ship_is_commercial",
+                )
+            with manual_option_right:
+                manual_is_restricted = st.toggle(
+                    "Restricted Expedited Shipping",
+                    value=manual_is_restricted,
+                    key="pe_ship_is_restricted",
+                )
         else:
-            st.warning("The selected staging warehouse could not be resolved from the warehouse lookup.")
+            normalized_manual_country = normalize_country_code(manual_country or "US")
+
+    manual_shipping_address = {
+        "StreetAddress1": manual_address_line1,
+        "StreetAddress2": manual_address_line2,
+        "City": manual_city,
+        "State": manual_state,
+        "ZipCode": manual_zip_code,
+        "Country": normalized_manual_country,
+        "IsCommercial": manual_is_commercial,
+        "IsRestrictedExpeditedShipping": manual_is_restricted,
+        "CompanyType": "",
+    }
+
+    with destination_right_col:
+        st.markdown("**Shipping Calculator Options**")
+        option_defaults = build_shipping_request_options(stored_shipping_request_options)
+        option_left_col, option_right_col = st.columns(2)
+        with option_left_col:
+            selected_has_lift_gate = st.checkbox(
+                "HasLiftGate",
+                value=option_defaults["has_lift_gate"],
+                key="pe_has_lift_gate",
+            )
+            selected_force_common_carrier = st.checkbox(
+                "ForceCommonCarrier",
+                value=option_defaults["force_common_carrier"],
+                key="pe_force_common_carrier",
+            )
+        with option_right_col:
+            selected_exclude_lift_gate_fee = st.checkbox(
+                "ExcludeLiftGateFee",
+                value=option_defaults["exclude_lift_gate_fee"],
+                key="pe_exclude_lift_gate_fee",
+            )
+            selected_bypass_matrix = st.checkbox(
+                "BypassMatrix",
+                value=option_defaults["bypass_matrix"],
+                key="pe_bypass_matrix",
+            )
+
+    selected_shipping_request_options = {
+        "has_lift_gate": selected_has_lift_gate,
+        "force_common_carrier": selected_force_common_carrier,
+        "exclude_lift_gate_fee": selected_exclude_lift_gate_fee,
+        "bypass_matrix": selected_bypass_matrix,
+    }
+
+    active_shipping_address: dict[str, Any] = {}
+    active_destination_label = ""
+    destination_validation_error = ""
+    if selected_destination_mode == DESTINATION_MODE_WAREHOUSE:
+        if selected_destination_warehouse_details:
+            try:
+                active_shipping_address = build_shipping_address_from_warehouse(
+                    selected_destination_warehouse_details
+                )
+                active_destination_label = format_warehouse_details(selected_destination_warehouse_details)
+            except ValueError as exc:
+                destination_validation_error = str(exc)
+        elif warehouse_options:
+            destination_validation_error = "The selected warehouse destination could not be resolved."
     else:
-        st.warning("Warehouses parquet could not be loaded, so the staging warehouse dropdown is unavailable.")
+        manual_has_input = any(
+            str(manual_shipping_address.get(field, "")).strip()
+            for field in ("StreetAddress1", "StreetAddress2", "City", "State", "ZipCode")
+        )
+        try:
+            active_shipping_address = validate_shipping_address(
+                manual_shipping_address,
+                company_type_default="",
+            )
+            active_destination_label = format_shipping_address(active_shipping_address)
+            if manual_has_input:
+                st.caption(f"Destination preview: {active_destination_label}")
+        except ValueError as exc:
+            if manual_has_input:
+                destination_validation_error = str(exc)
+
+    if destination_validation_error:
+        st.info(destination_validation_error)
 
     estimate_exists = bool(
         shipping_source_candidates
-        or api_payload
         or shipping_calc_error
-        or api_error
-        or str(staging_warehouse_number).strip()
+        or shipping_calc_payload
+        or str(stored_destination_label).strip()
     )
-    warehouse_selection_changed = bool(
-        selected_staging_warehouse_number is not None
-        and str(selected_staging_warehouse_number) != str(staging_warehouse_number)
-    )
-    if estimate_exists and warehouse_selection_changed:
-        st.info("Click Rerun Estimate to apply the newly selected staging warehouse.")
+    current_request_signature = ""
+    if active_shipping_address:
+        current_request_signature = json.dumps(
+            {
+                "destination_mode": selected_destination_mode,
+                "shipping_address": active_shipping_address,
+                "shipping_request_options": build_shipping_request_options(selected_shipping_request_options),
+            },
+            sort_keys=True,
+        )
+    stored_request_signature = ""
+    if stored_destination_mode or stored_shipping_address or stored_shipping_request_options:
+        stored_request_signature = json.dumps(
+            {
+                "destination_mode": stored_destination_mode,
+                "shipping_address": normalize_shipping_address(
+                    stored_shipping_address,
+                    company_type_default=(
+                        default_company_type
+                        if stored_destination_mode == DESTINATION_MODE_WAREHOUSE
+                        else ""
+                    ),
+                ),
+                "shipping_request_options": build_shipping_request_options(stored_shipping_request_options),
+            },
+            sort_keys=True,
+        )
+    if estimate_exists and current_request_signature and current_request_signature != stored_request_signature:
+        st.info("Click Rerun Estimate to apply the updated destination or Shipping Calculator options.")
 
-    run_estimate_disabled = verified_df.empty or not selected_staging_warehouse_details
+    run_estimate_disabled = matched_df.empty or not active_shipping_address
     estimate_button_label = "Rerun Estimate" if estimate_exists else "Run Estimate"
     if st.button(estimate_button_label, width="content", disabled=run_estimate_disabled, key="pe_run_estimate"):
         try:
             updated_results = run_estimation_for_results(
                 results,
-                int(selected_staging_warehouse_number),
-                selected_staging_warehouse_details,
+                destination_mode=selected_destination_mode,
+                shipping_address=active_shipping_address,
+                destination_label=active_destination_label,
+                destination_warehouse_number=selected_destination_warehouse_number,
+                destination_warehouse_details=selected_destination_warehouse_details,
+                shipping_request_options=selected_shipping_request_options,
                 perishable_overrides=perishable_overrides,
             )
             st.session_state.pe_results = updated_results
@@ -2507,14 +3633,13 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
             st.session_state.pe_errors = input_parse_errors + updated_results.get("row_errors", [])
             st.session_state.pe_selected_package_view = "All Items"
             LOGGER.info(
-                "Estimate run complete | staging_warehouse=%s verified=%s source_candidates=%s source_warehouse=%s packaging_items=%s shipping_error=%s packaging_error=%s",
-                selected_staging_warehouse_number,
-                len(updated_results.get("verified_items", [])),
+                "Shipping estimate run complete | destination_mode=%s destination_warehouse=%s shipping_items=%s source_candidates=%s source_warehouse=%s shipping_error=%s",
+                selected_destination_mode,
+                selected_destination_warehouse_number or "",
+                len(updated_results.get("shipping_items", [])),
                 len(updated_results.get("shipping_source_candidates", [])),
                 updated_results.get("source_warehouse_number", ""),
-                len(updated_results.get("api_payload", [])),
                 bool(updated_results.get("shipping_calc_error", "")),
-                bool(updated_results.get("api_error", "")),
             )
             st.rerun()
         except Exception as exc:
@@ -2522,103 +3647,345 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
             st.error(f"Estimate failed: {exc}")
 
     st.divider()
-    st.subheader("Sourcing Results", anchor=False)
-    if not verified_items:
-        st.info("No verified items available to send to the shipping calculator.")
+    st.subheader("Shipping Calculator Results", anchor=False)
+    selectable_methods = extract_available_shipping_methods(
+        shipping_calc_response,
+        shipping_source_candidates,
+    )
+    available_methods = decorate_shipping_methods_for_destination(
+        selectable_methods,
+        shipping_source_candidates,
+        current_destination_warehouse_number if stored_destination_mode == DESTINATION_MODE_WAREHOUSE else None,
+    )
+    raw_quote_methods = decorate_shipping_methods_for_destination(
+        extract_available_shipping_methods(None, shipping_source_candidates),
+        shipping_source_candidates,
+        current_destination_warehouse_number if stored_destination_mode == DESTINATION_MODE_WAREHOUSE else None,
+    )
+    selectable_method_keys = {
+        build_shipping_method_key(method)
+        for method in available_methods
+        if build_shipping_method_key(method)
+    }
+    raw_only_methods = [
+        method
+        for method in raw_quote_methods
+        if build_shipping_method_key(method)
+        and build_shipping_method_key(method) not in selectable_method_keys
+    ]
+    restricted_expedited_items = sorted(
+        {
+            str(item.get("item_number", "")).strip()
+            for item in shipping_items
+            if str(item.get("item_number", "")).strip()
+            and bool(item.get("restricted_expedited_shipping"))
+        }
+    )
+    air_restricted_items = sorted(
+        {
+            str(item.get("item_number", "")).strip()
+            for item in shipping_items
+            if str(item.get("item_number", "")).strip()
+            and bool(item.get("is_air_restricted"))
+        }
+    )
+
+    if raw_only_methods:
+        hidden_method_labels = ", ".join(
+            format_shipping_method_option(method)
+            for method in raw_only_methods
+        )
+        st.warning(
+            "The API returned additional raw quote methods but did not make them available for user selection: "
+            f"{hidden_method_labels}."
+        )
+        with st.expander("Why some methods are hidden", expanded=False):
+            selectable_method_labels = ", ".join(
+                format_shipping_method_option(method)
+                for method in available_methods
+            ) or "None"
+            raw_method_labels = ", ".join(
+                format_shipping_method_option(method)
+                for method in raw_quote_methods
+            ) or "None"
+            st.markdown(f"**Selectable Methods:** {selectable_method_labels}")
+            st.markdown(f"**Raw Quoted Methods:** {raw_method_labels}")
+            if restricted_expedited_items:
+                st.markdown(
+                    "**RestrictedExpeditedShipping Items:** "
+                    + ", ".join(f"`{item}`" for item in restricted_expedited_items)
+                )
+            if air_restricted_items:
+                st.markdown(
+                    "**IsAirRestricted Items:** "
+                    + ", ".join(f"`{item}`" for item in air_restricted_items)
+                )
+            if not restricted_expedited_items and not air_restricted_items:
+                st.caption(
+                    "No request-level restricted items were flagged in the page data, so the API is likely applying"
+                    " another eligibility rule before exposing selectable methods."
+                )
+
+    selected_method: dict[str, Any] | None = None
+    if available_methods:
+        available_method_map = {
+            build_shipping_method_key(method): method
+            for method in available_methods
+        }
+        available_method_keys = list(available_method_map.keys())
+        default_method = get_default_shipping_method(available_methods, selected_source_candidate)
+        if default_method is None:
+            default_method = available_methods[0]
+        default_method_key = build_shipping_method_key(default_method)
+        default_method_index = (
+            available_method_keys.index(default_method_key)
+            if default_method_key in available_method_keys
+            else 0
+        )
+        selected_method_key = st.selectbox(
+            "Shipping Method",
+            options=available_method_keys,
+            index=default_method_index,
+            format_func=lambda key: format_shipping_method_option(available_method_map[key]),
+            key="pe_selected_shipping_method",
+        )
+        selected_method = available_method_map.get(selected_method_key)
+
+    display_candidates = filter_shipping_candidates_by_method(shipping_source_candidates, selected_method)
+    internal_display_candidates = filter_internal_transfer_candidates(
+        display_candidates,
+        current_destination_warehouse_number if stored_destination_mode == DESTINATION_MODE_WAREHOUSE else None,
+    )
+    display_source_candidate = select_shipping_source_candidate(internal_display_candidates)
+    display_source_warehouse_number = (
+        normalize_warehouse_number(display_source_candidate.get("Warehouse Number"))
+        if display_source_candidate
+        else current_destination_warehouse_number
+        if selected_method
+        and display_candidates
+        and not internal_display_candidates
+        and stored_destination_mode == DESTINATION_MODE_WAREHOUSE
+        else None
+    )
+    display_source_warehouse_details = (
+        build_source_warehouse_details(display_source_candidate)
+        if display_source_candidate
+        else stored_destination_warehouse_details
+        if display_source_warehouse_number == current_destination_warehouse_number
+        else {}
+    )
+    package_details_df, package_item_tables = build_shipping_method_package_tables(
+        shipping_calc_response,
+        shipping_source_candidates,
+        selected_method,
+        destination_warehouse_number=(
+            current_destination_warehouse_number
+            if stored_destination_mode == DESTINATION_MODE_WAREHOUSE
+            else None
+        ),
+    )
+    selected_internal_cost = calculate_internal_shipping_cost(
+        selected_method,
+        shipping_source_candidates,
+        current_destination_warehouse_number if stored_destination_mode == DESTINATION_MODE_WAREHOUSE else None,
+    )
+    volume_label = "cu in" if dimension_unit == "in" else "m^3"
+
+    if not shipping_items:
+        st.info("No matched item records are available to send to the shipping calculator.")
     else:
         sourcing_summary_col, sourcing_options_col = st.columns([1.1, 1.9], vertical_alignment="top")
         with sourcing_summary_col:
             summary_lines: list[str] = []
-            if staging_warehouse_number:
-                summary_lines.append(f"**Staging Warehouse:** `{staging_warehouse_number}`")
-            if isinstance(staging_warehouse_details, dict) and staging_warehouse_details:
-                summary_lines.append(
-                    f"**Staging Location:** {format_warehouse_details(staging_warehouse_details)}"
-                )
+            if stored_destination_mode:
+                summary_lines.append(f"**Destination Type:** {stored_destination_mode}")
+            if stored_destination_warehouse_number:
+                summary_lines.append(f"**Destination Warehouse:** `{stored_destination_warehouse_number}`")
+            if stored_destination_label:
+                summary_lines.append(f"**Destination / Ship To:** {stored_destination_label}")
+            elif isinstance(stored_shipping_address, dict) and stored_shipping_address:
+                summary_lines.append(f"**Destination / Ship To:** {format_shipping_address(stored_shipping_address)}")
             if destination_state:
                 summary_lines.append(f"**Destination State:** `{destination_state}`")
-            if source_warehouse_number:
-                summary_lines.append(f"**Selected Source Warehouse:** `{source_warehouse_number}`")
-            if isinstance(source_warehouse_details, dict) and source_warehouse_details:
+            if stored_shipping_request_options:
                 summary_lines.append(
-                    f"**Source Location:** {format_warehouse_details(source_warehouse_details)}"
+                    f"**Request Options:** `{format_shipping_request_options(stored_shipping_request_options)}`"
                 )
-            if selected_source_candidate:
-                selected_method = str(selected_source_candidate.get("Method", "")).strip()
-                selected_option_type = str(selected_source_candidate.get("Option Type", "")).strip()
-                if selected_method or selected_option_type:
+            if display_source_warehouse_number:
+                summary_lines.append(f"**Source Warehouse:** `{display_source_warehouse_number}`")
+            if isinstance(display_source_warehouse_details, dict) and display_source_warehouse_details:
+                summary_lines.append(
+                    f"**Source Location:** {format_warehouse_details(display_source_warehouse_details)}"
+                )
+            if selected_method:
+                selected_method_name = str(selected_method.get("Method Name", "")).strip()
+                selected_carrier = str(display_source_candidate.get("Carrier", "")).strip() if display_source_candidate else ""
+                selected_delivery_days = to_int(selected_method.get("Delivery Days"), 0)
+                excluded_source_warehouses = selected_method.get("Excluded Source Warehouses", [])
+                if selected_method_name:
                     summary_lines.append(
-                        f"**Selected Method:** {selected_method or selected_option_type} ({selected_option_type or 'Option'})"
+                        f"**Selected Method:** {selected_method_name}"
                     )
+                if selected_carrier:
+                    summary_lines.append(f"**Selected Carrier:** {selected_carrier}")
+                summary_lines.append(f"**Selected Shipping Cost:** `${selected_internal_cost:,.2f}`")
+                if excluded_source_warehouses:
+                    summary_lines.append(
+                        "**Excluded Local Warehouse Costs:** "
+                        + ", ".join(f"`{warehouse}`" for warehouse in excluded_source_warehouses)
+                    )
+                elif (
+                    stored_destination_mode == DESTINATION_MODE_WAREHOUSE
+                    and current_destination_warehouse_number is not None
+                    and display_candidates
+                    and not internal_display_candidates
+                ):
+                    summary_lines.append("**Excluded Local Warehouse Costs:** All selected items are already stocked there")
+                if selected_delivery_days > 0:
+                    summary_lines.append(f"**Delivery Days:** `{selected_delivery_days}`")
 
             if summary_lines:
                 st.markdown("  \n".join(summary_lines))
             else:
-                st.info("No shipping source summary is available yet.")
+                st.info("Run Estimate to see the shipping summary.")
 
         with sourcing_options_col:
             if shipping_calc_error:
                 st.error(shipping_calc_error)
+            elif not shipping_calc_payload:
+                st.info("Run Estimate to request shipping options.")
             elif not shipping_source_candidates:
-                st.warning(
-                    "Shipping calculator returned no source warehouses with ground or common-carrier options."
-                )
+                st.warning("Shipping calculator returned no shipping options.")
             else:
-                st.caption(
-                    "Only ground and common-carrier options are considered when selecting the source warehouse. "
-                    "The lowest net-charge option is used."
-                )
+                if selected_method:
+                    st.caption(
+                        "Showing source warehouse options for the selected shipping method. "
+                        "Internal Shipping Cost excludes quotes already stocked in the destination warehouse."
+                    )
+                else:
+                    st.caption("Showing available source warehouse options returned by the shipping calculator.")
                 st.dataframe(
-                    build_shipping_source_options_df(shipping_source_candidates),
+                    build_shipping_source_options_df(
+                        display_candidates or shipping_source_candidates,
+                        current_destination_warehouse_number if stored_destination_mode == DESTINATION_MODE_WAREHOUSE else None,
+                    ),
                     width="stretch",
                     hide_index=True,
                 )
 
-    st.divider()
-    st.subheader("Warehouse Recommendation", anchor=False)
-    if verified_df.empty:
-        st.info("Recommendations will appear after verified items are available.")
+    recommendation_results: list[dict[str, Any]] = []
+    current_destination_warehouse_number = normalize_warehouse_number(stored_destination_warehouse_number)
+    can_run_recommendations = bool(
+        stored_destination_mode == DESTINATION_MODE_WAREHOUSE
+        and current_destination_warehouse_number is not None
+        and warehouse_options
+        and shipping_calc_payload
+    )
+    if can_run_recommendations:
+        recommendation_signature = build_shipping_recommendation_signature(
+            results,
+            stored_shipping_request_options,
+            selected_method,
+            perishable_overrides=perishable_overrides,
+        )
+        if st.session_state.pe_recommendation_signature != recommendation_signature:
+            if st.session_state.pe_recommendation_future is not None:
+                st.session_state.pe_recommendation_future.cancel()
+            st.session_state.pe_recommendation_signature = recommendation_signature
+            st.session_state.pe_recommendation_results = []
+            st.session_state.pe_recommendation_future = RECOMMENDATION_EXECUTOR.submit(
+                run_destination_warehouse_simulations,
+                dict(results),
+                [
+                    warehouse_number
+                    for warehouse_number in warehouse_options
+                    if warehouse_number != to_int(current_destination_warehouse_number, 0)
+                ],
+                dict(stored_shipping_request_options),
+                dict(selected_method) if isinstance(selected_method, dict) else None,
+                dict(perishable_overrides),
+            )
+
+        recommendation_future = st.session_state.pe_recommendation_future
+        if recommendation_future is not None and recommendation_future.done():
+            try:
+                st.session_state.pe_recommendation_results = recommendation_future.result()
+            except Exception as exc:
+                LOGGER.exception("Destination warehouse simulations failed: %s", exc)
+                st.session_state.pe_recommendation_results = [
+                    {
+                        "Destination Warehouse": "",
+                        "Destination Location": "",
+                        "Source Warehouse": "",
+                        "Source Location": "",
+                        "Method": "",
+                        "Option Type": "",
+                        "Delivery Days": 0,
+                        "Shipping Cost": 0.0,
+                        "Packages": 0,
+                        "Total Volume": 0.0,
+                        "Total Weight": 0.0,
+                        "Error": str(exc),
+                    }
+                ]
+            st.session_state.pe_recommendation_future = None
+        recommendation_results = st.session_state.pe_recommendation_results
     else:
-        cheapest_recommendation = pick_cheapest_recommendation(recommendation_results)
-        best_recommendation = pick_best_overall_recommendation(recommendation_results)
+        if st.session_state.pe_recommendation_future is not None:
+            st.session_state.pe_recommendation_future.cancel()
+        st.session_state.pe_recommendation_future = None
+        st.session_state.pe_recommendation_signature = ""
+        st.session_state.pe_recommendation_results = []
+
+    if stored_destination_mode == DESTINATION_MODE_WAREHOUSE:
+        st.divider()
+        st.subheader("Destination Warehouse Alternatives", anchor=False)
+        cheapest_recommendation = pick_cheapest_destination_recommendation(
+            recommendation_results,
+            current_destination_warehouse_number,
+        )
+        best_recommendation = pick_best_destination_recommendation(
+            recommendation_results,
+            current_destination_warehouse_number,
+        )
 
         if st.session_state.pe_recommendation_future is not None and not recommendation_results:
-            st.info(
-                "Running warehouse simulations in the background. The recommendation will appear after the next rerun."
-            )
+            st.info("Running alternative destination warehouse simulations in the background.")
         elif not recommendation_results:
-            st.info("Recommendation results are not available yet.")
+            st.info("Alternative warehouse recommendations are not available yet.")
         else:
             recommendation_left, recommendation_right = st.columns(2, vertical_alignment="top")
             with recommendation_left:
-                st.markdown("**Cheapest Option**")
+                st.markdown("**Cheapest Alternative**")
                 if cheapest_recommendation:
                     st.markdown(
-                        f"**Warehouse:** `{cheapest_recommendation.get('Staging Warehouse', '')}`  \n"
-                        f"**Location:** {cheapest_recommendation.get('Staging Location', '')}  \n"
-                        f"**Source Warehouse:** `{cheapest_recommendation.get('Source Warehouse', '')}`  \n"
-                        f"**Net Charge:** `${to_float(cheapest_recommendation.get('Net Charge'), 0.0):,.2f}`  \n"
-                        f"**Packages:** `{to_int(cheapest_recommendation.get('Packages'), 0)}`"
+                        f"**Destination Location:** {cheapest_recommendation.get('Destination Location', '')}  \n"
+                        f"**Shipping Cost:** `${to_float(cheapest_recommendation.get('Shipping Cost'), 0.0):,.2f}`  \n"
+                        f"**Packages:** `{to_int(cheapest_recommendation.get('Packages'), 0)}`  \n"
+                        f"**Delivery Days:** `{to_int(cheapest_recommendation.get('Delivery Days'), 0)}`"
                     )
                 else:
-                    st.info("No cheapest recommendation is available.")
+                    st.info("No cheaper alternative is available.")
 
             with recommendation_right:
-                st.markdown("**Best Overall**")
+                st.markdown("**Best Overall Alternative**")
                 if best_recommendation:
                     st.markdown(
-                        f"**Warehouse:** `{best_recommendation.get('Staging Warehouse', '')}`  \n"
-                        f"**Location:** {best_recommendation.get('Staging Location', '')}  \n"
-                        f"**Source Warehouse:** `{best_recommendation.get('Source Warehouse', '')}`  \n"
+                        f"**Destination Location:** {best_recommendation.get('Destination Location', '')}  \n"
+                        f"**Shipping Cost:** `${to_float(best_recommendation.get('Shipping Cost'), 0.0):,.2f}`  \n"
                         f"**Packages:** `{to_int(best_recommendation.get('Packages'), 0)}`  \n"
-                        f"**Net Charge:** `${to_float(best_recommendation.get('Net Charge'), 0.0):,.2f}`"
+                        f"**Delivery Days:** `{to_int(best_recommendation.get('Delivery Days'), 0)}`"
                     )
                 else:
-                    st.info("No best-overall recommendation is available.")
+                    st.info("No best-overall alternative is available.")
 
             recommendation_df = pd.DataFrame(recommendation_results)
             if not recommendation_df.empty:
-                for col in ["Shipping Cost", "Net Charge", "Total Volume", "Total Weight"]:
+                recommendation_df["Current Destination"] = (
+                    pd.to_numeric(recommendation_df.get("Destination Warehouse"), errors="coerce").fillna(0).astype(int)
+                    == to_int(current_destination_warehouse_number, 0)
+                )
+                for col in ["Shipping Cost", "Total Volume", "Total Weight"]:
                     if col in recommendation_df.columns:
                         recommendation_df[col] = _safe_numeric(recommendation_df[col]).fillna(0.0).round(2)
                 if "Packages" in recommendation_df.columns:
@@ -2630,135 +3997,268 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
                 st.dataframe(recommendation_df, width="stretch", hide_index=True)
 
     st.divider()
-    st.subheader("Package Estimation Results", anchor=False)
-    dim_label = "in" if dimension_unit == "in" else "cm"
-    weight_label = "lb" if weight_unit == "lb" else "kg"
-    volume_label = "in³" if dimension_unit == "in" else "m³"
-    if not verified_items:
-        st.info("No verified items available to send to the packaging estimator.")
-    elif shipping_calc_error:
-        st.info("Packaging estimator was not called because the shipping calculator step failed.")
-        if api_error:
-            st.warning(api_error)
-    elif not api_payload:
-        st.warning(
-            api_error
-            or "Packaging estimator was not called because no valid source warehouse was selected."
+    st.subheader("Package Summary", anchor=False)
+    if not shipping_calc_payload:
+        st.info("Run Estimate to see package details from the shipping calculator.")
+    elif selected_method and display_candidates and not internal_display_candidates:
+        st.info(
+            "No transfer packages are shown for the selected shipping method because the related items are "
+            "already stocked in the destination warehouse."
         )
+    elif display_source_candidate is None:
+        st.warning("No source warehouse could be matched for the selected shipping method.")
+    elif package_details_df.empty:
+        st.info("The selected shipping method did not return package detail rows for the internal transfer.")
     else:
+        total_packages = int(len(package_details_df))
+        total_volume = float((_safe_numeric(package_details_df["Volume"]) * _volume_multiplier(dimension_unit)).sum())
+        total_weight = float((_safe_numeric(package_details_df["Weight"]) * _weight_multiplier(weight_unit)).sum())
+        source_warehouse_series = pd.Series(
+            package_details_df.get("Source Warehouse", pd.Series(dtype="object"))
+        )
+        warehouses_used = int(source_warehouse_series.map(normalize_warehouse_number).dropna().nunique())
 
-        if api_error:
-            st.error(api_error)
+        package_summary_metrics_col, package_summary_table_col = st.columns([1.1, 2.4], vertical_alignment="top")
+        with package_summary_metrics_col:
+            metric_left_col, metric_right_col = st.columns(2)
+            with metric_left_col:
+                st.metric("Total Packages", f"{total_packages:,}")
+                st.metric("Total Weight", f"{total_weight:,.2f} {weight_unit}")
+            with metric_right_col:
+                st.metric("Total Volume", f"{total_volume:,.2f} {volume_label}")
+                st.metric("Warehouses Used", f"{warehouses_used:,}")
+        with package_summary_table_col:
+            package_display_df = package_details_df.copy()
+            if "Items" in package_display_df.columns:
+                package_display_df["Items"] = package_display_df["Items"].astype(int)
+            st.markdown("**Package Details**")
+            st.dataframe(
+                format_measurement_dataframe(package_display_df, dimension_unit, weight_unit),
+                width="stretch",
+                hide_index=True,
+            )
+
+        st.divider()
+        st.subheader("Package Contents Summary", anchor=False)
+        summary_options = ["All Items"] + [
+            f"Package {package_number}" for package_number in sorted(package_item_tables.keys())
+        ]
+        if st.session_state.pe_selected_package_view not in summary_options:
+            st.session_state.pe_selected_package_view = "All Items"
+
+        selected_package_view = st.selectbox(
+            "Filter by package",
+            options=summary_options,
+            key="pe_selected_package_view",
+        )
+
+        if selected_package_view == "All Items":
+            summary_df = build_all_items_summary_dataframe(package_item_tables, shipping_items)
+            st.caption("Showing all item quantities across the selected source warehouse's package result.")
         else:
-            response_df = normalize_api_response_to_df(api_response)
-            if response_df.empty:
-                st.info("API returned no rows.")
+            selected_package_number = to_int(selected_package_view.replace("Package ", ""), 0)
+            summary_df = package_item_tables.get(
+                selected_package_number,
+                pd.DataFrame(columns=["Item Number", "Quantity", "Volume", "Weight"]),
+            )
+            st.caption(f"Showing the contents of package {selected_package_number}.")
+
+        if summary_df.empty:
+            st.info("No package contents were returned for the selected source warehouse.")
+        else:
+            st.dataframe(
+                format_quantity_volume_weight_dataframe(summary_df, dimension_unit, weight_unit),
+                width="stretch",
+                hide_index=True,
+            )
+
+    if shipping_calc_payload:
+        st.divider()
+        st.subheader("API Details", anchor=False)
+        request_col, response_col = st.columns(2, vertical_alignment="top")
+        with request_col:
+            with st.expander("Request Payload", expanded=False):
+                st.json(shipping_calc_payload)
+        with response_col:
+            with st.expander("Response Body (Charges Hidden)", expanded=False):
+                if isinstance(shipping_calc_response, (dict, list)):
+                    st.json(strip_shipping_charge_fields(shipping_calc_response))
+                elif shipping_calc_response is None:
+                    st.info("No response body is available.")
+                else:
+                    st.code(str(shipping_calc_response))
+
+        st.divider()
+        st.subheader("Package Allocation Detail", anchor=False)
+        allocation_df = build_shipping_package_allocation_df(
+            shipping_calc_response,
+            shipping_source_candidates,
+        )
+        if allocation_df.empty:
+            st.info("No package allocation detail rows were returned by the shipping calculator response.")
+        else:
+            st.caption(
+                "This table uses all raw quote candidates returned by the API. "
+                "Package cost allocation is estimated by apportioning each quote cost across packages by package "
+                "volume, then across items by each item's share of total item volume within the package."
+            )
+
+            allocation_filter_cols = st.columns(5)
+            source_warehouse_options = sorted(
+                value for value in allocation_df["Source Warehouse"].dropna().astype(str).unique().tolist() if value
+            )
+            method_options = sorted(
+                value for value in allocation_df["Method"].dropna().astype(str).unique().tolist() if value
+            )
+            carrier_options = sorted(
+                value for value in allocation_df["Carrier"].dropna().astype(str).unique().tolist() if value
+            )
+            delivery_day_options = sorted(
+                int(value)
+                for value in pd.to_numeric(allocation_df["Delivery Days"], errors="coerce").dropna().astype(int).unique().tolist()
+            )
+            package_number_options = sorted(
+                int(value)
+                for value in pd.to_numeric(allocation_df["Package Number"], errors="coerce").dropna().astype(int).unique().tolist()
+            )
+
+            selected_source_warehouse = allocation_filter_cols[0].selectbox(
+                "Source Warehouse",
+                options=["All", *source_warehouse_options],
+                key="pe_alloc_filter_source_warehouse",
+            )
+            selected_method_filter = allocation_filter_cols[1].selectbox(
+                "Method",
+                options=["All", *method_options],
+                key="pe_alloc_filter_method",
+            )
+            selected_carrier = allocation_filter_cols[2].selectbox(
+                "Carrier",
+                options=["All", *carrier_options],
+                key="pe_alloc_filter_carrier",
+            )
+            selected_delivery_days = allocation_filter_cols[3].selectbox(
+                "Delivery Days",
+                options=["All", *delivery_day_options],
+                key="pe_alloc_filter_delivery_days",
+            )
+            selected_package_number = allocation_filter_cols[4].selectbox(
+                "Package Number",
+                options=["All", *package_number_options],
+                key="pe_alloc_filter_package_number",
+                format_func=lambda package_number: (
+                    package_number if package_number == "All" else f"Package {package_number}"
+                ),
+            )
+
+            filtered_allocation_df = allocation_df.copy()
+            if selected_source_warehouse != "All":
+                filtered_allocation_df = filtered_allocation_df[
+                    filtered_allocation_df["Source Warehouse"] == selected_source_warehouse
+                ]
+            if selected_method_filter != "All":
+                filtered_allocation_df = filtered_allocation_df[
+                    filtered_allocation_df["Method"] == selected_method_filter
+                ]
+            if selected_carrier != "All":
+                filtered_allocation_df = filtered_allocation_df[
+                    filtered_allocation_df["Carrier"] == selected_carrier
+                ]
+            if selected_delivery_days != "All":
+                filtered_allocation_df = filtered_allocation_df[
+                    filtered_allocation_df["Delivery Days"] == selected_delivery_days
+                ]
+            if selected_package_number != "All":
+                filtered_allocation_df = filtered_allocation_df[
+                    filtered_allocation_df["Package Number"] == selected_package_number
+                ]
+
+            if filtered_allocation_df.empty:
+                st.info("No allocation rows match the selected filters.")
             else:
-                package_details_df = build_package_details_pivot(response_df)
-                package_matrix_df, package_item_tables = build_package_matrix_tables(api_response)
-                package_table_columns = [
-                    col for col in ["Package Number", "Volume", "Weight"] if col in package_details_df.columns
-                ]
-                package_table_df = (
-                    package_details_df[package_table_columns].copy()
-                    if package_table_columns
-                    else package_details_df.copy()
-                )
-                response_display_df = format_measurement_dataframe(package_table_df, dimension_unit, weight_unit)
-                total_packages = (
-                    int(package_details_df["Package Number"].nunique())
-                    if "Package Number" in package_details_df.columns
-                    else len(package_details_df)
-                )
-                total_volume = 0.0
-                if "Volume" in package_details_df.columns:
-                    total_volume = float(
-                        (_safe_numeric(package_details_df["Volume"]) * _volume_multiplier(dimension_unit)).sum()
-                    )
-                total_weight = 0.0
-                if "Weight" in package_details_df.columns:
-                    total_weight = float(
-                        (_safe_numeric(package_details_df["Weight"]) * _weight_multiplier(weight_unit)).sum()
-                    )
-                dnw, totals_col, details_col = st.columns([1,1, 2.2], vertical_alignment="top")
-                with dnw:
-                    warehouse_summary_lines: list[str] = []
-                    if staging_warehouse_number:
-                        warehouse_summary_lines.append(f"**Staging Warehouse:** `{staging_warehouse_number}`")
-                    if isinstance(staging_warehouse_details, dict) and staging_warehouse_details:
-                        warehouse_summary_lines.append(
-                            f"**Staging Location:** {format_warehouse_details(staging_warehouse_details)}"
-                        )
-                    if destination_state:
-                        warehouse_summary_lines.append(f"**Destination State:** `{destination_state}`")
-                    if source_warehouse_number:
-                        warehouse_summary_lines.append(f"**Source Warehouse:** `{source_warehouse_number}`")
-                    if isinstance(source_warehouse_details, dict) and source_warehouse_details:
-                        warehouse_summary_lines.append(
-                            f"**Source Location:** {format_warehouse_details(source_warehouse_details)}"
-                        )
-                    st.markdown("  \n".join(warehouse_summary_lines))
-                with totals_col:
-                    st.markdown("**Total Packages**")
-                    st.metric("", f"{total_packages:,}",label_visibility="collapsed")
-                    st.markdown("**Total Dimension**")
-                    st.metric("", f"{total_volume:,.2f} {volume_label}", label_visibility="collapsed")
-                    st.markdown("**Total Weight**")
-                    st.metric("", f"{total_weight:,.2f} {weight_label}", label_visibility="collapsed")
-                with details_col:
-                    st.markdown("**Units**")
-                    dimension_unit_col, weight_unit_col = st.columns([1, 1])  
-                    with dimension_unit_col:
-                        dimension_unit = st.radio(
-                            "Dimensions Unit",
-                            options=["in", "cm"],
-                            format_func=lambda u: "Inches (in)" if u == "in" else "Centimeters (cm)",
-                            horizontal=True,
-                            key="pe_dimension_unit",
-                            label_visibility="collapsed",
-                        )
-                    with weight_unit_col:
-                        weight_unit = st.radio(
-                            "Weight Unit",
-                            options=["lb", "kg"],
-                            format_func=lambda u: "Pounds (lb)" if u == "lb" else "Kilograms (kg)",
-                            horizontal=True,
-                            key="pe_weight_unit",
-                            label_visibility="collapsed",
-                        )
-                    st.markdown("**Package Details**")
-                    st.dataframe(response_display_df, width="stretch", hide_index=True)
-
-                st.divider()
-                st.subheader("Package Contents Summary", anchor=False)
-                summary_options = ["All Items"] + [
-                    f"Package {package_number}" for package_number in sorted(package_item_tables.keys())
-                ]
-                if st.session_state.pe_selected_package_view not in summary_options:
-                    st.session_state.pe_selected_package_view = "All Items"
-
-                selected_package_view = st.selectbox(
-                    "Filter by package",
-                    options=summary_options,
-                    key="pe_selected_package_view",
-                )
-
-                if selected_package_view == "All Items":
-                    summary_df = build_all_items_summary_dataframe(package_item_tables, verified_items)
-                    st.caption("Showing all item quantities across the full packaging result.")
+                quantity_values = _safe_numeric(filtered_allocation_df["Quantity"]).fillna(0.0)
+                if (quantity_values % 1 == 0).all():
+                    filtered_allocation_df["Quantity"] = quantity_values.astype(int)
                 else:
-                    selected_package_number = to_int(selected_package_view.replace("Package ", ""), 0)
-                    summary_df = package_item_tables.get(
-                        selected_package_number,
-                        pd.DataFrame(columns=["Item Number", "Quantity", "Volume", "Weight"]),
-                    )
-                    st.caption(f"Showing the contents of package {selected_package_number}.")
+                    filtered_allocation_df["Quantity"] = quantity_values.round(2)
 
-                if summary_df.empty:
-                    st.info("No package contents were returned by the packaging estimator.")
-                else:
-                    st.dataframe(
-                        format_quantity_volume_weight_dataframe(summary_df, dimension_unit, weight_unit),
-                        width="stretch",
-                        hide_index=True,
-                    )
+                filtered_allocation_df = filtered_allocation_df[
+                    [
+                        "Package Number",
+                        "Item Number",
+                        "Method",
+                        "Quantity",
+                        "Volume",
+                        "Source Warehouse",
+                        "Delivery Days",
+                        "Carrier",
+                        "Package Cost Allocation by Volume",
+                    ]
+                ]
+                filtered_allocation_df["Package Cost Allocation by Volume"] = (
+                    _safe_numeric(filtered_allocation_df["Package Cost Allocation by Volume"]).fillna(0.0).round(2)
+                )
+                display_allocation_df = format_measurement_dataframe(
+                    filtered_allocation_df,
+                    dimension_unit,
+                    weight_unit,
+                )
+                st.dataframe(
+                    display_allocation_df,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    st.stop()
+
+# ============================================================
+# LEGACY PACKAGER REFERENCE
+# ============================================================
+# The Warehouse Packager setup is intentionally kept below as commented
+# reference only. The page now runs against the Shipping Calculator API
+# only.
+#
+# def build_packaging_payload(
+#     verified_items: list[dict[str, Any]],
+#     source_warehouse_number: int,
+# ) -> list[dict[str, Any]]:
+#     if not verified_items:
+#         return []
+#
+#     payload: list[dict[str, Any]] = []
+#     for item in verified_items:
+#         payload.append(
+#             {
+#                 "warehouseNumber": int(source_warehouse_number),
+#                 "itemNumber": item["item_number"],
+#                 "quantity": item["quantity"],
+#                 "length": item["length"],
+#                 "width": item["width"],
+#                 "height": item["height"],
+#                 "weight": item["weight"],
+#                 "isRepack": item["is_repack"],
+#                 "isRepositional": item["is_repositional"],
+#                 "breakQuantity": item["break_quantity"],
+#                 "marginalLength": item["marginal_length"],
+#                 "marginalHeight": item["marginal_height"],
+#                 "marginalWidth": item["marginal_width"],
+#                 "canBeNested": item["can_be_nested"],
+#                 "volume": item["volume"],
+#                 "perishableType": item["perishable_type"],
+#             }
+#         )
+#
+#     return payload
+#
+#
+# def call_packaging_api(payload: list[dict[str, Any]], destination_state: str) -> tuple[Any, str]:
+#     if not payload:
+#         return None, ""
+#
+#     packager_endpoint = (
+#         "https://shippingcalculator-api.dev.clarkinc.biz/api/warehousepackager/estimatePacking"
+#     )
+#     packager_timeout_seconds = 30
+#     separator = "&" if "?" in packager_endpoint else "?"
+#     url = f"{packager_endpoint}{separator}destinationState={quote(destination_state)}"
+#     return post_json_request(url=url, payload=payload, timeout_seconds=packager_timeout_seconds)

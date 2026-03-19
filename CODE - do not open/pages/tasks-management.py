@@ -43,7 +43,7 @@ TASKS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "tasks.parquet"
 USERS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "users.parquet"
 CADENCE_OPTIONS = ["Daily", "Weekly", "Periodic"]
 EDITABLE_COLUMNS = ["TaskName", "TaskCadence"]
-TM_STATE_VERSION = 4
+TM_STATE_VERSION = 5
 
 if "tm_confirm_open" not in st.session_state:
     st.session_state.tm_confirm_open = False
@@ -85,6 +85,29 @@ def _resolve_existing_column(df: pd.DataFrame, aliases: list[str]) -> str | None
         if _normalize_col_name(col) in alias_set:
             return str(col)
     return None
+
+
+def _estimate_text_column_width(
+    series: pd.Series,
+    label: str,
+    *,
+    min_px: int = 90,
+    max_px: int = 320,
+    quantile: float = 0.9,
+    char_px: int = 8,
+    cap_chars: int = 80,
+) -> int:
+    """Estimate a reasonable editor column width from typical cell content."""
+    lengths = series.fillna("").astype(str).str.len().clip(upper=cap_chars)
+    if lengths.empty:
+        target_chars = len(label)
+    else:
+        quantile_value = lengths.quantile(quantile)
+        if pd.isna(quantile_value):
+            target_chars = len(label)
+        else:
+            target_chars = max(len(label), int(round(float(quantile_value))))
+    return max(min_px, min(max_px, 32 + target_chars * char_px))
 
 
 def _load_tasks_parquet(path: Path) -> pd.DataFrame:
@@ -707,8 +730,8 @@ def _load_task_log_entries(completed_dir: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def _save_task_log_task_name_changes(changes_df: pd.DataFrame) -> tuple[int, int]:
-    """Persist edited TaskName values back to the original parquet files."""
+def _save_task_log_changes(changes_df: pd.DataFrame) -> tuple[int, int]:
+    """Persist edited task-log values back to the original parquet files."""
     if changes_df.empty:
         return 0, 0
 
@@ -730,10 +753,6 @@ def _save_task_log_task_name_changes(changes_df: pd.DataFrame) -> tuple[int, int
 
         file_updated = False
         for _, change in group.iterrows():
-            new_name = str(change.get("TaskName_new") or "").strip()
-            if not new_name:
-                continue
-
             target_index = None
             task_id = str(change.get("TaskID") or "").strip()
             if task_id and "TaskID" in file_df.columns:
@@ -753,11 +772,38 @@ def _save_task_log_task_name_changes(changes_df: pd.DataFrame) -> tuple[int, int
             if target_index is None:
                 continue
 
-            if "TaskName" not in file_df.columns:
-                file_df["TaskName"] = ""
-            file_df.at[target_index, "TaskName"] = new_name
-            file_updated = True
-            updated_rows += 1
+            row_updated = False
+
+            if "Notes_new" in change.index:
+                if "Notes" not in file_df.columns:
+                    file_df["Notes"] = pd.NA
+                new_notes = str(change.get("Notes_new") or "").strip()
+                file_df.at[target_index, "Notes"] = new_notes or None
+                row_updated = True
+
+            if "DurationSeconds_new" in change.index:
+                try:
+                    new_duration_seconds = int(change.get("DurationSeconds_new"))
+                except (TypeError, ValueError):
+                    new_duration_seconds = None
+
+                if new_duration_seconds is not None and new_duration_seconds >= 0:
+                    if "DurationSeconds" not in file_df.columns:
+                        file_df["DurationSeconds"] = 0
+                    file_df.at[target_index, "DurationSeconds"] = new_duration_seconds
+
+                    if "EndTimestampUTC" not in file_df.columns:
+                        file_df["EndTimestampUTC"] = pd.NaT
+                    start_value = file_df.at[target_index, "StartTimestampUTC"] if "StartTimestampUTC" in file_df.columns else pd.NaT
+                    if pd.notna(start_value):
+                        file_df.at[target_index, "EndTimestampUTC"] = (
+                            pd.Timestamp(start_value) + pd.to_timedelta(new_duration_seconds, unit="s")
+                        )
+                    row_updated = True
+
+            if row_updated:
+                file_updated = True
+                updated_rows += 1
 
         if file_updated:
             _write_tasks_parquet(file_path, file_df)
@@ -907,10 +953,14 @@ def render_task_log_section() -> None:
     else:
         df["Duration"] = ""
 
+    if "DurationSeconds" in df.columns:
+        df["DurationSeconds"] = pd.to_numeric(df["DurationSeconds"], errors="coerce").fillna(0).astype(int)
+    else:
+        df["DurationSeconds"] = 0
+
     display_cols = [
         "Entry Date",
         "FullName",
-        "UserLogin",
         "TaskName",
         "Duration",
         "Start (ET)",
@@ -999,27 +1049,56 @@ def render_task_log_section() -> None:
         sorted_df = filtered_df.sort_values("StartTimestampUTC", ascending=False, na_position="last")
     else:
         sorted_df = filtered_df
-    working_df = sorted_df[display_cols + ["TaskID", "__source_file", "__row_idx"]].reset_index(drop=True)
+    working_df = sorted_df[display_cols + ["DurationSeconds", "TaskID", "__source_file", "__row_idx"]].reset_index(drop=True)
     view_df = working_df[display_cols].copy()
     editor_input_df = view_df.copy()
     editor_input_df.insert(0, "Select", False)
     st.caption(f"Rows: {len(view_df):,} (of {len(df):,})")
+
+    task_log_column_config = {
+        "Entry Date": st.column_config.DateColumn("Entry Date", width=110),
+        "FullName": st.column_config.TextColumn(
+            "FullName",
+            width=_estimate_text_column_width(editor_input_df["FullName"], "FullName", min_px=140, max_px=260),
+        ),
+        "TaskName": st.column_config.TextColumn(
+            "TaskName",
+            width=_estimate_text_column_width(editor_input_df["TaskName"], "TaskName", min_px=160, max_px=300),
+        ),
+        "Duration": st.column_config.TextColumn("Duration", width=110, help="Use HH:MM or HH:MM:SS."),
+        "Start (ET)": st.column_config.TextColumn("Start (ET)", width=170),
+        "End (ET)": st.column_config.TextColumn("End (ET)", width=170),
+        "PartiallyComplete": st.column_config.CheckboxColumn("PartiallyComplete", width=145),
+        "Notes": st.column_config.TextColumn(
+            "Notes",
+            width=_estimate_text_column_width(
+                editor_input_df["Notes"],
+                "Notes",
+                min_px=180,
+                max_px=520,
+                quantile=0.95,
+                cap_chars=120,
+            ),
+        ),
+        "Select": st.column_config.CheckboxColumn("Select", default=False, width="small"),
+    }
 
     edited_view_df = st.data_editor(
         editor_input_df,
         hide_index=True,
         width="stretch",
         key="tm_task_log_editor",
-        column_config={
-            "TaskName": st.column_config.TextColumn("TaskName", required=True),
-            "Select": st.column_config.CheckboxColumn("Select", default=False),
-        },
-        disabled=[c for c in editor_input_df.columns if c not in {"TaskName", "Select"}],
+        column_config=task_log_column_config,
+        disabled=[c for c in editor_input_df.columns if c not in {"Duration", "Notes", "Select"}],
     )
 
-    base_task_series = editor_input_df["TaskName"].fillna("").astype(str).str.strip()
-    new_task_series = edited_view_df["TaskName"].fillna("").astype(str).str.strip()
-    changed_mask = new_task_series.ne(base_task_series)
+    base_notes_series = editor_input_df["Notes"].fillna("").astype(str).str.strip()
+    new_notes_series = edited_view_df["Notes"].fillna("").astype(str).str.strip()
+    base_duration_seconds = pd.to_numeric(working_df["DurationSeconds"], errors="coerce").fillna(0).astype(int)
+    edited_duration_series = edited_view_df["Duration"].fillna("").astype(str).str.strip()
+    parsed_duration_series = edited_duration_series.map(utils.parse_hhmmss)
+    invalid_duration_mask = edited_duration_series.eq("") | parsed_duration_series.lt(0)
+    changed_mask = new_notes_series.ne(base_notes_series) | parsed_duration_series.ne(base_duration_seconds)
     has_changes = bool(changed_mask.any())
     delete_mask = edited_view_df["Select"].fillna(False).astype(bool)
     has_deletes = bool(delete_mask.any())
@@ -1027,13 +1106,14 @@ def render_task_log_section() -> None:
     save_col, delete_col, refresh_col = st.columns([1, 1, 1])
     with save_col:
         if st.button("Save Task Log Edits", type="primary", width="stretch", disabled=not has_changes):
-            changes = working_df.loc[changed_mask, ["TaskID", "__source_file", "__row_idx"]].copy()
-            changes["TaskName_new"] = new_task_series.loc[changed_mask].values
-
-            if changes["TaskName_new"].astype(str).str.strip().eq("").any():
-                st.error("Task Name cannot be blank.")
+            if bool(invalid_duration_mask.loc[changed_mask].any()):
+                st.error("Duration must use HH:MM or HH:MM:SS.")
             else:
-                updated_rows, touched_files = _save_task_log_task_name_changes(changes)
+                changes = working_df.loc[changed_mask, ["TaskID", "__source_file", "__row_idx"]].copy()
+                changes["Notes_new"] = new_notes_series.loc[changed_mask].values
+                changes["DurationSeconds_new"] = parsed_duration_series.loc[changed_mask].astype(int).values
+
+                updated_rows, touched_files = _save_task_log_changes(changes)
                 _load_task_log_entries.clear()
                 utils.load_all_completed_tasks.clear()
                 utils.load_completed_tasks_for_analytics.clear()
