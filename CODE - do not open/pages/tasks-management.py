@@ -10,6 +10,7 @@ Purpose:
 
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 import uuid
 
@@ -21,7 +22,7 @@ import utils
 
 
 LOGGER = utils.get_page_logger("Tasks Management")
-PAGE_TITLE = utils.get_registry_page_title(__file__, "Content Management")
+PAGE_TITLE = utils.get_registry_page_title(__file__, "Management")
 
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 utils.render_app_logo()
@@ -41,9 +42,12 @@ if not utils.is_current_user_admin():
 
 TASKS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "tasks.parquet"
 USERS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "users.parquet"
+TASK_TARGETS_CSV_PATH = Path(config.TASK_TARGETS_CSV_PATH)
 CADENCE_OPTIONS = ["Daily", "Weekly", "Periodic"]
 EDITABLE_COLUMNS = ["TaskName", "TaskCadence"]
-TM_STATE_VERSION = 5
+TASK_TARGET_FILE_COLUMNS = ["Month", "Year", "TaskName", "Cadence", "UsersAssigned", "Multiplier", "Target"]
+TASK_TARGET_DISPLAY_COLUMNS = ["Month", "Year", "TaskName", "Cadence", "UsersAssigned", "Target"]
+TM_STATE_VERSION = 6
 
 if "tm_confirm_open" not in st.session_state:
     st.session_state.tm_confirm_open = False
@@ -134,6 +138,50 @@ def _get_file_signature(path: Path) -> tuple[int, int] | None:
         return None
     stat = path.stat()
     return int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))), int(stat.st_size)
+
+
+def _load_task_targets_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"taskstargets.csv not found at '{path}'.")
+    try:
+        df = pd.read_csv(path, sep=None, engine="python")
+    except pd.errors.EmptyDataError:
+        df = pd.DataFrame(columns=TASK_TARGET_FILE_COLUMNS)
+
+    if "Cadence" not in df.columns and "TaskCadence" in df.columns:
+        df["Cadence"] = df["TaskCadence"]
+    elif "Cadence" in df.columns and "TaskCadence" in df.columns:
+        df["Cadence"] = df["Cadence"].fillna(df["TaskCadence"])
+
+    for col in TASK_TARGET_FILE_COLUMNS:
+        if col not in df.columns:
+            df[col] = pd.NA
+
+    ordered_columns = TASK_TARGET_FILE_COLUMNS + [c for c in df.columns if c not in TASK_TARGET_FILE_COLUMNS]
+    df = df[ordered_columns].copy()
+    for col in ["Month", "Year", "UsersAssigned"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+    df["Multiplier"] = pd.to_numeric(df["Multiplier"], errors="coerce")
+    df["Target"] = pd.to_numeric(df["Target"], errors="coerce").fillna(0.0).round(2)
+    df["TaskName"] = df["TaskName"].fillna("").astype(str).str.strip()
+    df["Cadence"] = df["Cadence"].fillna("").astype(str).str.strip()
+    return df
+
+
+def _write_task_targets_csv(path: Path, df: pd.DataFrame) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.tmp")
+    df.to_csv(tmp_path, sep="\t", index=False)
+    tmp_path.replace(path)
+
+
+def _format_int_filter_value(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    try:
+        return str(int(value))
+    except Exception:
+        return str(value).strip()
 
 
 def _resolve_column_map(full_df: pd.DataFrame) -> dict[str, str]:
@@ -262,13 +310,32 @@ def _format_target_month_label(value: object) -> str:
     return pd.Timestamp(value).strftime("%B %Y")
 
 
+def get_business_days_in_month(year: int, month: int) -> int:
+    import calendar
+
+    _, last_day = calendar.monthrange(year, month)
+    return sum(
+        1 for day in range(1, last_day + 1)
+        if datetime.date(year, month, day).weekday() < 5
+    )
+
+
+def compute_target_multiplier(cadence: str, year: int, month: int) -> int:
+    if cadence == "Daily":
+        return get_business_days_in_month(year, month)
+    elif cadence == "Weekly":
+        bdays = get_business_days_in_month(year, month)
+        return round(bdays / 5)
+    else:
+        return 1
+
+
 def _initialize_state(force_reload: bool = False) -> None:
     state_version_mismatch = st.session_state.get("tm_state_version") != TM_STATE_VERSION
     missing_state = (
         "tm_original_full_df" not in st.session_state
         or "tm_working_full_df" not in st.session_state
         or "tm_column_map" not in st.session_state
-        or "tm_stored_targets_df" not in st.session_state
     )
     if not force_reload and not missing_state and not state_version_mismatch:
         return
@@ -276,21 +343,12 @@ def _initialize_state(force_reload: bool = False) -> None:
     full_df = _load_tasks_parquet(TASKS_PARQUET_PATH)
     col_map = _resolve_column_map(full_df)
     full_df = _ensure_required_columns(full_df, col_map)
-    if col_map["TargetMonthEnd"] not in full_df.columns or col_map["Target"] not in full_df.columns:
-        full_df = utils.sync_tasks_parquet_targets(
-            tasks_parquet_path=TASKS_PARQUET_PATH,
-            completed_dir=config.COMPLETED_TASKS_DIR,
-        )
-        col_map = _resolve_column_map(full_df)
-        full_df = _ensure_required_columns(full_df, col_map)
 
     definitions_df = _get_task_definition_df(full_df, col_map)
-    stored_targets_df = _get_stored_monthly_targets(full_df, col_map)
 
     st.session_state.tm_original_full_df = definitions_df.copy(deep=True)
     st.session_state.tm_working_full_df = definitions_df.copy(deep=True)
     st.session_state.tm_column_map = col_map
-    st.session_state.tm_stored_targets_df = stored_targets_df.copy(deep=True)
     st.session_state.tm_state_version = TM_STATE_VERSION
     st.session_state.tm_tasks_signature = _get_file_signature(TASKS_PARQUET_PATH)
 
@@ -308,7 +366,6 @@ def _tasks_state_needs_reload() -> bool:
         or "tm_original_full_df" not in st.session_state
         or "tm_working_full_df" not in st.session_state
         or "tm_column_map" not in st.session_state
-        or "tm_stored_targets_df" not in st.session_state
         or st.session_state.get("tm_tasks_signature") != _get_file_signature(TASKS_PARQUET_PATH)
     )
 
@@ -343,17 +400,14 @@ def _compute_change_summary() -> tuple[int, int]:
 
 def _apply_update() -> None:
     updated_df = st.session_state.tm_working_full_df.copy(deep=True)
-    stored_df = utils.sync_tasks_parquet_targets(
-        tasks_parquet_path=TASKS_PARQUET_PATH,
-        completed_dir=config.COMPLETED_TASKS_DIR,
-        task_definitions_df=updated_df,
-    )
+    _write_tasks_parquet(TASKS_PARQUET_PATH, updated_df)
+    utils.load_tasks.clear()
+    stored_df = _load_tasks_parquet(TASKS_PARQUET_PATH)
     col_map = _resolve_column_map(stored_df)
     refreshed_definitions_df = _get_task_definition_df(stored_df, col_map)
     st.session_state.tm_original_full_df = refreshed_definitions_df.copy(deep=True)
     st.session_state.tm_working_full_df = refreshed_definitions_df.copy(deep=True)
     st.session_state.tm_column_map = col_map
-    st.session_state.tm_stored_targets_df = _get_stored_monthly_targets(stored_df, col_map)
     st.session_state.tm_tasks_signature = _get_file_signature(TASKS_PARQUET_PATH)
     st.session_state.tm_updated_toast = True
 
@@ -433,21 +487,8 @@ def render_tasks_section() -> None:
     working_full_df = st.session_state.tm_working_full_df.copy(deep=True)
     view_df = _get_view_df(working_full_df, col_map)
     view_df["__row_pos"] = view_df.index.astype(int)
-    monthly_targets_df = st.session_state.tm_stored_targets_df.copy(deep=True)
-    target_month_options = _get_target_month_options(monthly_targets_df)
 
-    target_month_key = "tm_filter_target_month"
-    selected_target_month = st.session_state.get(target_month_key)
-    if selected_target_month is not None:
-        try:
-            selected_target_month = pd.Timestamp(selected_target_month).normalize()
-        except Exception:
-            selected_target_month = None
-    if selected_target_month not in target_month_options:
-        selected_target_month = target_month_options[0]
-        st.session_state[target_month_key] = selected_target_month
-
-    filter_left, filter_mid, filter_right = st.columns(3)
+    filter_left, filter_mid = st.columns(2)
     with filter_left:
         task_name_filter = st.text_input(
             "Filter by Task Name",
@@ -463,28 +504,8 @@ def render_tasks_section() -> None:
             options=cadence_options,
             key="tm_filter_task_cadence",
         )
-    with filter_right:
-        selected_target_month = st.selectbox(
-            "Month Name",
-            options=target_month_options,
-            key=target_month_key,
-            format_func=_format_target_month_label,
-        )
 
     filtered_view_df = view_df.copy()
-    if not monthly_targets_df.empty:
-        targets_for_month_df = monthly_targets_df[
-            monthly_targets_df["TargetMonthEnd"].dt.normalize().eq(pd.Timestamp(selected_target_month).normalize())
-        ][["TaskName", "TaskCadence", "Target"]].copy()
-    else:
-        targets_for_month_df = pd.DataFrame(columns=["TaskName", "TaskCadence", "Target"])
-    filtered_view_df = filtered_view_df.merge(
-        targets_for_month_df.rename(columns={"TaskName": "Task Name", "TaskCadence": "Task Cadence"}),
-        on=["Task Name", "Task Cadence"],
-        how="left",
-    )
-    filtered_view_df["Target"] = filtered_view_df["Target"].fillna(0.0).astype(float)
-    filtered_view_df["Target Month"] = pd.Timestamp(selected_target_month).normalize()
 
     if task_name_filter and task_name_filter.strip():
         needle = task_name_filter.strip().lower()
@@ -494,10 +515,8 @@ def render_tasks_section() -> None:
         cadence_series = filtered_view_df["Task Cadence"].fillna("").astype(str)
         filtered_view_df = filtered_view_df[cadence_series.isin(selected_cadences)]
 
-    display_df = filtered_view_df[["Task Name", "Task Cadence", "Target"]].copy()
-    st.caption(
-        f"Rows: {len(display_df):,} (of {len(view_df):,}) | Targets for {_format_target_month_label(selected_target_month)}"
-    )
+    display_df = filtered_view_df[["Task Name", "Task Cadence"]].copy()
+    st.caption(f"Rows: {len(display_df):,} (of {len(view_df):,})")
 
     selected_view_rows: list[int] = []
     selected_row_positions: list[int] = []
@@ -506,9 +525,6 @@ def render_tasks_section() -> None:
             display_df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
-            },
             on_select="rerun",
             selection_mode="multi-row",
         )
@@ -519,9 +535,6 @@ def render_tasks_section() -> None:
             display_df,
             width="stretch",
             hide_index=True,
-            column_config={
-                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
-            },
         )
         row_options = list(range(len(display_df)))
         selected_view_rows = st.multiselect(
@@ -624,6 +637,266 @@ def render_tasks_section() -> None:
     if st.session_state.tm_confirm_open and not st.session_state.get("tm_confirm_rendered"):
         st.session_state.tm_confirm_rendered = True
         confirm_update_dialog()
+
+
+def render_task_targets_section() -> None:
+    try:
+        if _tasks_state_needs_reload():
+            _initialize_state()
+        else:
+            _initialize_state()
+    except Exception as exc:
+        LOGGER.exception("Failed to initialize task targets state: %s", exc)
+        st.error(f"Failed to load task definitions: {exc}")
+        return
+
+    try:
+        targets_df = _load_task_targets_csv(TASK_TARGETS_CSV_PATH)
+    except Exception as exc:
+        LOGGER.exception("Failed to load task targets csv: %s", exc)
+        st.error(f"Failed to load task targets csv: {exc}")
+        return
+
+    saved_message = str(st.session_state.get("tm_task_target_saved_message", "") or "").strip()
+    if saved_message:
+        st.success(saved_message)
+        st.session_state.tm_task_target_saved_message = ""
+
+    current_eastern = pd.Timestamp(utils.to_eastern(utils.now_utc())).tz_localize(None)
+    fallback_year = str(int(current_eastern.year))
+    fallback_month = str(int(current_eastern.month))
+
+    year_options = [
+        _format_int_filter_value(value)
+        for value in sorted(
+            {value for value in targets_df["Year"].dropna().tolist()},
+            reverse=True,
+        )
+    ]
+    if not year_options:
+        year_options = [fallback_year]
+
+    year_key = "tm_task_targets_year"
+    if st.session_state.get(year_key) not in year_options:
+        st.session_state[year_key] = year_options[0]
+    selected_year = st.pills(
+        "Year",
+        options=year_options,
+        selection_mode="single",
+        default=year_options[0],
+        key=year_key,
+        width="stretch",
+    )
+    if not selected_year:
+        selected_year = year_options[0]
+
+    filtered_month_source = targets_df[
+        targets_df["Year"].map(_format_int_filter_value).eq(str(selected_year))
+    ]
+    month_options = [
+        _format_int_filter_value(value)
+        for value in sorted(
+            {value for value in filtered_month_source["Month"].dropna().tolist()}
+        )
+    ]
+    if not month_options:
+        month_options = [fallback_month]
+
+    month_key = "tm_task_targets_month"
+    if st.session_state.get(month_key) not in month_options:
+        st.session_state[month_key] = month_options[0]
+    selected_month = st.pills(
+        "Month",
+        options=month_options,
+        selection_mode="single",
+        default=month_options[0],
+        key=month_key,
+        width="stretch",
+    )
+    if not selected_month:
+        selected_month = month_options[0]
+
+    filtered_targets_df = targets_df[
+        targets_df["Year"].map(_format_int_filter_value).eq(str(selected_year))
+        & targets_df["Month"].map(_format_int_filter_value).eq(str(selected_month))
+    ].copy()
+    display_df = filtered_targets_df[TASK_TARGET_DISPLAY_COLUMNS].copy()
+    st.caption(f"Rows: {len(display_df):,} (of {len(targets_df):,})")
+
+    edited_df = st.data_editor(
+        display_df,
+        hide_index=True,
+        width="stretch",
+        key="tm_task_targets_editor",
+        column_config={
+            "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+        },
+        disabled=[col for col in display_df.columns if col != "Target"],
+    )
+
+    base_targets = pd.to_numeric(display_df.get("Target", pd.Series(dtype="float64")), errors="coerce").fillna(0.0).round(2)
+    edited_targets = pd.to_numeric(edited_df.get("Target", pd.Series(dtype="float64")), errors="coerce").fillna(0.0).round(2)
+    has_target_changes = bool(not edited_targets.equals(base_targets))
+
+    save_col, refresh_col = st.columns([1, 1])
+    with save_col:
+        if st.button("Save Task Targets", type="primary", width="stretch", disabled=not has_target_changes):
+            updated_targets_df = targets_df.copy(deep=True)
+            if not filtered_targets_df.empty:
+                updated_targets_df.loc[filtered_targets_df.index, "Target"] = edited_targets.values
+                updated_targets_df["Target"] = pd.to_numeric(updated_targets_df["Target"], errors="coerce").fillna(0.0).round(2)
+            _write_task_targets_csv(TASK_TARGETS_CSV_PATH, updated_targets_df)
+            LOGGER.info(
+                "taskstargets.csv updated | path='%s' filtered_rows=%s",
+                TASK_TARGETS_CSV_PATH,
+                len(filtered_targets_df),
+            )
+            st.success("Task targets updated.")
+            st.rerun()
+
+    with refresh_col:
+        if st.button("Refresh Task Targets", width="stretch"):
+            st.rerun()
+
+    col_map = st.session_state.tm_column_map
+    task_definitions_df = _get_task_definition_df(
+        st.session_state.tm_working_full_df.copy(deep=True),
+        col_map,
+    )
+    task_col = col_map["TaskName"]
+    cadence_col = col_map["TaskCadence"]
+
+    st.divider()
+    st.subheader("Add Target", anchor=False)
+
+    form_col1, form_col2, form_col3 = st.columns(3)
+
+    target_task_options = [""] + sorted(
+        value
+        for value in task_definitions_df[task_col].fillna("").astype(str).str.strip().unique().tolist()
+        if value
+    )
+    if st.session_state.get("tm_target_task_select") not in target_task_options:
+        st.session_state.tm_target_task_select = ""
+    with form_col1:
+        target_task = st.selectbox("Task", target_task_options, key="tm_target_task_select")
+
+    if target_task and not task_definitions_df.empty:
+        target_cadence_options = (
+            task_definitions_df.loc[
+                task_definitions_df[task_col].fillna("").astype(str).str.strip().eq(target_task),
+                cadence_col,
+            ]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .str.title()
+            .unique()
+            .tolist()
+        )
+        target_cadence_options = [c for c in CADENCE_OPTIONS if c in target_cadence_options]
+    else:
+        target_cadence_options = CADENCE_OPTIONS
+    if not target_cadence_options:
+        target_cadence_options = CADENCE_OPTIONS
+    if st.session_state.get("tm_target_cadence_select") not in target_cadence_options:
+        st.session_state.tm_target_cadence_select = target_cadence_options[0]
+    with form_col2:
+        target_cadence = st.selectbox("Cadence", target_cadence_options, key="tm_target_cadence_select")
+
+    if "tm_target_users_assigned" not in st.session_state:
+        st.session_state.tm_target_users_assigned = 1
+    with form_col3:
+        target_users_assigned = st.number_input(
+            "Users Assigned",
+            min_value=1,
+            step=1,
+            key="tm_target_users_assigned",
+        )
+
+    now_et = utils.to_eastern(utils.now_utc())
+    month_options = list(range(1, 13))
+    year_options = list(range(now_et.year - 2, now_et.year + 3))
+
+    if st.session_state.get("tm_target_month_select") not in month_options:
+        st.session_state.tm_target_month_select = int(now_et.month)
+    if st.session_state.get("tm_target_year_select") not in year_options:
+        st.session_state.tm_target_year_select = int(now_et.year)
+
+    date_col1, date_col2 = st.columns(2)
+    with date_col1:
+        target_month = st.selectbox(
+            "Month",
+            month_options,
+            format_func=lambda m: datetime.date(2000, m, 1).strftime("%B"),
+            key="tm_target_month_select",
+        )
+    with date_col2:
+        target_year = st.selectbox(
+            "Year",
+            year_options,
+            key="tm_target_year_select",
+        )
+
+    multiplier = compute_target_multiplier(target_cadence, int(target_year), int(target_month))
+    default_target = int(target_users_assigned) * multiplier
+    target_signature = (
+        str(target_task).strip(),
+        str(target_cadence).strip(),
+        int(target_users_assigned),
+        int(target_month),
+        int(target_year),
+    )
+    if st.session_state.get("tm_target_default_signature") != target_signature:
+        st.session_state.tm_target_value_input = int(default_target)
+        st.session_state.tm_target_default_signature = target_signature
+    elif "tm_target_value_input" not in st.session_state:
+        st.session_state.tm_target_value_input = int(default_target)
+
+    st.caption(
+        f"Default target: {target_users_assigned} user{'s' if target_users_assigned != 1 else ''} "
+        f"x {multiplier} "
+        f"({'business days' if target_cadence == 'Daily' else 'weeks' if target_cadence == 'Weekly' else 'periodic occurrence'}) "
+        f"= **{default_target}**"
+    )
+
+    target_value = st.number_input(
+        "Target",
+        min_value=0,
+        step=1,
+        key="tm_target_value_input",
+        help="Auto-computed from users assigned and cadence. You can override this.",
+    )
+
+    if st.button("Save Target", type="primary", key="tm_save_target_button"):
+        if not target_task:
+            st.error("Please select a task.")
+        else:
+            utils.save_task_target(
+                task_name=target_task,
+                cadence=target_cadence,
+                month=int(target_month),
+                year=int(target_year),
+                users_assigned=int(target_users_assigned),
+                target=int(target_value),
+                saved_by=utils.get_os_user(),
+            )
+            st.session_state.tm_task_targets_year = str(target_year)
+            st.session_state.tm_task_targets_month = str(target_month)
+            st.session_state.tm_task_target_saved_message = (
+                f"Target saved: {target_task} / {target_cadence} / "
+                f"{datetime.date(int(target_year), int(target_month), 1).strftime('%B %Y')} -> {int(target_value)}"
+            )
+            LOGGER.info(
+                "Task target saved | task='%s' cadence='%s' month=%s year=%s users=%s target=%s",
+                target_task,
+                target_cadence,
+                target_month,
+                target_year,
+                target_users_assigned,
+                target_value,
+            )
+            st.rerun()
 
 
 def render_users_section() -> None:
@@ -895,11 +1168,6 @@ def confirm_task_log_delete_dialog() -> None:
             _load_task_log_entries.clear()
             utils.load_all_completed_tasks.clear()
             utils.load_completed_tasks_for_analytics.clear()
-            if deleted_rows > 0:
-                utils.sync_tasks_parquet_targets(
-                    tasks_parquet_path=TASKS_PARQUET_PATH,
-                    completed_dir=config.COMPLETED_TASKS_DIR,
-                )
             st.session_state.tm_task_log_delete_confirm_open = False
             st.session_state.tm_task_log_delete_confirm_rendered = False
             st.session_state.tm_task_log_delete_payload = None
@@ -1118,10 +1386,6 @@ def render_task_log_section() -> None:
                 utils.load_all_completed_tasks.clear()
                 utils.load_completed_tasks_for_analytics.clear()
                 if updated_rows > 0:
-                    utils.sync_tasks_parquet_targets(
-                        tasks_parquet_path=TASKS_PARQUET_PATH,
-                        completed_dir=config.COMPLETED_TASKS_DIR,
-                    )
                     st.success(f"Saved {updated_rows} row update(s) across {touched_files} file(s).")
                     st.rerun()
                 else:
@@ -1156,9 +1420,14 @@ macro_logistics, macro_project_services, macro_general = st.tabs(
 )
 
 with macro_logistics:
-    logistics_definition_tab, logistics_log_tab = st.tabs(["Task Definition", "Task Log"], width="stretch")
+    logistics_definition_tab, logistics_targets_tab, logistics_log_tab = st.tabs(
+        ["Task Definition", "Task Targets", "Task Log"],
+        width="stretch",
+    )
     with logistics_definition_tab:
         render_tasks_section()
+    with logistics_targets_tab:
+        render_task_targets_section()
     with logistics_log_tab:
         render_task_log_section()
 

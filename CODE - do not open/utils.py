@@ -1025,6 +1025,87 @@ def sync_tasks_parquet_targets(
     return output_df
 
 
+def save_task_target(
+    task_name: str,
+    cadence: str,
+    month: int,
+    year: int,
+    users_assigned: int,
+    target: int,
+    saved_by: str,
+) -> None:
+    targets_path = Path(config.TASK_TARGETS_CSV_PATH)
+    columns = [
+        "TaskName",
+        "TaskCadence",
+        "Month",
+        "Year",
+        "UsersAssigned",
+        "Target",
+        "SavedBy",
+        "UpdatedTimestampUTC",
+    ]
+
+    if targets_path.exists():
+        try:
+            existing_df = pd.read_csv(targets_path, sep=None, engine="python")
+        except pd.errors.EmptyDataError:
+            existing_df = pd.DataFrame(columns=columns)
+    else:
+        existing_df = pd.DataFrame(columns=columns)
+
+    if "TaskCadence" not in existing_df.columns and "Cadence" in existing_df.columns:
+        existing_df["TaskCadence"] = existing_df["Cadence"]
+    for column in columns:
+        if column not in existing_df.columns:
+            existing_df[column] = pd.NA
+
+    normalized_task_name = str(task_name or "").strip()
+    normalized_cadence = str(cadence or "").strip().title()
+    normalized_month = int(month)
+    normalized_year = int(year)
+    updated_timestamp = now_utc().isoformat()
+
+    keep_mask = ~(
+        existing_df["TaskName"].fillna("").astype(str).str.strip().eq(normalized_task_name)
+        & existing_df["TaskCadence"].fillna("").astype(str).str.strip().str.title().eq(normalized_cadence)
+        & pd.to_numeric(existing_df["Month"], errors="coerce").fillna(-1).astype(int).eq(normalized_month)
+        & pd.to_numeric(existing_df["Year"], errors="coerce").fillna(-1).astype(int).eq(normalized_year)
+    )
+    existing_df = existing_df.loc[keep_mask, columns].copy()
+
+    new_row = pd.DataFrame(
+        [
+            {
+                "TaskName": normalized_task_name,
+                "TaskCadence": normalized_cadence,
+                "Month": normalized_month,
+                "Year": normalized_year,
+                "UsersAssigned": int(users_assigned),
+                "Target": int(target),
+                "SavedBy": str(saved_by or "").strip() or None,
+                "UpdatedTimestampUTC": updated_timestamp,
+            }
+        ]
+    )
+
+    output_df = pd.concat([existing_df, new_row], ignore_index=True)
+    output_df["Month"] = pd.to_numeric(output_df["Month"], errors="coerce").fillna(0).astype(int)
+    output_df["Year"] = pd.to_numeric(output_df["Year"], errors="coerce").fillna(0).astype(int)
+    output_df["UsersAssigned"] = pd.to_numeric(output_df["UsersAssigned"], errors="coerce").fillna(0).astype(int)
+    output_df["Target"] = pd.to_numeric(output_df["Target"], errors="coerce").fillna(0).astype(int)
+    output_df = output_df[columns].sort_values(
+        ["Year", "Month", "TaskName", "TaskCadence"],
+        ascending=[False, False, True, True],
+        kind="stable",
+    ).reset_index(drop=True)
+
+    targets_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = targets_path.with_name(f"{targets_path.stem}.{uuid.uuid4().hex}.tmp")
+    output_df.to_csv(tmp_path, sep="\t", index=False)
+    tmp_path.replace(targets_path)
+
+
 @st.cache_data(ttl=3600)
 def load_user_fullname_map(tasks_xlsx_path: str | None = None) -> dict[str, str]:
     """

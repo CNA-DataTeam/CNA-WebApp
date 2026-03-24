@@ -39,7 +39,7 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
     "Admin Tools": [
         PageEntry(
             path="pages/tasks-management.py",
-            title="Content Management",
+            title="Management",
             icon="\U0001F6E0\uFE0F",
             caption="Admin page to maintain tasks metadata and review users.parquet.",
             admin_only=True,

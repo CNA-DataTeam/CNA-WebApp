@@ -8,7 +8,7 @@ What it does:
     - Input mode (all users):
         * Auto-fills User and Department
         * Supports Simple and Detailed entry styles
-        * Writes a parquet file per submission to config.TIME_ALLOCATION_DIR
+        * Writes one parquet file per user/day under year/month/user folders
     - Exports mode (admins only):
         * Loads saved parquet entries
         * Provides date/user filters and CSV export
@@ -19,7 +19,6 @@ Output schema:
 
 from __future__ import annotations
 
-import uuid
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -64,15 +63,69 @@ def _empty_to_none(value: object) -> str | None:
     return text if text else None
 
 
-@st.cache_data(ttl=30, show_spinner="Loading saved allocations...")
-def load_time_allocation_exports(base_dir: Path) -> pd.DataFrame:
-    """Load all saved time-allocation parquet files from the output directory."""
-    files = sorted(base_dir.glob("*.parquet"), reverse=True)
-    if not files:
+def _get_time_allocation_user_partition(user_login: str, full_name: str = "") -> str:
+    """Return a stable folder-safe user key for time-allocation storage."""
+    login_key = _normalize_login(user_login)
+    if login_key:
+        return config.sanitize_log_user(login_key)
+    fallback = str(full_name or "").strip().lower().replace(" ", "_")
+    return config.sanitize_log_user(fallback or "unknown_user")
+
+
+def _get_time_allocation_month_dir(base_dir: Path, entry_date: date) -> Path:
+    """Return the year/month partition directory for an entry date."""
+    return base_dir / f"year={entry_date.year:04d}" / f"month={entry_date.month:02d}"
+
+
+def _get_time_allocation_daily_file(base_dir: Path, user_login: str, full_name: str, entry_date: date) -> Path:
+    """Return the one-file-per-day parquet path for a user/date."""
+    user_partition = _get_time_allocation_user_partition(user_login, full_name)
+    return (
+        _get_time_allocation_month_dir(base_dir, entry_date)
+        / f"user={user_partition}"
+        / f"time_allocation_{entry_date:%Y%m%d}.parquet"
+    )
+
+
+def _iter_time_allocation_files(base_dir: Path) -> list[Path]:
+    """Return all saved time-allocation parquet files, including nested partitions."""
+    if not base_dir.exists():
+        return []
+    return sorted((path for path in base_dir.rglob("*.parquet") if path.is_file()), reverse=True)
+
+
+def _iter_time_allocation_day_candidate_files(base_dir: Path, entry_date: date) -> list[Path]:
+    """Return candidate parquet files that may contain rows for one calendar day."""
+    files: list[Path] = []
+    seen: set[str] = set()
+
+    month_dir = _get_time_allocation_month_dir(base_dir, entry_date)
+    daily_name = f"time_allocation_{entry_date:%Y%m%d}.parquet"
+    legacy_pattern = f"time_allocation_{entry_date:%Y%m%d}*.parquet"
+
+    if month_dir.exists():
+        for path in sorted(month_dir.rglob(daily_name), reverse=True):
+            path_key = str(path).lower()
+            if path.is_file() and path_key not in seen:
+                files.append(path)
+                seen.add(path_key)
+
+    for path in sorted(base_dir.glob(legacy_pattern), reverse=True):
+        path_key = str(path).lower()
+        if path.is_file() and path_key not in seen:
+            files.append(path)
+            seen.add(path_key)
+
+    return files
+
+
+def _read_time_allocation_exports_from_files(file_paths: list[Path], base_dir: Path) -> pd.DataFrame:
+    """Read and normalize saved time-allocation files into one DataFrame."""
+    if not file_paths:
         return pd.DataFrame()
 
     frames: list[pd.DataFrame] = []
-    for file_path in files:
+    for file_path in file_paths:
         try:
             one = pd.read_parquet(file_path)
         except Exception as exc:
@@ -80,7 +133,11 @@ def load_time_allocation_exports(base_dir: Path) -> pd.DataFrame:
             continue
         if one.empty:
             continue
-        one["Source File"] = file_path.name
+        try:
+            source_file = str(file_path.relative_to(base_dir))
+        except ValueError:
+            source_file = file_path.name
+        one["Source File"] = source_file
         frames.append(one)
 
     if not frames:
@@ -103,6 +160,12 @@ def load_time_allocation_exports(base_dir: Path) -> pd.DataFrame:
         df["Source File"] = ""
     df["Entry Date"] = pd.to_datetime(df["Entry Date"], errors="coerce").dt.date
     return df[expected_cols + ["Source File"]]
+
+
+@st.cache_data(ttl=30, show_spinner="Loading saved allocations...")
+def load_time_allocation_exports(base_dir: Path) -> pd.DataFrame:
+    """Load all saved time-allocation parquet files from the output directory."""
+    return _read_time_allocation_exports_from_files(_iter_time_allocation_files(base_dir), base_dir)
 
 
 def _normalize_login(value: object) -> str:
@@ -133,6 +196,42 @@ def _filter_user_exports(exports_df: pd.DataFrame, user_login: str, full_name: s
     user_df["Entry Date"] = pd.to_datetime(user_df["Entry Date"], errors="coerce").dt.date
     user_df = user_df[user_df["Entry Date"].notna()].copy()
     return user_df
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def load_time_allocation_user_window(
+    base_dir: Path,
+    user_login: str,
+    full_name: str,
+    window_start_iso: str,
+    window_end_iso: str,
+) -> pd.DataFrame:
+    """Load one user's saved allocations for a bounded date window."""
+    window_start = _parse_date_value(window_start_iso)
+    window_end = _parse_date_value(window_end_iso)
+    if window_start is None or window_end is None or window_end < window_start:
+        return pd.DataFrame()
+
+    files: list[Path] = []
+    seen: set[str] = set()
+    current_day = window_start
+    while current_day <= window_end:
+        for path in _iter_time_allocation_day_candidate_files(base_dir, current_day):
+            path_key = str(path).lower()
+            if path_key not in seen:
+                files.append(path)
+                seen.add(path_key)
+        current_day += timedelta(days=1)
+
+    window_df = _read_time_allocation_exports_from_files(files, base_dir)
+    if window_df.empty:
+        return window_df
+
+    filtered_df = _filter_user_exports(window_df, user_login, full_name)
+    filtered_df = filtered_df[
+        filtered_df["Entry Date"].ge(window_start) & filtered_df["Entry Date"].le(window_end)
+    ].copy()
+    return filtered_df
 
 
 def _allocate_percentages(total_seconds: int, row_seconds: list[int]) -> list[int]:
@@ -340,9 +439,13 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         selected_day = today
         st.session_state["ta_input_selected_day"] = selected_day
 
-    exports_df = load_time_allocation_exports(TIME_ALLOCATION_DIR)
-    user_df = _filter_user_exports(exports_df, user_login, full_name)
-    window_df = user_df[(user_df["Entry Date"] >= window_start) & (user_df["Entry Date"] <= window_end)].copy()
+    window_df = load_time_allocation_user_window(
+        TIME_ALLOCATION_DIR,
+        user_login,
+        full_name,
+        window_start.isoformat(),
+        window_end.isoformat(),
+    ).copy()
     if window_df.empty:
         window_df = pd.DataFrame(columns=["Entry Date", "Account", "Time", "Channel", "Source File"])
 
@@ -491,6 +594,14 @@ def render_input_view(
         st.session_state.ta_confirm_rendered = False
     if "ta_confirm_payload" not in st.session_state:
         st.session_state.ta_confirm_payload = None
+    if "ta_delete_confirm_open" not in st.session_state:
+        st.session_state.ta_delete_confirm_open = False
+    if "ta_delete_confirm_rendered" not in st.session_state:
+        st.session_state.ta_delete_confirm_rendered = False
+    if "ta_delete_payload" not in st.session_state:
+        st.session_state.ta_delete_payload = None
+
+    _render_input_status()
 
     selected_day, selected_day_df = render_input_day_selector(user_login, full_name)
     _seed_input_state_for_day(selected_day, selected_day_df, account_options)
@@ -519,6 +630,7 @@ def render_input_view(
         duration_value = st.session_state.get(f"ta_detailed_duration_{idx}", "00:00")
         preview_seconds.append(max(0, utils.parse_hhmmss(str(duration_value))))
     total_preview_seconds = sum(preview_seconds)
+    has_saved_rows_for_day = not selected_day_df.empty
 
     st.caption("Enter one duration per row in HH:MM or HH:MM:SS format.")
     for idx in range(number_of_accounts):
@@ -553,11 +665,19 @@ def render_input_view(
                 "Delete",
                 key=f"ta_detailed_delete_btn_{idx}",
                 icon=":material/delete_outline:",
-                disabled=number_of_accounts <= 1,
+                disabled=number_of_accounts <= 1 and not has_saved_rows_for_day,
                 type="tertiary",
                 width="content",
             ):
-                st.session_state["ta_detailed_delete_idx"] = idx
+                if number_of_accounts <= 1:
+                    st.session_state.ta_delete_payload = {
+                        "entry_date": selected_day.isoformat(),
+                        "saved_row_count": int(len(selected_day_df.index)),
+                    }
+                    st.session_state.ta_delete_confirm_open = True
+                    st.session_state.ta_delete_confirm_rendered = False
+                else:
+                    st.session_state["ta_detailed_delete_idx"] = idx
                 st.rerun()
         rows.append(
             {
@@ -567,7 +687,7 @@ def render_input_view(
             }
         )
 
-    add_col, save_col = st.columns([1, 1])
+    add_col, save_col, _ = st.columns([1, 1, 6])
     with add_col:
         if st.button("Add Row", key="ta_detailed_add_row_btn", icon=":material/add:", type="secondary"):
             st.session_state["ta_detailed_count"] = number_of_accounts + 1
@@ -604,6 +724,9 @@ def render_input_view(
     if st.session_state.ta_confirm_open and not st.session_state.ta_confirm_rendered:
         st.session_state.ta_confirm_rendered = True
         confirm_time_allocation_submit_dialog(user_login, full_name, department)
+    if st.session_state.ta_delete_confirm_open and not st.session_state.ta_delete_confirm_rendered:
+        st.session_state.ta_delete_confirm_rendered = True
+        confirm_time_allocation_delete_dialog(user_login, full_name)
 
 
 def _ensure_time_allocation_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -633,7 +756,7 @@ def _replace_user_day_entries(base_dir: Path, user_login: str, full_name: str, e
     """Remove existing rows for (user, entry_date) across export files."""
     removed_rows = 0
     touched_files = 0
-    for file_path in sorted(base_dir.glob("*.parquet")):
+    for file_path in _iter_time_allocation_day_candidate_files(base_dir, entry_date):
         try:
             file_df = pd.read_parquet(file_path)
         except Exception as exc:
@@ -660,6 +783,38 @@ def _replace_user_day_entries(base_dir: Path, user_login: str, full_name: str, e
     return removed_rows, touched_files
 
 
+def _invalidate_input_seed() -> None:
+    """Force the selected-day editor to reload from persisted data on next rerun."""
+    st.session_state.pop("ta_loaded_day_token", None)
+
+
+def _queue_input_status(level: str, message: str) -> None:
+    """Persist a one-shot status message across reruns."""
+    st.session_state["ta_input_status"] = {
+        "level": str(level or "").strip().lower(),
+        "message": str(message or "").strip(),
+    }
+
+
+def _render_input_status() -> None:
+    """Render and clear the most recent persisted input status message."""
+    payload = st.session_state.pop("ta_input_status", None)
+    if not isinstance(payload, dict):
+        return
+
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        return
+
+    level = str(payload.get("level") or "").strip().lower()
+    if level == "success":
+        st.success(message)
+    elif level == "error":
+        st.error(message)
+    else:
+        st.info(message)
+
+
 def save_records(
     rows: list[dict[str, object]],
     parsed_seconds: list[int],
@@ -667,10 +822,8 @@ def save_records(
     full_name: str,
     department: str,
     entry_date: date,
-) -> None:
+) -> bool:
     """Build and persist time-allocation records to a parquet file."""
-    now_et = utils.to_eastern(utils.now_utc())
-
     records: list[dict[str, object]] = []
     for row, seconds in zip(rows, parsed_seconds):
         records.append(
@@ -686,12 +839,13 @@ def save_records(
         )
 
     df = _ensure_time_allocation_columns(pd.DataFrame(records))
-    output_name = f"time_allocation_{entry_date:%Y%m%d}_{now_et:%H%M%S}_{uuid.uuid4().hex[:8]}.parquet"
-    output_path = TIME_ALLOCATION_DIR / output_name
+    output_path = _get_time_allocation_daily_file(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
     try:
         removed_rows, touched_files = _replace_user_day_entries(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
         utils.atomic_write_parquet(df, output_path, schema=TIME_ALLOCATION_SCHEMA)
         load_time_allocation_exports.clear()
+        load_time_allocation_user_window.clear()
+        _invalidate_input_seed()
         LOGGER.info(
             "Saved time allocation export | rows=%s file='%s' user='%s' entry_date=%s replaced_rows=%s touched_files=%s",
             len(df),
@@ -702,12 +856,45 @@ def save_records(
             touched_files,
         )
         if removed_rows > 0:
-            st.success(f"Updated {entry_date:%m/%d/%Y}: replaced {removed_rows} row(s) and saved {len(df)} row(s).")
+            _queue_input_status(
+                "success",
+                f"Updated {entry_date:%m/%d/%Y}: replaced {removed_rows} row(s) and saved {len(df)} row(s).",
+            )
         else:
-            st.success(f"Saved {len(df)} row(s) for {entry_date:%m/%d/%Y}.")
+            _queue_input_status("success", f"Saved {len(df)} row(s) for {entry_date:%m/%d/%Y}.")
+        return True
     except Exception as exc:
         LOGGER.exception("Failed to save time allocation export: %s", exc)
         st.error(f"Failed to save parquet file: {exc}")
+        return False
+
+
+def delete_records_for_day(user_login: str, full_name: str, entry_date: date) -> bool:
+    """Delete all saved rows for one user/day and refresh the editor state."""
+    try:
+        removed_rows, touched_files = _replace_user_day_entries(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
+        load_time_allocation_exports.clear()
+        load_time_allocation_user_window.clear()
+        _invalidate_input_seed()
+        LOGGER.info(
+            "Deleted time allocation export rows | user='%s' entry_date=%s removed_rows=%s touched_files=%s",
+            user_login,
+            entry_date,
+            removed_rows,
+            touched_files,
+        )
+        if removed_rows > 0:
+            _queue_input_status(
+                "success",
+                f"Deleted {removed_rows} saved row(s) for {entry_date:%m/%d/%Y}.",
+            )
+        else:
+            _queue_input_status("info", f"No saved rows were found for {entry_date:%m/%d/%Y}.")
+        return True
+    except Exception as exc:
+        LOGGER.exception("Failed to delete time allocation rows: %s", exc)
+        st.error(f"Failed to delete saved rows: {exc}")
+        return False
 
 
 @st.dialog("Submit Allocation?")
@@ -759,16 +946,59 @@ def confirm_time_allocation_submit_dialog(user_login: str, full_name: str, depar
     left, right = st.columns(2)
     with left:
         if st.button("Confirm", type="primary", width="stretch", key="ta_confirm_submit_button"):
-            save_records(rows, parsed_seconds, user_login, full_name, department, entry_date)
-            st.session_state.ta_confirm_open = False
-            st.session_state.ta_confirm_rendered = False
-            st.session_state.ta_confirm_payload = None
-            st.rerun()
+            if save_records(rows, parsed_seconds, user_login, full_name, department, entry_date):
+                st.session_state.ta_confirm_open = False
+                st.session_state.ta_confirm_rendered = False
+                st.session_state.ta_confirm_payload = None
+                st.rerun()
     with right:
         if st.button("Cancel", width="stretch", key="ta_confirm_cancel_button"):
             st.session_state.ta_confirm_open = False
             st.session_state.ta_confirm_rendered = False
             st.session_state.ta_confirm_payload = None
+            st.rerun()
+
+
+@st.dialog("Delete Saved Allocation?")
+def confirm_time_allocation_delete_dialog(user_login: str, full_name: str) -> None:
+    """Confirmation modal for deleting one user's saved rows for a selected day."""
+    payload = st.session_state.get("ta_delete_payload")
+    if not isinstance(payload, dict):
+        st.error("No pending deletion found.")
+        st.session_state.ta_delete_confirm_open = False
+        st.session_state.ta_delete_confirm_rendered = False
+        st.session_state.ta_delete_payload = None
+        return
+
+    entry_date_dt = pd.to_datetime(payload.get("entry_date"), errors="coerce")
+    if pd.isna(entry_date_dt):
+        st.error("Invalid deletion date.")
+        st.session_state.ta_delete_confirm_open = False
+        st.session_state.ta_delete_confirm_rendered = False
+        st.session_state.ta_delete_payload = None
+        return
+
+    entry_date = entry_date_dt.date()
+    saved_row_count = int(max(0, payload.get("saved_row_count") or 0))
+    display_user = full_name.strip() if str(full_name).strip() else user_login
+
+    st.caption(f"**User:** {display_user}")
+    st.caption(f"**Entry Date:** {entry_date:%m/%d/%Y}")
+    st.warning(f"This will permanently delete {saved_row_count:,} saved row(s) for this day.")
+
+    left, right = st.columns(2)
+    with left:
+        if st.button("Delete Saved Rows", type="primary", width="stretch", key="ta_confirm_delete_button"):
+            if delete_records_for_day(user_login, full_name, entry_date):
+                st.session_state.ta_delete_confirm_open = False
+                st.session_state.ta_delete_confirm_rendered = False
+                st.session_state.ta_delete_payload = None
+                st.rerun()
+    with right:
+        if st.button("Cancel", width="stretch", key="ta_cancel_delete_button"):
+            st.session_state.ta_delete_confirm_open = False
+            st.session_state.ta_delete_confirm_rendered = False
+            st.session_state.ta_delete_payload = None
             st.rerun()
 
 
