@@ -1066,13 +1066,19 @@ def save_task_target(
     normalized_year = int(year)
     updated_timestamp = now_utc().isoformat()
 
-    keep_mask = ~(
+    duplicate_mask = (
         existing_df["TaskName"].fillna("").astype(str).str.strip().eq(normalized_task_name)
         & existing_df["TaskCadence"].fillna("").astype(str).str.strip().str.title().eq(normalized_cadence)
         & pd.to_numeric(existing_df["Month"], errors="coerce").fillna(-1).astype(int).eq(normalized_month)
         & pd.to_numeric(existing_df["Year"], errors="coerce").fillna(-1).astype(int).eq(normalized_year)
     )
-    existing_df = existing_df.loc[keep_mask, columns].copy()
+    if bool(duplicate_mask.any()):
+        raise ValueError(
+            "A target already exists for this task for the selected cadence and month. "
+            "Please edit or delete the existing target before adding a new one."
+        )
+
+    existing_df = existing_df.loc[:, columns].copy()
 
     new_row = pd.DataFrame(
         [

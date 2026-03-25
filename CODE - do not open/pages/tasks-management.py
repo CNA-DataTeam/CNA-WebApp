@@ -11,6 +11,7 @@ Purpose:
 from __future__ import annotations
 
 import datetime
+import math
 from pathlib import Path
 import uuid
 
@@ -44,6 +45,7 @@ TASKS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "tasks.parquet"
 USERS_PARQUET_PATH = Path(config.PERSONNEL_DIR) / "users.parquet"
 TASK_TARGETS_CSV_PATH = Path(config.TASK_TARGETS_CSV_PATH)
 CADENCE_OPTIONS = ["Daily", "Weekly", "Periodic"]
+DAILY_TARGET_BUFFER = 0.90
 EDITABLE_COLUMNS = ["TaskName", "TaskCadence"]
 TASK_TARGET_FILE_COLUMNS = ["Month", "Year", "TaskName", "Cadence", "UsersAssigned", "Multiplier", "Target"]
 TASK_TARGET_DISPLAY_COLUMNS = ["Month", "Year", "TaskName", "Cadence", "UsersAssigned", "Target"]
@@ -69,6 +71,10 @@ if "tm_task_log_delete_confirm_rendered" not in st.session_state:
     st.session_state.tm_task_log_delete_confirm_rendered = False
 if "tm_task_log_delete_payload" not in st.session_state:
     st.session_state.tm_task_log_delete_payload = None
+if "tm_task_targets_pending_year" not in st.session_state:
+    st.session_state.tm_task_targets_pending_year = ""
+if "tm_task_targets_pending_month" not in st.session_state:
+    st.session_state.tm_task_targets_pending_month = ""
 
 # Reset add-form widget values only before widgets are instantiated in the run.
 if st.session_state.tm_reset_add_form:
@@ -182,6 +188,31 @@ def _format_int_filter_value(value: object) -> str:
         return str(int(value))
     except Exception:
         return str(value).strip()
+
+
+def _task_target_exists(
+    targets_df: pd.DataFrame,
+    *,
+    task_name: str,
+    cadence: str,
+    month: int,
+    year: int,
+) -> bool:
+    if targets_df.empty:
+        return False
+
+    normalized_task_name = str(task_name or "").strip()
+    normalized_cadence = str(cadence or "").strip().title()
+    normalized_month = int(month)
+    normalized_year = int(year)
+
+    duplicate_mask = (
+        targets_df["TaskName"].fillna("").astype(str).str.strip().eq(normalized_task_name)
+        & targets_df["Cadence"].fillna("").astype(str).str.strip().str.title().eq(normalized_cadence)
+        & pd.to_numeric(targets_df["Month"], errors="coerce").fillna(-1).astype(int).eq(normalized_month)
+        & pd.to_numeric(targets_df["Year"], errors="coerce").fillna(-1).astype(int).eq(normalized_year)
+    )
+    return bool(duplicate_mask.any())
 
 
 def _resolve_column_map(full_df: pd.DataFrame) -> dict[str, str]:
@@ -328,6 +359,14 @@ def compute_target_multiplier(cadence: str, year: int, month: int) -> int:
         return round(bdays / 5)
     else:
         return 1
+
+
+def compute_default_target(cadence: str, users_assigned: int, year: int, month: int) -> tuple[int, int]:
+    multiplier = compute_target_multiplier(cadence, year, month)
+    actual_target = int(users_assigned) * multiplier
+    if cadence == "Daily":
+        return multiplier, int(math.ceil(actual_target * DAILY_TARGET_BUFFER))
+    return multiplier, int(actual_target)
 
 
 def _initialize_state(force_reload: bool = False) -> None:
@@ -677,6 +716,10 @@ def render_task_targets_section() -> None:
         year_options = [fallback_year]
 
     year_key = "tm_task_targets_year"
+    pending_year = str(st.session_state.get("tm_task_targets_pending_year", "") or "").strip()
+    if pending_year in year_options:
+        st.session_state[year_key] = pending_year
+    st.session_state.tm_task_targets_pending_year = ""
     if st.session_state.get(year_key) not in year_options:
         st.session_state[year_key] = year_options[0]
     selected_year = st.pills(
@@ -703,6 +746,10 @@ def render_task_targets_section() -> None:
         month_options = [fallback_month]
 
     month_key = "tm_task_targets_month"
+    pending_month = str(st.session_state.get("tm_task_targets_pending_month", "") or "").strip()
+    if pending_month in month_options:
+        st.session_state[month_key] = pending_month
+    st.session_state.tm_task_targets_pending_month = ""
     if st.session_state.get(month_key) not in month_options:
         st.session_state[month_key] = month_options[0]
     selected_month = st.pills(
@@ -838,8 +885,13 @@ def render_task_targets_section() -> None:
             key="tm_target_year_select",
         )
 
-    multiplier = compute_target_multiplier(target_cadence, int(target_year), int(target_month))
-    default_target = int(target_users_assigned) * multiplier
+    multiplier, default_target = compute_default_target(
+        target_cadence,
+        int(target_users_assigned),
+        int(target_year),
+        int(target_month),
+    )
+    actual_target = int(target_users_assigned) * multiplier
     target_signature = (
         str(target_task).strip(),
         str(target_cadence).strip(),
@@ -853,12 +905,18 @@ def render_task_targets_section() -> None:
     elif "tm_target_value_input" not in st.session_state:
         st.session_state.tm_target_value_input = int(default_target)
 
-    st.caption(
-        f"Default target: {target_users_assigned} user{'s' if target_users_assigned != 1 else ''} "
-        f"x {multiplier} "
-        f"({'business days' if target_cadence == 'Daily' else 'weeks' if target_cadence == 'Weekly' else 'periodic occurrence'}) "
-        f"= **{default_target}**"
-    )
+    if target_cadence == "Daily":
+        st.caption(
+            f"Default target: {target_users_assigned} user{'s' if target_users_assigned != 1 else ''} "
+            f"x {multiplier} business days = {actual_target}, then 90% buffer applied -> **{default_target}**"
+        )
+    else:
+        st.caption(
+            f"Default target: {target_users_assigned} user{'s' if target_users_assigned != 1 else ''} "
+            f"x {multiplier} "
+            f"({'weeks' if target_cadence == 'Weekly' else 'periodic occurrence'}) "
+            f"= **{default_target}**"
+        )
 
     target_value = st.number_input(
         "Target",
@@ -871,32 +929,55 @@ def render_task_targets_section() -> None:
     if st.button("Save Target", type="primary", key="tm_save_target_button"):
         if not target_task:
             st.error("Please select a task.")
-        else:
-            utils.save_task_target(
-                task_name=target_task,
-                cadence=target_cadence,
-                month=int(target_month),
-                year=int(target_year),
-                users_assigned=int(target_users_assigned),
-                target=int(target_value),
-                saved_by=utils.get_os_user(),
+        elif _task_target_exists(
+            targets_df,
+            task_name=target_task,
+            cadence=target_cadence,
+            month=int(target_month),
+            year=int(target_year),
+        ):
+            st.error(
+                "A target already exists for this task for the selected cadence and month. "
+                "Please edit or delete the existing target before adding a new one."
             )
-            st.session_state.tm_task_targets_year = str(target_year)
-            st.session_state.tm_task_targets_month = str(target_month)
-            st.session_state.tm_task_target_saved_message = (
-                f"Target saved: {target_task} / {target_cadence} / "
-                f"{datetime.date(int(target_year), int(target_month), 1).strftime('%B %Y')} -> {int(target_value)}"
-            )
-            LOGGER.info(
-                "Task target saved | task='%s' cadence='%s' month=%s year=%s users=%s target=%s",
+            LOGGER.warning(
+                "Duplicate task target blocked | task='%s' cadence='%s' month=%s year=%s",
                 target_task,
                 target_cadence,
                 target_month,
                 target_year,
-                target_users_assigned,
-                target_value,
             )
-            st.rerun()
+        else:
+            try:
+                utils.save_task_target(
+                    task_name=target_task,
+                    cadence=target_cadence,
+                    month=int(target_month),
+                    year=int(target_year),
+                    users_assigned=int(target_users_assigned),
+                    target=int(target_value),
+                    saved_by=utils.get_os_user(),
+                )
+            except ValueError as exc:
+                LOGGER.warning("Task target rejected during save: %s", exc)
+                st.error(str(exc))
+            else:
+                st.session_state.tm_task_targets_pending_year = str(target_year)
+                st.session_state.tm_task_targets_pending_month = str(target_month)
+                st.session_state.tm_task_target_saved_message = (
+                    f"Target saved: {target_task} / {target_cadence} / "
+                    f"{datetime.date(int(target_year), int(target_month), 1).strftime('%B %Y')} -> {int(target_value)}"
+                )
+                LOGGER.info(
+                    "Task target saved | task='%s' cadence='%s' month=%s year=%s users=%s target=%s",
+                    target_task,
+                    target_cadence,
+                    target_month,
+                    target_year,
+                    target_users_assigned,
+                    target_value,
+                )
+                st.rerun()
 
 
 def render_users_section() -> None:

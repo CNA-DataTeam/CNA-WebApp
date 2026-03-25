@@ -42,6 +42,10 @@ INPUT_MODE_UPLOAD = "Upload File"
 INPUT_MODE_PASTE = "Paste from Excel (tab-separated)"
 DESTINATION_MODE_WAREHOUSE = "One of Our Warehouses"
 DESTINATION_MODE_ADDRESS = "Specific Address"
+RESULTS_VIEW_OVERVIEW = "Overview"
+RESULTS_VIEW_ORIGIN_ITEMS = "Origin Item Detail"
+RESULTS_VIEW_PACKAGE_ALLOCATION = "Package Allocation"
+RESULTS_VIEW_API_DETAILS = "API Details"
 US_STATE_CODES = [
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
     "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
@@ -125,7 +129,7 @@ def load_packaging_config() -> dict[str, Any]:
             "company_type": shipping_calc_company_type,
             "has_lift_gate": bool(shipping_calc_cfg.get("has_lift_gate", False)),
             "force_common_carrier": bool(shipping_calc_cfg.get("force_common_carrier", False)),
-            "exclude_lift_gate_fee": bool(shipping_calc_cfg.get("exclude_lift_gate_fee", True)),
+            "exclude_lift_gate_fee": bool(shipping_calc_cfg.get("exclude_lift_gate_fee", False)),
             "bypass_matrix": bool(shipping_calc_cfg.get("bypass_matrix", False)),
         },
         "ui": {
@@ -164,8 +168,8 @@ if "pe_refrigeration_required" not in st.session_state:
     st.session_state.pe_refrigeration_required = False
 if "pe_perishable_rows" not in st.session_state:
     st.session_state.pe_perishable_rows = [{"item_number": "", "perishable_code": ""}]
-if "pe_selected_package_view" not in st.session_state:
-    st.session_state.pe_selected_package_view = "All Items"
+if "pe_results_view" not in st.session_state:
+    st.session_state.pe_results_view = RESULTS_VIEW_OVERVIEW
 if "pe_recommendation_future" not in st.session_state:
     st.session_state.pe_recommendation_future = None
 if "pe_recommendation_signature" not in st.session_state:
@@ -531,30 +535,58 @@ def parse_pasted_input(raw_text: str) -> tuple[pd.DataFrame, list[str]]:
 
 def validate_and_aggregate_rows(input_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """Validate rows and aggregate duplicates by ItemNumber."""
+    if input_df.empty:
+        return pd.DataFrame(columns=["ItemNumber", "Quantity"]), []
+
+    working_df = input_df.reset_index(drop=True).copy()
+    default_row_numbers = pd.Series(range(1, len(working_df) + 1), index=working_df.index, dtype="int64")
+    if "_RowNumber" in working_df.columns:
+        working_df["_RowNumber"] = (
+            pd.to_numeric(working_df["_RowNumber"], errors="coerce")
+            .fillna(default_row_numbers)
+            .astype(int)
+        )
+    else:
+        working_df["_RowNumber"] = default_row_numbers
+
+    normalized_items = (
+        working_df.get("ItemNumber", pd.Series("", index=working_df.index))
+        .fillna("")
+        .astype(str)
+        .str.replace(r"\s+", "", regex=True)
+        .str.upper()
+    )
+    raw_quantity_values = working_df.get("Quantity", pd.Series("", index=working_df.index))
+    quantity_numeric = pd.to_numeric(raw_quantity_values, errors="coerce")
+
+    blank_item_mask = normalized_items.eq("")
+    invalid_quantity_mask = (~blank_item_mask) & (quantity_numeric.isna() | (quantity_numeric <= 0))
+    valid_mask = (~blank_item_mask) & (~invalid_quantity_mask)
+
     errors: list[str] = []
-    valid_rows: list[dict[str, Any]] = []
+    if blank_item_mask.any():
+        errors.extend(
+            f"Row {row_number}: ItemNumber is blank."
+            for row_number in working_df.loc[blank_item_mask, "_RowNumber"].astype(int).tolist()
+        )
+    if invalid_quantity_mask.any():
+        invalid_quantity_rows = working_df.loc[invalid_quantity_mask, ["_RowNumber"]].copy()
+        invalid_quantity_rows["Quantity"] = raw_quantity_values.loc[invalid_quantity_mask].astype(str)
+        errors.extend(
+            f"Row {int(row._RowNumber)}: Quantity '{row.Quantity}' is invalid (must be integer > 0)."
+            for row in invalid_quantity_rows.itertuples(index=False)
+        )
 
-    for idx, row in input_df.reset_index(drop=True).iterrows():
-        row_number = int(row.get("_RowNumber", idx + 1))
-        item_number = normalize_item_number(row.get("ItemNumber"))
-        quantity = parse_quantity(row.get("Quantity"))
-
-        if not item_number:
-            errors.append(f"Row {row_number}: ItemNumber is blank.")
-            continue
-        if quantity is None:
-            errors.append(
-                f"Row {row_number}: Quantity '{row.get('Quantity')}' is invalid (must be integer > 0)."
-            )
-            continue
-
-        valid_rows.append({"ItemNumber": item_number, "Quantity": quantity})
-
-    if not valid_rows:
+    if not valid_mask.any():
         return pd.DataFrame(columns=["ItemNumber", "Quantity"]), errors
 
     clean_df = (
-        pd.DataFrame(valid_rows)
+        pd.DataFrame(
+            {
+                "ItemNumber": normalized_items.loc[valid_mask],
+                "Quantity": quantity_numeric.loc[valid_mask].astype(int),
+            }
+        )
         .groupby("ItemNumber", as_index=False)["Quantity"]
         .sum()
         .sort_values("ItemNumber")
@@ -567,9 +599,11 @@ def validate_and_aggregate_rows(input_df: pd.DataFrame) -> tuple[pd.DataFrame, l
 # ITEM-INFO PARQUET LOOKUP
 # ============================================================
 @st.cache_data(show_spinner=False)
-def load_item_info_parquet(parquet_path: str) -> pd.DataFrame:
+def load_item_info_parquet(parquet_path: str, item_number_column: str) -> pd.DataFrame:
     df = pd.read_parquet(parquet_path)
     df.columns = [extract_bracketed_column_name(str(col)) for col in df.columns]
+    resolved_item_col = resolve_item_column_name(item_number_column, df.columns.tolist())
+    df["_NormalizedItem"] = df[resolved_item_col].map(normalize_item_number)
     return df
 
 
@@ -760,22 +794,24 @@ def fetch_item_info_rows(clean_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
     if not parquet_path:
         raise ValueError("Item-info parquet path is not configured.")
 
-    item_info_df = load_item_info_parquet(parquet_path)
-    resolved_item_col = resolve_item_column_name(item_col, item_info_df.columns.tolist())
+    item_info_df = load_item_info_parquet(parquet_path, item_col)
 
     requested = clean_df.copy()
     requested["_NormalizedItem"] = requested["ItemNumber"].map(normalize_item_number)
-
-    table_df = item_info_df.copy()
-    table_df["_NormalizedItem"] = table_df[resolved_item_col].map(normalize_item_number)
-
     requested_item_set = set(requested["_NormalizedItem"].tolist())
-    matched_df = table_df[table_df["_NormalizedItem"].isin(requested_item_set)].copy()
-    matched_df = matched_df.drop(columns=["_NormalizedItem"]).reset_index(drop=True)
 
-    matched_items = set(table_df.loc[table_df["_NormalizedItem"].isin(requested_item_set), "_NormalizedItem"].tolist())
-    unmatched_df = requested[~requested["_NormalizedItem"].isin(matched_items)][["ItemNumber", "Quantity"]].copy()
-    unmatched_df = unmatched_df.reset_index(drop=True)
+    matched_mask = item_info_df["_NormalizedItem"].isin(requested_item_set)
+    matched_df = (
+        item_info_df.loc[matched_mask]
+        .drop(columns=["_NormalizedItem"], errors="ignore")
+        .reset_index(drop=True)
+    )
+
+    matched_items = set(item_info_df.loc[matched_mask, "_NormalizedItem"].tolist())
+    unmatched_df = (
+        requested.loc[~requested["_NormalizedItem"].isin(matched_items), ["ItemNumber", "Quantity"]]
+        .reset_index(drop=True)
+    )
 
     return matched_df, unmatched_df
 
@@ -807,7 +843,7 @@ def build_shipping_request_options(overrides: dict[str, Any] | None = None) -> d
     defaults = {
         "has_lift_gate": bool(shipping_cfg.get("has_lift_gate", False)),
         "force_common_carrier": bool(shipping_cfg.get("force_common_carrier", False)),
-        "exclude_lift_gate_fee": bool(shipping_cfg.get("exclude_lift_gate_fee", True)),
+        "exclude_lift_gate_fee": bool(shipping_cfg.get("exclude_lift_gate_fee", False)),
         "bypass_matrix": bool(shipping_cfg.get("bypass_matrix", False)),
     }
     if not isinstance(overrides, dict):
@@ -1335,8 +1371,6 @@ def extract_shipping_source_candidates(
             for option in options:
                 if not isinstance(option, dict):
                     continue
-                if is_common_carrier_liftgate_option(option):
-                    continue
                 if not include_all_methods and not accept_all and not is_ground_shipping_option(option):
                     continue
 
@@ -1393,8 +1427,6 @@ def extract_available_shipping_methods(
             for entry in raw_methods:
                 if not isinstance(entry, dict):
                     continue
-                if is_common_carrier_liftgate_option(entry):
-                    continue
                 method_name = str(entry.get("MethodName", entry.get("MatrixMethodName", ""))).strip()
                 method_guid = str(entry.get("MethodGuid", "")).strip()
                 if not method_name and not method_guid:
@@ -1430,8 +1462,6 @@ def extract_available_shipping_methods(
 
     grouped: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
-        if is_common_carrier_liftgate_option(candidate):
-            continue
         identifier = str(candidate.get("Identifier", "")).strip()
         method = {
             "Method Name": str(candidate.get("Method", "")).strip(),
@@ -2726,8 +2756,11 @@ def reset_estimation_results(results: dict[str, Any]) -> dict[str, Any]:
             "source_warehouse_details": {},
             "destination_state": "",
             "parsed_origins": [],
+            "parsed_origins_ready": False,
             "allocation_df": pd.DataFrame(),
+            "allocation_df_ready": False,
             "origin_items": {},
+            "origin_items_ready": False,
         }
     )
     return updated_results
@@ -2800,26 +2833,6 @@ def run_estimation_for_results(
     updated_results["selected_source_candidate"] = selected_source_candidate or {}
     updated_results["source_warehouse_number"] = source_warehouse_number or ""
     updated_results["source_warehouse_details"] = source_warehouse_details
-    updated_results["parsed_origins"] = parse_shipping_quote_origins(shipping_calc_response)
-    updated_results["allocation_df"] = build_shipping_package_allocation_df(
-        shipping_calc_response,
-        shipping_source_candidates,
-    )
-    origin_items: dict[str, list[dict[str, Any]]] = {}
-    quotes = shipping_calc_response.get("ShippingQuotePerZipCode", []) if isinstance(shipping_calc_response, dict) else []
-    if isinstance(quotes, list):
-        for origin in updated_results["parsed_origins"]:
-            for quote_record in quotes:
-                if not isinstance(quote_record, dict):
-                    continue
-                if (
-                    str(quote_record.get("OriginZipCode", "")).strip() == origin["origin_zip"]
-                    and normalize_origin_warehouse_token(quote_record.get("WarehouseNumber"))
-                    == origin["warehouse_number"]
-                ):
-                    origin_items[origin["origin_key"]] = _extract_origin_product_rows(quote_record)
-                    break
-    updated_results["origin_items"] = origin_items
     return updated_results
 
 
@@ -3221,8 +3234,6 @@ def extract_quote_shipping_methods(quote: dict[str, Any]) -> list[dict[str, Any]
         for option in options:
             if not isinstance(option, dict):
                 continue
-            if is_common_carrier_liftgate_option(option):
-                continue
 
             identifier = str(option.get("Identifier", "")).strip()
             method_name = (
@@ -3384,6 +3395,64 @@ def extract_quote_vendor_fees(quote: dict[str, Any]) -> list[dict[str, Any]]:
             normalized_fees.append({"label": label, "amount": None})
 
     return normalized_fees
+
+
+def build_quote_lookup_key(origin_zip: Any, warehouse_number: Any, vendor_id: Any = "") -> tuple[str, str, str]:
+    return (
+        str(origin_zip or "").strip(),
+        normalize_origin_warehouse_token(warehouse_number),
+        str(vendor_id or "").strip(),
+    )
+
+
+def build_shipping_quote_record_lookup(api_response: Any) -> dict[tuple[str, str, str], dict[str, Any]]:
+    if not isinstance(api_response, dict):
+        return {}
+
+    quotes = api_response.get("ShippingQuotePerZipCode", [])
+    if not isinstance(quotes, list):
+        return {}
+
+    quote_lookup: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for quote_record in quotes:
+        if not isinstance(quote_record, dict):
+            continue
+        lookup_key = build_quote_lookup_key(
+            quote_record.get("OriginZipCode"),
+            quote_record.get("WarehouseNumber"),
+            extract_quote_vendor_id(quote_record),
+        )
+        if lookup_key not in quote_lookup:
+            quote_lookup[lookup_key] = quote_record
+    return quote_lookup
+
+
+def build_origin_items_lookup(
+    api_response: Any,
+    parsed_origins: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    if not parsed_origins:
+        return {}
+
+    quote_lookup = build_shipping_quote_record_lookup(api_response)
+    origin_items: dict[str, list[dict[str, Any]]] = {}
+
+    for origin in parsed_origins:
+        origin_key = str(origin.get("origin_key", "")).strip()
+        if not origin_key:
+            continue
+        quote_record = quote_lookup.get(
+            build_quote_lookup_key(
+                origin.get("origin_zip"),
+                origin.get("warehouse_number"),
+                origin.get("vendor_id"),
+            )
+        )
+        if isinstance(quote_record, dict):
+            origin_items[origin_key] = _extract_origin_product_rows(quote_record)
+
+    return origin_items
+
 
 def parse_shipping_quote_origins(api_response: Any) -> list[dict[str, Any]]:
     if not isinstance(api_response, dict):
@@ -3624,7 +3693,11 @@ def build_vendor_fees_html(vendor_fees: list[dict[str, Any]]) -> str:
     )
 
 
-def build_origin_card_html(origin: dict[str, Any], origin_slug: str) -> str:
+def build_origin_card_html(
+    origin: dict[str, Any],
+    origin_slug: str,
+    show_item_details: bool = False,
+) -> str:
     location_label = ", ".join(
         part for part in [str(origin.get("origin_city", "")).strip(), str(origin.get("origin_state", "")).strip()] if part
     )
@@ -3652,6 +3725,11 @@ def build_origin_card_html(origin: dict[str, Any], origin_slug: str) -> str:
         if bool(origin.get("is_already_on_site"))
         else f"<span style='color:#0f766e;'>Cheapest: <strong>{escape(cheapest_display)}</strong></span>"
     )
+    package_count_html = (
+        f"<a href='#pe-items-{escape(origin_slug, quote=True)}' style='color:#4b5563;text-decoration:none;font-size:0.84rem;'><span style='font-weight:700;text-decoration:underline;'>Packages</span>: <strong>{to_int(origin.get('parcel_package_count'), 0):,}</strong></a>"
+        if show_item_details
+        else f"<span>Packages: <strong>{to_int(origin.get('parcel_package_count'), 0):,}</strong></span>"
+    )
 
     return (
         "<div style='border:1px solid #d9dee6;border-radius:16px;padding:18px;background:#ffffff;"
@@ -3666,7 +3744,7 @@ def build_origin_card_html(origin: dict[str, Any], origin_slug: str) -> str:
         f"{build_vendor_fees_html(origin.get('vendor_fees', []))}"
         "<div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:14px;"
         "padding-top:12px;border-top:1px solid #eef2f7;font-size:0.84rem;color:#4b5563;'>"
-        f"<a href='#pe-items-{escape(origin_slug, quote=True)}' style='color:#4b5563;text-decoration:none;font-size:0.84rem;'><span style='font-weight:700;text-decoration:underline;'>Packages</span>: <strong>{to_int(origin.get('parcel_package_count'), 0):,}</strong></a>"
+        f"{package_count_html}"
         f"<span>Pallets: <strong>{to_int(origin.get('pallet_count'), 0):,}</strong></span>"
         f"{cost_status_html}"
         "</div>"
@@ -3678,20 +3756,18 @@ def render_shipping_quote_overview(
     api_response: Any,
     dimension_unit: str = "in",
     weight_unit: str = "lb",
-    shipping_calc_response_raw: Any = None,
     destination_mode: str = "",
     destination_warehouse_number: int | None = None,
     parsed_origins_precomputed: list[dict[str, Any]] | None = None,
     origin_items_precomputed: dict[str, list[dict[str, Any]]] | None = None,
+    show_item_details: bool = False,
 ) -> None:
     if not isinstance(api_response, dict):
         st.info("Run Estimate to request shipping options.")
         return
 
     parsed_origins_raw = (
-        parsed_origins_precomputed
-        if isinstance(parsed_origins_precomputed, list) and parsed_origins_precomputed
-        else parse_shipping_quote_origins(api_response)
+        parsed_origins_precomputed if isinstance(parsed_origins_precomputed, list) else parse_shipping_quote_origins(api_response)
     )
     parsed_origins = apply_destination_warehouse_cost_overrides(
         parsed_origins_raw,
@@ -3761,14 +3837,20 @@ def render_shipping_quote_overview(
         for index, origin in enumerate(filtered_origins):
             origin_slug = make_origin_slug(str(origin.get("origin_key", "")))
             with card_columns[index % 3]:
-                st.markdown(build_origin_card_html(origin, origin_slug), unsafe_allow_html=True)
+                st.markdown(
+                    build_origin_card_html(origin, origin_slug, show_item_details=show_item_details),
+                    unsafe_allow_html=True,
+                )
+
+        if not show_item_details:
+            return
 
         st.divider()
         st.subheader("Items Detail", anchor=False)
-        response_source = (
-            shipping_calc_response_raw
-            if isinstance(shipping_calc_response_raw, dict)
-            else api_response
+        origin_items_lookup = (
+            origin_items_precomputed
+            if isinstance(origin_items_precomputed, dict)
+            else build_origin_items_lookup(api_response, parsed_origins_raw)
         )
 
         for origin in filtered_origins:
@@ -3792,32 +3874,7 @@ def render_shipping_quote_overview(
             )
             st.caption(f"Items shipping from {origin_label}")
 
-            matching_quote: dict[str, Any] | None = None
-            quotes = response_source.get("ShippingQuotePerZipCode", [])
-            if isinstance(quotes, list):
-                for quote_record in quotes:
-                    if not isinstance(quote_record, dict):
-                        continue
-                    quote_zip = str(quote_record.get("OriginZipCode", "")).strip()
-                    quote_warehouse_number = normalize_origin_warehouse_token(
-                        quote_record.get("WarehouseNumber")
-                    )
-                    if (
-                        quote_zip == str(origin.get("origin_zip", "")).strip()
-                        and quote_warehouse_number
-                        == str(origin.get("warehouse_number", "")).strip()
-                    ):
-                        matching_quote = quote_record
-                        break
-
-            product_rows = (
-                list(origin_items_precomputed.get(origin["origin_key"], []))
-                if isinstance(origin_items_precomputed, dict)
-                else []
-            )
-            if not product_rows:
-                if isinstance(matching_quote, dict):
-                    product_rows = _extract_origin_product_rows(matching_quote)
+            product_rows = list(origin_items_lookup.get(origin["origin_key"], []))
 
             if not product_rows:
                 st.info("No product detail available for this origin.")
@@ -3859,6 +3916,188 @@ def render_shipping_quote_overview(
             items_df = items_df.rename(columns={"VendorId": "Vendor ID"})
 
             st.dataframe(items_df, width="stretch", hide_index=True)
+
+
+def ensure_estimation_detail_results(
+    results: dict[str, Any],
+    *,
+    include_parsed_origins: bool = False,
+    include_origin_items: bool = False,
+    include_allocation: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    updated_results = dict(results)
+    changed = False
+    shipping_calc_response = updated_results.get("shipping_calc_response")
+
+    if include_parsed_origins and not bool(updated_results.get("parsed_origins_ready", False)):
+        updated_results["parsed_origins"] = parse_shipping_quote_origins(shipping_calc_response)
+        updated_results["parsed_origins_ready"] = True
+        changed = True
+
+    if include_origin_items and not bool(updated_results.get("origin_items_ready", False)):
+        if not bool(updated_results.get("parsed_origins_ready", False)):
+            updated_results["parsed_origins"] = parse_shipping_quote_origins(shipping_calc_response)
+            updated_results["parsed_origins_ready"] = True
+            changed = True
+        updated_results["origin_items"] = build_origin_items_lookup(
+            shipping_calc_response,
+            updated_results.get("parsed_origins", []),
+        )
+        updated_results["origin_items_ready"] = True
+        changed = True
+
+    if include_allocation and not bool(updated_results.get("allocation_df_ready", False)):
+        updated_results["allocation_df"] = build_shipping_package_allocation_df(
+            shipping_calc_response,
+            updated_results.get("shipping_source_candidates", []),
+        )
+        updated_results["allocation_df_ready"] = True
+        changed = True
+
+    return updated_results, changed
+
+
+def render_api_details(
+    shipping_calc_payload: dict[str, Any],
+    shipping_calc_response: Any,
+) -> None:
+    st.subheader("API Details", anchor=False)
+    request_col, response_col = st.columns(2, vertical_alignment="top")
+    with request_col:
+        with st.expander("Request Payload", expanded=False):
+            st.json(shipping_calc_payload)
+    with response_col:
+        with st.expander("Response Body (Charges Hidden)", expanded=False):
+            if isinstance(shipping_calc_response, (dict, list)):
+                st.json(strip_shipping_charge_fields(shipping_calc_response))
+            elif shipping_calc_response is None:
+                st.info("No response body is available.")
+            else:
+                st.code(str(shipping_calc_response))
+
+
+def render_package_allocation_detail(
+    allocation_df: pd.DataFrame,
+    dimension_unit: str,
+    weight_unit: str,
+) -> None:
+    st.subheader("Package Allocation Detail", anchor=False)
+    if allocation_df.empty:
+        st.info("No package allocation detail rows were returned by the shipping calculator response.")
+        return
+
+    st.caption(
+        "This table uses all raw quote candidates returned by the API. "
+        "Package cost allocation is estimated by apportioning each quote cost across packages by package "
+        "volume, then across items by each item's share of total item volume within the package."
+    )
+
+    allocation_filter_cols = st.columns(5)
+    source_warehouse_options = sorted(
+        value for value in allocation_df["Source Warehouse"].dropna().astype(str).unique().tolist() if value
+    )
+    method_options = sorted(
+        value for value in allocation_df["Method"].dropna().astype(str).unique().tolist() if value
+    )
+    carrier_options = sorted(
+        value for value in allocation_df["Carrier"].dropna().astype(str).unique().tolist() if value
+    )
+    delivery_day_options = sorted(
+        int(value)
+        for value in pd.to_numeric(allocation_df["Delivery Days"], errors="coerce").dropna().astype(int).unique().tolist()
+    )
+    package_number_options = sorted(
+        int(value)
+        for value in pd.to_numeric(allocation_df["Package Number"], errors="coerce").dropna().astype(int).unique().tolist()
+    )
+
+    selected_source_warehouse = allocation_filter_cols[0].selectbox(
+        "Source Warehouse",
+        options=["All", *source_warehouse_options],
+        key="pe_alloc_filter_source_warehouse",
+    )
+    selected_method_filter = allocation_filter_cols[1].selectbox(
+        "Method",
+        options=["All", *method_options],
+        key="pe_alloc_filter_method",
+    )
+    selected_carrier = allocation_filter_cols[2].selectbox(
+        "Carrier",
+        options=["All", *carrier_options],
+        key="pe_alloc_filter_carrier",
+    )
+    selected_delivery_days = allocation_filter_cols[3].selectbox(
+        "Delivery Days",
+        options=["All", *delivery_day_options],
+        key="pe_alloc_filter_delivery_days",
+    )
+    selected_package_number = allocation_filter_cols[4].selectbox(
+        "Package Number",
+        options=["All", *package_number_options],
+        key="pe_alloc_filter_package_number",
+        format_func=lambda package_number: (
+            package_number if package_number == "All" else f"Package {package_number}"
+        ),
+    )
+
+    filtered_allocation_df = allocation_df.copy()
+    if selected_source_warehouse != "All":
+        filtered_allocation_df = filtered_allocation_df[
+            filtered_allocation_df["Source Warehouse"] == selected_source_warehouse
+        ]
+    if selected_method_filter != "All":
+        filtered_allocation_df = filtered_allocation_df[
+            filtered_allocation_df["Method"] == selected_method_filter
+        ]
+    if selected_carrier != "All":
+        filtered_allocation_df = filtered_allocation_df[
+            filtered_allocation_df["Carrier"] == selected_carrier
+        ]
+    if selected_delivery_days != "All":
+        filtered_allocation_df = filtered_allocation_df[
+            filtered_allocation_df["Delivery Days"] == selected_delivery_days
+        ]
+    if selected_package_number != "All":
+        filtered_allocation_df = filtered_allocation_df[
+            filtered_allocation_df["Package Number"] == selected_package_number
+        ]
+
+    if filtered_allocation_df.empty:
+        st.info("No allocation rows match the selected filters.")
+        return
+
+    quantity_values = _safe_numeric(filtered_allocation_df["Quantity"]).fillna(0.0)
+    if (quantity_values % 1 == 0).all():
+        filtered_allocation_df["Quantity"] = quantity_values.astype(int)
+    else:
+        filtered_allocation_df["Quantity"] = quantity_values.round(2)
+
+    filtered_allocation_df = filtered_allocation_df[
+        [
+            "Package Number",
+            "Item Number",
+            "Method",
+            "Quantity",
+            "Volume",
+            "Source Warehouse",
+            "Delivery Days",
+            "Carrier",
+            "Package Cost Allocation by Volume",
+        ]
+    ]
+    filtered_allocation_df["Package Cost Allocation by Volume"] = (
+        _safe_numeric(filtered_allocation_df["Package Cost Allocation by Volume"]).fillna(0.0).round(2)
+    )
+    display_allocation_df = format_measurement_dataframe(
+        filtered_allocation_df,
+        dimension_unit,
+        weight_unit,
+    )
+    st.dataframe(
+        display_allocation_df,
+        width="stretch",
+        hide_index=True,
+    )
 
 
 # ============================================================
@@ -4230,7 +4469,7 @@ with input_col:
             st.session_state.pe_loaded = True
             st.session_state.pe_results = pipeline_results
             st.session_state.pe_errors = combined_errors
-            st.session_state.pe_selected_package_view = "All Items"
+            st.session_state.pe_results_view = RESULTS_VIEW_OVERVIEW
             if st.session_state.pe_recommendation_future is not None:
                 st.session_state.pe_recommendation_future.cancel()
             st.session_state.pe_recommendation_future = None
@@ -4642,7 +4881,7 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
             st.session_state.pe_results = updated_results
             st.session_state.pe_loaded = True
             st.session_state.pe_errors = input_parse_errors + updated_results.get("row_errors", [])
-            st.session_state.pe_selected_package_view = "All Items"
+            st.session_state.pe_results_view = RESULTS_VIEW_OVERVIEW
             LOGGER.info(
                 "Shipping estimate run complete | destination_mode=%s destination_warehouse=%s shipping_items=%s source_candidates=%s source_warehouse=%s shipping_error=%s",
                 selected_destination_mode,
@@ -4659,162 +4898,72 @@ if st.session_state.pe_loaded and st.session_state.pe_results:
 
     st.divider()
     st.subheader("Shipping Calculator Results", anchor=False)
+    selected_results_view = RESULTS_VIEW_OVERVIEW
+    if shipping_calc_payload:
+        selected_results_view = st.radio(
+            "Results View",
+            options=[
+                RESULTS_VIEW_OVERVIEW,
+                RESULTS_VIEW_ORIGIN_ITEMS,
+                RESULTS_VIEW_PACKAGE_ALLOCATION,
+                RESULTS_VIEW_API_DETAILS,
+            ],
+            horizontal=True,
+            key="pe_results_view",
+        )
+        st.caption("Only the active results view is rendered to keep reruns faster.")
+        st.divider()
+
     if shipping_calc_error:
         st.error(shipping_calc_error)
-    elif not shipping_calc_payload:
+    if not shipping_calc_payload:
         st.info("Run Estimate to request shipping options.")
+    elif selected_results_view == RESULTS_VIEW_API_DETAILS:
+        render_api_details(shipping_calc_payload, shipping_calc_response)
     elif not shipping_items:
         st.info("No matched item records are available to send to the shipping calculator.")
+    elif shipping_calc_error:
+        pass
     else:
         if isinstance(shipping_calc_response, dict):
-            render_shipping_quote_overview(
-                shipping_calc_response,
-                dimension_unit=dimension_unit,
-                weight_unit=weight_unit,
-                shipping_calc_response_raw=shipping_calc_response,
-                destination_mode=stored_destination_mode,
-                destination_warehouse_number=current_destination_warehouse_number,
-                parsed_origins_precomputed=parsed_origins,
-                origin_items_precomputed=origin_items,
-            )
+            if selected_results_view == RESULTS_VIEW_PACKAGE_ALLOCATION:
+                results, results_changed = ensure_estimation_detail_results(
+                    results,
+                    include_allocation=True,
+                )
+                if results_changed:
+                    st.session_state.pe_results = results
+                allocation_df = results.get("allocation_df", pd.DataFrame())
+                render_package_allocation_detail(
+                    allocation_df,
+                    dimension_unit,
+                    weight_unit,
+                )
+            else:
+                include_origin_items = selected_results_view == RESULTS_VIEW_ORIGIN_ITEMS
+                results, results_changed = ensure_estimation_detail_results(
+                    results,
+                    include_parsed_origins=True,
+                    include_origin_items=include_origin_items,
+                )
+                if results_changed:
+                    st.session_state.pe_results = results
+                parsed_origins = results.get("parsed_origins", [])
+                origin_items = results.get("origin_items", {})
+                render_shipping_quote_overview(
+                    shipping_calc_response,
+                    dimension_unit=dimension_unit,
+                    weight_unit=weight_unit,
+                    destination_mode=stored_destination_mode,
+                    destination_warehouse_number=current_destination_warehouse_number,
+                    parsed_origins_precomputed=parsed_origins,
+                    origin_items_precomputed=origin_items,
+                    show_item_details=include_origin_items,
+                )
         elif shipping_calc_response is None:
             st.warning("The shipping calculator did not return a response body.")
         else:
             st.warning("The shipping calculator response could not be parsed as JSON.")
-
-    if shipping_calc_payload:
-        st.divider()
-        st.subheader("API Details", anchor=False)
-        request_col, response_col = st.columns(2, vertical_alignment="top")
-        with request_col:
-            with st.expander("Request Payload", expanded=False):
-                st.json(shipping_calc_payload)
-        with response_col:
-            with st.expander("Response Body (Charges Hidden)", expanded=False):
-                if isinstance(shipping_calc_response, (dict, list)):
-                    st.json(strip_shipping_charge_fields(shipping_calc_response))
-                elif shipping_calc_response is None:
-                    st.info("No response body is available.")
-                else:
-                    st.code(str(shipping_calc_response))
-
-        st.divider()
-        st.subheader("Package Allocation Detail", anchor=False)
-        allocation_df = results.get("allocation_df", pd.DataFrame())
-        if allocation_df.empty:
-            st.info("No package allocation detail rows were returned by the shipping calculator response.")
-        else:
-            st.caption(
-                "This table uses all raw quote candidates returned by the API. "
-                "Package cost allocation is estimated by apportioning each quote cost across packages by package "
-                "volume, then across items by each item's share of total item volume within the package."
-            )
-
-            allocation_filter_cols = st.columns(5)
-            source_warehouse_options = sorted(
-                value for value in allocation_df["Source Warehouse"].dropna().astype(str).unique().tolist() if value
-            )
-            method_options = sorted(
-                value for value in allocation_df["Method"].dropna().astype(str).unique().tolist() if value
-            )
-            carrier_options = sorted(
-                value for value in allocation_df["Carrier"].dropna().astype(str).unique().tolist() if value
-            )
-            delivery_day_options = sorted(
-                int(value)
-                for value in pd.to_numeric(allocation_df["Delivery Days"], errors="coerce").dropna().astype(int).unique().tolist()
-            )
-            package_number_options = sorted(
-                int(value)
-                for value in pd.to_numeric(allocation_df["Package Number"], errors="coerce").dropna().astype(int).unique().tolist()
-            )
-
-            selected_source_warehouse = allocation_filter_cols[0].selectbox(
-                "Source Warehouse",
-                options=["All", *source_warehouse_options],
-                key="pe_alloc_filter_source_warehouse",
-            )
-            selected_method_filter = allocation_filter_cols[1].selectbox(
-                "Method",
-                options=["All", *method_options],
-                key="pe_alloc_filter_method",
-            )
-            selected_carrier = allocation_filter_cols[2].selectbox(
-                "Carrier",
-                options=["All", *carrier_options],
-                key="pe_alloc_filter_carrier",
-            )
-            selected_delivery_days = allocation_filter_cols[3].selectbox(
-                "Delivery Days",
-                options=["All", *delivery_day_options],
-                key="pe_alloc_filter_delivery_days",
-            )
-            selected_package_number = allocation_filter_cols[4].selectbox(
-                "Package Number",
-                options=["All", *package_number_options],
-                key="pe_alloc_filter_package_number",
-                format_func=lambda package_number: (
-                    package_number if package_number == "All" else f"Package {package_number}"
-                ),
-            )
-
-            filtered_allocation_df = allocation_df.copy()
-            if selected_source_warehouse != "All":
-                filtered_allocation_df = filtered_allocation_df[
-                    filtered_allocation_df["Source Warehouse"] == selected_source_warehouse
-                ]
-            if selected_method_filter != "All":
-                filtered_allocation_df = filtered_allocation_df[
-                    filtered_allocation_df["Method"] == selected_method_filter
-                ]
-            if selected_carrier != "All":
-                filtered_allocation_df = filtered_allocation_df[
-                    filtered_allocation_df["Carrier"] == selected_carrier
-                ]
-            if selected_delivery_days != "All":
-                filtered_allocation_df = filtered_allocation_df[
-                    filtered_allocation_df["Delivery Days"] == selected_delivery_days
-                ]
-            if selected_package_number != "All":
-                filtered_allocation_df = filtered_allocation_df[
-                    filtered_allocation_df["Package Number"] == selected_package_number
-                ]
-
-            if filtered_allocation_df.empty:
-                st.info("No allocation rows match the selected filters.")
-            else:
-                quantity_values = _safe_numeric(filtered_allocation_df["Quantity"]).fillna(0.0)
-                if (quantity_values % 1 == 0).all():
-                    filtered_allocation_df["Quantity"] = quantity_values.astype(int)
-                else:
-                    filtered_allocation_df["Quantity"] = quantity_values.round(2)
-
-                filtered_allocation_df = filtered_allocation_df[
-                    [
-                        "Package Number",
-                        "Item Number",
-                        "Method",
-                        "Quantity",
-                        "Volume",
-                        "Source Warehouse",
-                        "Delivery Days",
-                        "Carrier",
-                        "Package Cost Allocation by Volume",
-                    ]
-                ]
-                filtered_allocation_df["Package Cost Allocation by Volume"] = (
-                    _safe_numeric(filtered_allocation_df["Package Cost Allocation by Volume"]).fillna(0.0).round(2)
-                )
-                display_allocation_df = format_measurement_dataframe(
-                    filtered_allocation_df,
-                    dimension_unit,
-                    weight_unit,
-                )
-                st.dataframe(
-                    display_allocation_df,
-                    width="stretch",
-                    hide_index=True,
-                )
 
     st.stop()
 
