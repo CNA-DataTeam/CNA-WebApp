@@ -422,21 +422,50 @@ def _delete_detailed_row(delete_idx: int) -> None:
     st.session_state["ta_detailed_count"] = count - 1
 
 
+def _compute_calendar_window(view_mode: str, today: date) -> tuple[date, date]:
+    """Return (window_start, window_end) for the chosen calendar view."""
+    if view_mode == "Work Week (M-F)":
+        # Monday of current week through Friday
+        monday = today - timedelta(days=today.weekday())
+        return monday, monday + timedelta(days=4)
+    if view_mode == "Month":
+        first_of_month = today.replace(day=1)
+        # Last day of month
+        if today.month == 12:
+            last_of_month = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            last_of_month = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
+        return first_of_month, last_of_month
+    # Default: 7 Days
+    return today - timedelta(days=6), today
+
+
 def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd.DataFrame]:
-    """Render clickable 7-day calendar and return selected day + selected day rows."""
-    st.subheader("Your Last 7 Days", anchor=False)
+    """Render clickable calendar and return selected day + selected day rows."""
+    header_col, toggle_col = st.columns([2, 3])
+    with header_col:
+        st.subheader("Calendar", anchor=False)
+    with toggle_col:
+        view_mode = st.radio(
+            "View",
+            options=["7 Days", "Work Week (M-F)", "Month"],
+            index=["7 Days", "Work Week (M-F)", "Month"].index(
+                st.session_state.get("ta_calendar_view", "7 Days")
+            ),
+            horizontal=True,
+            key="ta_calendar_view",
+            label_visibility="collapsed",
+        )
 
     today = utils.to_eastern(utils.now_utc()).date()
-    day_window = [today - timedelta(days=offset) for offset in range(6, -1, -1)]
-    window_start = day_window[0]
-    window_end = day_window[-1]
+    window_start, window_end = _compute_calendar_window(view_mode, today)
 
     if "ta_input_selected_day" not in st.session_state:
         st.session_state["ta_input_selected_day"] = today
     selected_day = _parse_date_value(st.session_state.get("ta_input_selected_day", today)) or today
     st.session_state["ta_input_selected_day"] = selected_day
     if selected_day < window_start or selected_day > window_end:
-        selected_day = today
+        selected_day = today if window_start <= today <= window_end else window_start
         st.session_state["ta_input_selected_day"] = selected_day
 
     window_df = load_time_allocation_user_window(
@@ -460,21 +489,41 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         window_rows.append((entry_day.isoformat(), account_name, seconds))
     calendar_events = _build_calendar_events(tuple(window_rows))
 
-    calendar_options = {
-        "initialView": "dayGridSevenDay",
-        "views": {
+    num_days = (window_end - window_start).days + 1
+    if view_mode == "Month":
+        initial_view = "dayGridMonth"
+        calendar_height = 420
+        views_config = {}
+    elif view_mode == "Work Week (M-F)":
+        initial_view = "dayGridWorkWeek"
+        calendar_height = 180
+        views_config = {
+            "dayGridWorkWeek": {
+                "type": "dayGrid",
+                "duration": {"days": 5},
+                "buttonText": "5 days",
+            }
+        }
+    else:
+        initial_view = "dayGridSevenDay"
+        calendar_height = 180
+        views_config = {
             "dayGridSevenDay": {
                 "type": "dayGrid",
                 "duration": {"days": 7},
                 "buttonText": "7 days",
             }
-        },
+        }
+
+    calendar_options = {
+        "initialView": initial_view,
+        "views": views_config,
         "editable": False,
         "selectable": False,
         "eventDisplay": "block",
         "dayMaxEventRows": 4,
         "headerToolbar": {"left": "", "center": "title", "right": ""},
-        "height": 180,
+        "height": calendar_height,
         "initialDate": window_start.isoformat(),
     }
     height_rules = "\n".join(
@@ -536,7 +585,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         font-size: 0.68rem;
     }
     """ + "\n" + height_rules + "\n" + selected_day_css
-    calendar_widget_key = "ta_input_week_calendar"
+    calendar_widget_key = f"ta_input_calendar_{view_mode}"
     calendar_state = st_calendar(
         events=calendar_events,
         options=calendar_options,
