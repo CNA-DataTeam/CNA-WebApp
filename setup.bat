@@ -40,12 +40,27 @@ if errorlevel 1 (
   exit /b 1
 )
 
+REM Refresh PATH from registry so the installer's changes take effect in this session
+for /f "tokens=2*" %%a in ('reg query "HKCU\Environment" /v PATH 2^>nul') do set "USER_PATH=%%b"
+if defined USER_PATH set "PATH=%PATH%;%USER_PATH%"
+
 if exist "%LOCALAPPDATA%\uv\bin\uv.exe" (
   set "UV_EXE=%LOCALAPPDATA%\uv\bin\uv.exe"
   goto UV_FOUND
 )
 if exist "%APPDATA%\uv\bin\uv.exe" (
   set "UV_EXE=%APPDATA%\uv\bin\uv.exe"
+  goto UV_FOUND
+)
+
+where uv >nul 2>&1
+if not errorlevel 1 (
+  set "UV_EXE=uv"
+  goto UV_FOUND
+)
+
+for /f "delims=" %%i in ('where /R "%USERPROFILE%" uv.exe 2^>nul') do (
+  set "UV_EXE=%%i"
   goto UV_FOUND
 )
 
