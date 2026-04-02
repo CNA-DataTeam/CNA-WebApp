@@ -59,7 +59,12 @@ echo Found uv: %UV_EXE%
 REM ============================================================
 REM ENSURE PYTHON 3.11
 REM ============================================================
-echo Ensuring Python 3.11 is available...
+"%UV_EXE%" python list 2>&1 | findstr /C:"cpython-3.11" >nul
+if not errorlevel 1 (
+  echo Python 3.11 already installed. Skipping.
+  goto VENV
+)
+echo Installing Python 3.11...
 "%UV_EXE%" python install 3.11
 if errorlevel 1 (
   echo ERROR: Failed to install Python 3.11.
@@ -70,6 +75,7 @@ if errorlevel 1 (
 REM ============================================================
 REM CREATE VENV (IF MISSING)
 REM ============================================================
+:VENV
 if not exist "%VENV_DIR%\Scripts\python.exe" (
   echo Creating virtual environment...
   "%UV_EXE%" venv "%VENV_DIR%" --python 3.11
