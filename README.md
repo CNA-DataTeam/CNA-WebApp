@@ -37,4 +37,4 @@ App updates are pulled automatically from GitHub each time `StartApp.bat` runs. 
 - The app opens in Microsoft Edge as a standalone window (no browser tabs/address bar)
 - The application depends on internal shared files, network locations, and synced business data
 - Main source code lives in `CODE - do not open/`
-- Maintainer and AI change instructions live in `README_AI.md`
+- AI context and project rules live in `CLAUDE.md`

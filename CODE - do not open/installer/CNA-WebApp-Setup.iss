@@ -15,7 +15,7 @@
 #define MyAppVersion "1.0"
 #define MyAppPublisher "Clark National Accounts"
 #define MyRepoURL "https://github.com/CNA-DataTeam/CNA-WebApp.git"
-#define MyNetworkConfig "\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.py"
+#define MyNetworkKey "\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.key"
 
 [Setup]
 AppId={{B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C}
@@ -205,20 +205,20 @@ begin
   if ResultCode <> 0 then
     Log('setup.bat returned non-zero exit code: ' + IntToStr(ResultCode));
 
-  // ---- Step 4: Copy config.py ----
-  UpdateStatus('Copying config.py from network share...');
-  ConfigSrc := '{#MyNetworkConfig}';
-  ConfigDst := InstallDir + '\config.py';
+  // ---- Step 4: Copy config key ----
+  UpdateStatus('Copying encryption key from network share...');
+  ConfigSrc := '{#MyNetworkKey}';
+  ConfigDst := InstallDir + '\CODE - do not open\config.key';
   if FileExists(ConfigSrc) then
   begin
     CopyFile(ConfigSrc, ConfigDst, False);
     if FileExists(ConfigDst) then
-      Log('config.py copied successfully.')
+      Log('config.key copied successfully.')
     else
-      Log('WARNING: config.py copy failed.');
+      Log('WARNING: config.key copy failed.');
   end
   else
-    Log('WARNING: Network config not found at ' + ConfigSrc + '. config.py will be synced on first launch.');
+    Log('WARNING: Network key not found at ' + ConfigSrc + '. Key will be copied on first launch.');
 
   UpdateStatus('Installation complete!');
 end;

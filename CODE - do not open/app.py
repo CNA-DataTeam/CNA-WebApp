@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 import sys
 
 APP_DIR = Path(__file__).resolve().parent
@@ -12,6 +13,9 @@ import streamlit as st
 
 import page_registry
 import utils
+
+UPDATE_FLAG = APP_DIR / ".update_available"
+UPDATE_CHECK_FILE = APP_DIR / ".last_update_check"
 
 # Preload third-party component once from the main script context.
 _AUTOREFRESH_PRELOAD_ERROR: Exception | None = None
@@ -28,6 +32,71 @@ if _AUTOREFRESH_PRELOAD_ERROR is not None:
 st.set_page_config(initial_sidebar_state="expanded", page_icon=utils.get_app_icon())
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 utils.render_app_logo()
+
+
+# -----------------------------------------------------------------
+# Update notification — blocks app usage until user clicks Update Now
+# -----------------------------------------------------------------
+def _apply_update():
+    """Pull latest code, clear caches, remove flag."""
+    try:
+        subprocess.run(
+            ["git", "pull", "--ff-only"],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            timeout=60,
+        )
+        # Clear Python bytecache
+        for d in ROOT_DIR.rglob("__pycache__"):
+            if d.is_dir():
+                import shutil
+                shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+    UPDATE_FLAG.unlink(missing_ok=True)
+
+
+def _check_for_updates_manual():
+    """Run git fetch and return True if updates are available."""
+    try:
+        subprocess.run(
+            ["git", "fetch", "--prune"],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            timeout=30,
+        )
+        result = subprocess.run(
+            ["git", "status", "-uno"],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if "behind" in result.stdout:
+            from datetime import date
+            UPDATE_FLAG.write_text(date.today().isoformat())
+            return True
+        return False
+    except Exception:
+        return False
+
+
+if UPDATE_FLAG.exists():
+    @st.dialog("Update Available", width="small")
+    def _update_dialog():
+        st.markdown("A new version of CNA Web App is available.")
+        st.markdown("Please update to continue.")
+        if st.button("Update Now", type="primary", use_container_width=True):
+            with st.spinner("Updating..."):
+                _apply_update()
+            st.success("Updated! Restarting...")
+            import time
+            time.sleep(1)
+            st.rerun()
+
+    _update_dialog()
+    st.stop()
+
 
 is_admin_user = utils.is_current_user_admin()
 LOGGER.info("Admin access check | user='%s' is_admin=%s", utils.get_os_user(), is_admin_user)
@@ -58,6 +127,16 @@ with st.sidebar:
         with st.expander(section_name, expanded=section_active):
             for page_obj in section_pages:
                 st.page_link(page_obj, use_container_width=True)
+
+    st.divider()
+    with st.popover("Settings", use_container_width=True):
+        if st.button("Check for Updates", use_container_width=True):
+            with st.spinner("Checking..."):
+                has_update = _check_for_updates_manual()
+            if has_update:
+                st.rerun()
+            else:
+                st.success("You're up to date!")
 
 LOGGER.info("Navigation initialized | current_page='%s'", navigation.title)
 navigation.run()

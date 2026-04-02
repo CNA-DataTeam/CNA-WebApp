@@ -64,96 +64,81 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 )
 
 REM ============================================================
-REM SYNC CONFIG FROM NETWORK (FAIL-OPEN)
+REM EDGE PROFILE SETUP
 REM ============================================================
-set "NETWORK_CONFIG=\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.py"
-set "LOCAL_CONFIG=%ROOT_DIR%\config.py"
+set "EDGE_PROFILE=CNA-WebApp-Edge"
+set "EDGE_DATA=%TEMP%\%EDGE_PROFILE%"
+set "EDGE_FLAGS=--user-data-dir="%EDGE_DATA%" --no-first-run --disable-features=msEdgeOnRampFRE"
 
-call :LOG "Syncing config.py from network..."
-if exist "%NETWORK_CONFIG%" (
-  copy /Y "%NETWORK_CONFIG%" "%LOCAL_CONFIG%" >nul 2>&1
-  if errorlevel 1 (
-    call :LOG "WARNING: config.py copy failed. Using existing local copy."
+REM ============================================================
+REM CHECK IF ALREADY RUNNING
+REM ============================================================
+netstat -ano | findstr /R /C:":%STREAMLIT_PORT% .*LISTENING" >nul
+if %ERRORLEVEL%==0 (
+  call :LOG "App already running. Opening browser."
+  start "" msedge --app="http://localhost:%STREAMLIT_PORT%" %EDGE_FLAGS%
+  echo.>> "%LOG_FILE%"
+  exit /b 0
+)
+
+REM ============================================================
+REM OPEN SPLASH SCREEN IMMEDIATELY
+REM ============================================================
+if exist "%CODE_DIR%\splash.html" (
+  call :LOG "Opening splash screen..."
+  start "" msedge --app="file:///%CODE_DIR:\=/%/splash.html" %EDGE_FLAGS%
+)
+
+REM ============================================================
+REM DECRYPT CONFIG (FAIL-OPEN — keeps existing config.py if decrypt fails)
+REM ============================================================
+set "LOCAL_CONFIG=%ROOT_DIR%\config.py"
+set "CONFIG_ENC=%CODE_DIR%\config.enc"
+set "KEY_FILE=%CODE_DIR%\config.key"
+set "NETWORK_KEY=\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.key"
+
+REM Copy key from network share if missing locally
+if not exist "%KEY_FILE%" (
+  if exist "%NETWORK_KEY%" (
+    call :LOG "Copying config key from network share..."
+    copy /Y "%NETWORK_KEY%" "%KEY_FILE%" >nul 2>&1
+  )
+)
+
+if exist "%CONFIG_ENC%" (
+  if exist "%KEY_FILE%" (
+    call :LOG "Decrypting config..."
+    "%VENV_DIR%\Scripts\python.exe" "%CODE_DIR%\config_manager.py" decrypt >> "%LOG_FILE%" 2>&1
+    if errorlevel 1 (
+      call :LOG "WARNING: Config decryption failed. Using existing local copy."
+    ) else (
+      call :LOG "Config decrypted successfully."
+    )
   ) else (
-    call :LOG "config.py updated from network."
+    call :LOG "WARNING: Config key not found. Using existing local copy."
   )
 ) else (
-  call :LOG "WARNING: Network config not reachable. Using existing local copy."
+  call :LOG "WARNING: config.enc not found. Using existing local copy."
 )
 
 if not exist "%LOCAL_CONFIG%" (
-  echo ERROR: config.py not found and network is unreachable. Cannot start app.
-  call :LOG "ERROR: config.py missing and network unreachable."
+  echo ERROR: config.py not found and could not be decrypted.
+  call :LOG "ERROR: config.py missing and decryption unavailable."
   pause
   echo.>> "%LOG_FILE%"
   exit /b 1
 )
 
 REM ============================================================
-REM OPTIONAL GIT UPDATE (FAIL-OPEN)
+REM BACKGROUND GIT UPDATE CHECK
 REM ============================================================
-call :LOG "Starting Git check..."
-
-where git >nul 2>&1
-if errorlevel 1 (
-  call :LOG "Git not available. Skipping updates."
-  goto LAUNCH
-)
-
-if not exist "%ROOT_DIR%\.git" (
-  call :LOG "Not a git repo. Skipping updates."
-  goto LAUNCH
-)
-
-pushd "%ROOT_DIR%" >> "%LOG_FILE%" 2>&1
-
-call :LOG "Testing Git remote..."
-git ls-remote --heads origin >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-  call :LOG "Git remote/auth failed. Skipping updates."
-  popd
-  goto LAUNCH
-)
-
-call :LOG "Fetching updates..."
-git fetch --prune >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-  call :LOG "Git fetch failed. Skipping updates."
-  popd
-  goto LAUNCH
-)
-
-git status -uno | findstr /C:"behind" >nul
-if errorlevel 1 (
-  call :LOG "No updates detected."
-) else (
-  call :LOG "Updates detected. Pulling..."
-  git pull --ff-only >> "%LOG_FILE%" 2>&1
-  if errorlevel 1 (
-    call :LOG "Git pull failed. Using local version."
-  ) else (
-    call :LOG "Git pull successful."
-    call :LOG "Clearing Python bytecode cache..."
-    for /d /r "%ROOT_DIR%" %%d in (__pycache__) do @if exist "%%d" rd /s /q "%%d" >nul 2>&1
-    call :LOG "Bytecode cache cleared."
-  )
-)
-
-popd
+call :LOG "Starting background update check..."
+start /B "" "%VENV_DIR%\Scripts\pythonw.exe" "%CODE_DIR%\check_updates.py"
 
 REM ============================================================
 REM LAUNCH STREAMLIT
 REM ============================================================
-:LAUNCH
 call :LOG "Launching Streamlit..."
-
-netstat -ano | findstr /R /C:":%STREAMLIT_PORT% .*LISTENING" >nul
-if %ERRORLEVEL%==0 (
-  call :LOG "App already running. Opening browser."
-  start "" msedge --app="http://localhost:%STREAMLIT_PORT%"
-  echo.>> "%LOG_FILE%"
-  exit /b 0
-)
 
 "%VENV_DIR%\Scripts\python.exe" -c "import streamlit" >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
@@ -191,14 +176,8 @@ start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "%APP_FILE%" ^
   --browser.gatherUsageStats=false ^
   >> "%LOG_FILE%" 2>&1
 
-REM Open splash (or app directly) in isolated Edge profile
-set "EDGE_PROFILE=CNA-WebApp-Edge"
-set "EDGE_DATA=%TEMP%\%EDGE_PROFILE%"
-set "EDGE_FLAGS=--user-data-dir="%EDGE_DATA%" --no-first-run --disable-features=msEdgeOnRampFRE"
-if exist "%CODE_DIR%\splash.html" (
-  call :LOG "Opening splash screen..."
-  start "" msedge --app="file:///%CODE_DIR:\=/%/splash.html" %EDGE_FLAGS%
-) else (
+REM If splash wasn't available earlier, open app directly now
+if not exist "%CODE_DIR%\splash.html" (
   timeout /t 2 >nul
   call :LOG "Opening app..."
   start "" msedge --app="http://localhost:%STREAMLIT_PORT%" %EDGE_FLAGS%

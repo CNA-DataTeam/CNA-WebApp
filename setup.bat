@@ -122,6 +122,34 @@ if errorlevel 1 (
 )
 
 REM ============================================================
+REM DECRYPT CONFIG
+REM ============================================================
+set "KEY_FILE=%CODE_DIR%\config.key"
+set "NETWORK_KEY=\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.key"
+set "CONFIG_ENC=%CODE_DIR%\config.enc"
+
+if not exist "%KEY_FILE%" (
+  if exist "%NETWORK_KEY%" (
+    echo Copying config key from network share...
+    copy /Y "%NETWORK_KEY%" "%KEY_FILE%" >nul 2>&1
+  ) else (
+    echo WARNING: Config key not found on network share.
+  )
+)
+
+if exist "%CONFIG_ENC%" (
+  if exist "%KEY_FILE%" (
+    echo Decrypting config...
+    "%VENV_DIR%\Scripts\python.exe" "%CODE_DIR%\config_manager.py" decrypt
+    if errorlevel 1 (
+      echo WARNING: Config decryption failed.
+    )
+  )
+) else (
+  echo WARNING: config.enc not found in repo.
+)
+
+REM ============================================================
 REM CREATE DESKTOP SHORTCUT
 REM ============================================================
 set "SHORTCUT_PATH=%ROOT_DIR%\CNA Web App.lnk"
