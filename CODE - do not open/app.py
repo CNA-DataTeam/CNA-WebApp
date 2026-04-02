@@ -103,30 +103,33 @@ LOGGER.info("Admin access check | user='%s' is_admin=%s", utils.get_os_user(), i
 
 home_entry = page_registry.get_home_page()
 visible_sections = page_registry.get_visible_sections(is_admin_user)
-home_page = st.Page(home_entry.path, title=home_entry.title, icon=home_entry.icon)
+home_page = st.Page(home_entry.path, title=home_entry.title)
 pages = {"": [home_page]}
+# Track icons separately — passing icon to st.Page() overrides the favicon
+page_icons: dict[st.Page, str] = {home_page: home_entry.icon}
 sidebar_sections: list[tuple[str, list[st.Page]]] = []
 for section_name, entries in visible_sections:
-    section_pages = [
-        st.Page(entry.path, title=entry.title, icon=entry.icon)
-        for entry in entries
-    ]
+    section_pages = []
+    for entry in entries:
+        page = st.Page(entry.path, title=entry.title)
+        page_icons[page] = entry.icon
+        section_pages.append(page)
     pages[section_name] = section_pages
     sidebar_sections.append((section_name, section_pages))
 
 # Hidden pages for URL routing only (not shown in sidebar)
 pages["_routing"] = [
-    st.Page("pages/da-task-tracker.py", title="Task Tracker", icon="\U0001F552"),
+    st.Page("pages/da-task-tracker.py", title="Task Tracker"),
 ]
 
 navigation = st.navigation(pages, position="hidden")
 with st.sidebar:
-    st.page_link(home_page, use_container_width=True)
+    st.page_link(home_page, icon=page_icons[home_page], use_container_width=True)
     for section_name, section_pages in sidebar_sections:
         section_active = any(p.title == navigation.title for p in section_pages)
         with st.expander(section_name, expanded=section_active):
             for page_obj in section_pages:
-                st.page_link(page_obj, use_container_width=True)
+                st.page_link(page_obj, icon=page_icons[page_obj], use_container_width=True)
 
     st.divider()
     with st.popover("Settings", use_container_width=True):

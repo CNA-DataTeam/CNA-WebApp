@@ -437,6 +437,8 @@ def get_app_icon():
     return str(icon_path) if icon_path.exists() else None
 
 
+
+
 def get_registry_page_title(source_file: str | Path, fallback_title: str) -> str:
     """
     Resolve page title from page_registry using the source file path.

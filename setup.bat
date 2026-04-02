@@ -150,13 +150,30 @@ if exist "%CONFIG_ENC%" (
 )
 
 REM ============================================================
+REM BUILD LAUNCHER EXE (if missing and PyInstaller is available)
+REM ============================================================
+set "EXE_FILE=%ROOT_DIR%\CNA Web App.exe"
+if not exist "%EXE_FILE%" (
+  "%VENV_DIR%\Scripts\python.exe" -c "import PyInstaller" >nul 2>&1
+  if not errorlevel 1 (
+    echo Building launcher exe...
+    "%VENV_DIR%\Scripts\pyinstaller.exe" --onefile --noconsole --icon="%ROOT_DIR%\cna_icon.ico" --name="CNA Web App" --distpath="%ROOT_DIR%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%CODE_DIR%\stub_launcher.py" >nul 2>&1
+  )
+)
+
+REM ============================================================
 REM CREATE DESKTOP SHORTCUT
 REM ============================================================
 set "SHORTCUT_PATH=%ROOT_DIR%\CNA Web App.lnk"
 set "ICON_FILE=%ROOT_DIR%\cna_icon.ico"
 
-echo Creating shortcut...
-powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='wscript.exe'; $s.Arguments='\"%ROOT_DIR%\StartApp.vbs\"'; $s.WorkingDirectory='%ROOT_DIR%'; if(Test-Path '%ICON_FILE%'){$s.IconLocation='%ICON_FILE%,0'}; $s.WindowStyle=1; $s.Save()" >nul 2>&1
+if exist "%EXE_FILE%" (
+  echo Creating shortcut to CNA Web App.exe...
+  powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='%EXE_FILE%'; $s.WorkingDirectory='%ROOT_DIR%'; if(Test-Path '%ICON_FILE%'){$s.IconLocation='%ICON_FILE%,0'}; $s.WindowStyle=1; $s.Save()" >nul 2>&1
+) else (
+  echo Creating shortcut to StartApp.vbs fallback...
+  powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='wscript.exe'; $s.Arguments='\"%ROOT_DIR%\StartApp.vbs\"'; $s.WorkingDirectory='%ROOT_DIR%'; if(Test-Path '%ICON_FILE%'){$s.IconLocation='%ICON_FILE%,0'}; $s.WindowStyle=1; $s.Save()" >nul 2>&1
+)
 if exist "%SHORTCUT_PATH%" (
   echo Shortcut created: CNA Web App.lnk
   echo Pin it to your taskbar by double-clicking it, then right-clicking its taskbar icon.

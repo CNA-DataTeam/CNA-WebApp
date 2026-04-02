@@ -6,9 +6,9 @@
 ;
 ; What this installer does:
 ;   1. Checks for Git — installs via winget if missing
-;   2. Clones the CNA-WebApp repo to the chosen directory
-;   3. Runs setup.bat (installs uv, Python 3.11, venv, dependencies, shortcut)
-;   4. Copies config.py from the network share
+;   2. Clones the CNA-WebApp repo to the chosen directory (includes CNA Web App.exe)
+;   3. Runs setup.bat (installs uv, Python 3.11, venv, dependencies, creates shortcut to .exe)
+;   4. Copies config.key from the network share
 ; ============================================================
 
 #define MyAppName "CNA Web App"
@@ -66,8 +66,18 @@ begin
 end;
 
 // -------------------------------------------------------
-// Helper: update status label on the installing page
+// Helper: update status label and progress bar
 // -------------------------------------------------------
+procedure SetProgress(const Percent: Integer);
+begin
+  with WizardForm.ProgressGauge do
+  begin
+    Min := 0;
+    Max := 100;
+    Position := Percent;
+  end;
+end;
+
 procedure UpdateStatus(const Msg: String);
 begin
   if StatusLabel <> nil then
@@ -131,14 +141,17 @@ begin
     Exit;
 
   InstallDir := ExpandConstant('{app}');
+  SetProgress(0);
 
   // ---- Step 1: Git ----
   UpdateStatus('Checking for Git...');
+  SetProgress(2);
   GitInstalled := CommandExists('git');
 
   if not GitInstalled then
   begin
     UpdateStatus('Installing Git via winget (this may take a minute)...');
+    SetProgress(5);
     ResultCode := RunAndWait('cmd.exe',
       '/c winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements',
       '');
@@ -165,6 +178,7 @@ begin
   end;
 
   // ---- Step 2: Clone repo ----
+  SetProgress(15);
   if FileExists(InstallDir + '\setup.bat') then
   begin
     UpdateStatus('Existing installation detected — pulling latest...');
@@ -178,6 +192,7 @@ begin
   else
   begin
     UpdateStatus('Cloning CNA Web App from GitHub...');
+    SetProgress(20);
     if GitInstalled and CommandExists('git') then
       RunAndWait('cmd.exe',
         '/c git clone "{#MyRepoURL}" "' + InstallDir + '"', '')
@@ -196,16 +211,17 @@ begin
   end;
 
   // ---- Step 3: Run setup.bat ----
+  SetProgress(35);
   UpdateStatus('Running setup (installing Python, dependencies, creating shortcut)...');
   SetupBat := InstallDir + '\setup.bat';
-  // Run setup.bat in its own visible window so user can see progress
   Exec('cmd.exe', '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '"',
-       InstallDir, SW_SHOW, ewWaitUntilTerminated, ResultCode);
+       InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if ResultCode <> 0 then
     Log('setup.bat returned non-zero exit code: ' + IntToStr(ResultCode));
 
   // ---- Step 4: Copy config key ----
+  SetProgress(90);
   UpdateStatus('Copying encryption key from network share...');
   ConfigSrc := '{#MyNetworkKey}';
   ConfigDst := InstallDir + '\CODE - do not open\config.key';
@@ -220,6 +236,7 @@ begin
   else
     Log('WARNING: Network key not found at ' + ConfigSrc + '. Key will be copied on first launch.');
 
+  SetProgress(100);
   UpdateStatus('Installation complete!');
 end;
 
@@ -233,7 +250,7 @@ begin
 end;
 
 [Icons]
-Name: "{userprograms}\{#MyAppName}"; Filename: "wscript.exe"; Parameters: """{app}\StartApp.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\cna_icon.ico"; Comment: "Launch CNA Web App"
+Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\CNA Web App.exe"; WorkingDir: "{app}"; IconFilename: "{app}\cna_icon.ico"; Comment: "Launch CNA Web App"
 
 [Run]
-Filename: "wscript.exe"; Parameters: """{app}\StartApp.vbs"""; WorkingDir: "{app}"; Description: "Launch CNA Web App"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\CNA Web App.exe"; WorkingDir: "{app}"; Description: "Launch CNA Web App"; Flags: nowait postinstall skipifsilent

@@ -40,6 +40,7 @@ logs/
 # -------------------------------------------------
 *.lnk
 installer-output/
+CODE - do not open/installer/build/
 CODE - do not open/.last_update_check
 CODE - do not open/.update_available
 

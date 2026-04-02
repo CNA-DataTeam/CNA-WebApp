@@ -9,3 +9,4 @@ openpyxl
 streamlit-autorefresh
 pyadomd
 cryptography
+pywebview

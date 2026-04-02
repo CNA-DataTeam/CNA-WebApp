@@ -64,32 +64,6 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 )
 
 REM ============================================================
-REM EDGE PROFILE SETUP
-REM ============================================================
-set "EDGE_PROFILE=CNA-WebApp-Edge"
-set "EDGE_DATA=%TEMP%\%EDGE_PROFILE%"
-set "EDGE_FLAGS=--user-data-dir="%EDGE_DATA%" --no-first-run --disable-features=msEdgeOnRampFRE"
-
-REM ============================================================
-REM CHECK IF ALREADY RUNNING
-REM ============================================================
-netstat -ano | findstr /R /C:":%STREAMLIT_PORT% .*LISTENING" >nul
-if %ERRORLEVEL%==0 (
-  call :LOG "App already running. Opening browser."
-  start "" msedge --app="http://localhost:%STREAMLIT_PORT%" %EDGE_FLAGS%
-  echo.>> "%LOG_FILE%"
-  exit /b 0
-)
-
-REM ============================================================
-REM OPEN SPLASH SCREEN IMMEDIATELY
-REM ============================================================
-if exist "%CODE_DIR%\splash.html" (
-  call :LOG "Opening splash screen..."
-  start "" msedge --app="file:///%CODE_DIR:\=/%/splash.html" %EDGE_FLAGS%
-)
-
-REM ============================================================
 REM DECRYPT CONFIG (FAIL-OPEN — keeps existing config.py if decrypt fails)
 REM ============================================================
 set "LOCAL_CONFIG=%ROOT_DIR%\config.py"
@@ -136,10 +110,8 @@ call :LOG "Starting background update check..."
 start /B "" "%VENV_DIR%\Scripts\pythonw.exe" "%CODE_DIR%\check_updates.py"
 
 REM ============================================================
-REM LAUNCH STREAMLIT
+REM PRE-LAUNCH VALIDATION
 REM ============================================================
-call :LOG "Launching Streamlit..."
-
 "%VENV_DIR%\Scripts\python.exe" -c "import streamlit" >> "%LOG_FILE%" 2>&1
 if errorlevel 1 (
   call :LOG "ERROR: Streamlit not installed."
@@ -169,34 +141,18 @@ if errorlevel 1 (
 )
 call :LOG "startup.py completed."
 
-call :LOG "Starting server..."
-start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "%APP_FILE%" ^
-  --server.port=%STREAMLIT_PORT% ^
-  --server.headless=true ^
-  --browser.gatherUsageStats=false ^
-  >> "%LOG_FILE%" 2>&1
-
-REM If splash wasn't available earlier, open app directly now
-if not exist "%CODE_DIR%\splash.html" (
-  timeout /t 2 >nul
-  call :LOG "Opening app..."
-  start "" msedge --app="http://localhost:%STREAMLIT_PORT%" %EDGE_FLAGS%
+REM ============================================================
+REM LAUNCH APP (unless --no-launch was passed by the .exe stub)
+REM ============================================================
+if "%~1"=="--no-launch" (
+  call :LOG "Setup complete (no-launch mode, caller will handle app launch)."
+  echo.>> "%LOG_FILE%"
+  exit /b 0
 )
 
-REM Wait for Edge to start, then poll until all its windows are closed
-call :LOG "Monitoring app window..."
-timeout /t 5 >nul
-:WAIT_CLOSE
-timeout /t 3 >nul
-wmic process where "name='msedge.exe' and commandline like '%%%EDGE_PROFILE%%%'" get processid 2>nul | findstr /r "[0-9]" >nul
-if not errorlevel 1 goto WAIT_CLOSE
-
-REM Edge closed — stop Streamlit
-call :LOG "App window closed. Stopping server..."
-for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R ":%STREAMLIT_PORT% .*LISTENING" 2^>nul') do (
-  taskkill /F /PID %%p >nul 2>&1
-)
-call :LOG "Server stopped."
+call :LOG "Launching app..."
+start "" "%VENV_DIR%\Scripts\pythonw.exe" "%CODE_DIR%\launch_app.py"
+call :LOG "App launched."
 echo.>> "%LOG_FILE%"
 exit /b 0
 
