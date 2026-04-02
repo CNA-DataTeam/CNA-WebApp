@@ -1,16 +1,16 @@
-# Logistics Support Task Tracker
+# CNA Web App — Source Code
 
 ## Overview
-The **Logistics Support Task Tracker** is a local Streamlit application used to track logistics support work. Users can:
-- Select a task and cadence (Daily / Weekly / Periodic).
-- Optionally associate a task with an account.
-- Track elapsed time (start / pause / resume / end).
-- Add notes.
-- Upload task records to a shared data location.
-- Run packaging estimates from item/quantity lists with SSAS + API + rule-based fallback logic.
+Internal Streamlit application for Clark National Accounts. Features include:
+- Task tracking with live activity (Logistics Support and Data & Analytics versions)
+- Task analytics dashboards
+- Task, target, and user administration
+- Packaging estimation with shipping calculator API
+- Time allocation entry and export
+- FedEx address validation review
+- Stocking agreement generation (Word/PDF)
 
 ## Documentation
-Use the documentation in `docs/` for setup, troubleshooting, and the proposed document structure:
 - [Documentation index](docs/README.md)
 - [Setup & local use](docs/SETUP.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)

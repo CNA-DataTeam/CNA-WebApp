@@ -86,19 +86,34 @@ Main source folder:
 
 ### Setup
 `setup.bat`:
-- Validates `python` on PATH
-- Creates `.venv` if missing
-- Installs dependencies from `CODE - do not open/requirements.txt`
+- Finds or installs `uv` (Astral's Python package manager)
+- Installs Python 3.11 via `uv python install 3.11` if not already present
+- Creates `.venv` with `uv venv --python 3.11` if missing
+- Installs dependencies from `CODE - do not open/requirements.txt` using `uv pip install --link-mode copy` (copy mode required for OneDrive compatibility)
+- Creates a `CNA Web App.lnk` shortcut using `cna_icon.ico`
 
 ### App launch
 `StartApp.bat`:
 - Sets `ROOT_DIR`, `CODE_DIR`, `APP_FILE`, `STARTUP_FILE`
 - Adds root and code directories to `PYTHONPATH`
+- Syncs `config.py` from the network share (`\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.py`)
 - Writes launcher logs to shared logs if available, else local fallback
-- Optionally checks git remote, fetches, and fast-forward pulls
+- Checks git remote, fetches, and fast-forward pulls
+- Clears `__pycache__` directories after pull
 - Runs `startup.py`
 - Starts Streamlit with `pythonw -m streamlit run ... --server.port=8501`
-- Opens `http://localhost:8501`
+- Opens in Microsoft Edge app mode (`msedge --app=...`) for a standalone window without browser chrome
+
+### Force close
+`ForceCloseApp.bat`:
+- Finds the process listening on port 8501 via `netstat`
+- Kills it with `taskkill`
+
+### Installer
+`CODE - do not open/installer/CNA-WebApp-Setup.iss`:
+- Inno Setup script that compiles to a standalone `.exe` installer
+- Installs Git via winget if missing, clones the repo, runs `setup.bat`, copies `config.py`
+- Project files install to `%LOCALAPPDATA%\CNA-WebApp`; shortcut location is user-chosen
 
 ### Startup job
 `CODE - do not open/startup.py`:
@@ -124,9 +139,11 @@ This means:
 - The home page cards and sidebar both depend on the same registry
 - Admin-only visibility is controlled there, but page-level access checks still matter
 
+Sidebar sections use `st.expander()` for collapsible dropdowns, with the active section auto-expanded.
+
 Current sections in `page_registry.py`:
 - `Admin Tools`
-- `Logistics Support`
+- `Task Tracker`
 - `Work in Progress`
 
 Current registered pages:
@@ -134,12 +151,16 @@ Current registered pages:
 - `pages/tasks-management.py`
 - `pages/admin-logs.py`
 - `pages/fedex-address-validation-management.py`
-- `pages/task-tracker.py`
-- `pages/task-tracker-analytics.py`
+- `pages/task-tracker.py` (combined Logistics Support and Data & Analytics with version toggle)
+- `pages/da-task-tracker.py` (thin wrapper providing `/da-task-tracker` URL for D&A version)
+- `pages/task-tracker-analytics.py` (combined analytics with version toggle)
 - `pages/packaging-estimator.py`
 - `pages/time-allocation-tool.py`
 - `pages/fedex-address-validator.py`
 - `pages/stocking-agreement-generator.py`
+
+Hidden pages (registered in `app.py` for URL routing, not shown in sidebar):
+- `pages/da-task-tracker.py` — provides `/da-task-tracker` URL so the D&A version persists on page refresh
 
 ## 6. Shared Styling, Fonts, And UI Conventions
 
@@ -152,7 +173,7 @@ Current UI font stack:
 
 Shared UI conventions:
 - Every page usually calls:
-  - `st.set_page_config(...)`
+  - `st.set_page_config(..., page_icon=utils.get_app_icon())` — custom icon on all pages
   - `utils.render_app_logo()`
   - `st.markdown(utils.get_global_css(), unsafe_allow_html=True)`
   - `utils.render_page_header(PAGE_TITLE)`
@@ -164,9 +185,11 @@ Shared UI conventions:
 - Task tracker uses a blinking timer colon and a pulsing live-activity dot
 - Analytics KPI cards use a shared gray card style
 
-Brand asset:
+Brand assets:
 - Logo path comes from `config.LOGO_PATH`
 - `utils.render_app_logo()` uses `st.logo(...)` when available
+- `utils.get_app_icon()` returns the path to `icon.png` (root) for use as favicon/page icon
+- `cna_icon.ico` (root) is used for the Windows shortcut icon
 
 Word template font details:
 - `stocking_agreement_service.py` uses `DEFAULT_FONT_NAME = "Sofia Pro"`
@@ -404,17 +427,25 @@ What it does:
 Key behavior:
 - It preserves source row IDs while filtering so writes map back to the original dataframe correctly
 
-### Task Tracker (`pages/task-tracker.py`)
+### Task Tracker (`pages/task-tracker.py` and `pages/da-task-tracker.py`)
 
 Purpose:
-- Main day-to-day task timing page
+- Main day-to-day task timing page, combining Logistics Support and Data & Analytics versions
+
+Architecture:
+- Both versions live in `task-tracker.py` with a version toggle at the top
+- LS session state keys are unprefixed; DA keys are prefixed with `da_`
+- `da-task-tracker.py` is a thin wrapper that sets `_da_page_active` in session state and exec's `task-tracker.py` (with `encoding="utf-8"`)
+- Version toggle buttons use `st.switch_page()` to navigate between `/task-tracker` (LS) and `/da-task-tracker` (DA)
+- The version is determined on each render from which page file is active, not from persistent session state
 
 What it does:
 - Loads:
   - current user and full name
-  - covering-for user list from `users.parquet`
+  - covering-for user list from `users.parquet` (LS) or primary stakeholder text input (DA)
   - accounts from daily accounts parquet
-  - active tasks from `tasks.parquet`
+  - active tasks from `tasks.parquet` (LS) or free-text task input (DA)
+  - department dropdown (DA only)
 - Supports timer states:
   - idle
   - running
@@ -435,6 +466,12 @@ What it does:
   - other users' live activity
   - today's completed activity
 
+DA-specific features:
+- Today's Activity uses `st.data_editor` with a Delete checkbox column for deleting own tasks
+- Partially complete tasks can be resumed: selecting one and clicking "Resume task" deletes the old entry and pre-populates all fields (task name, account, stakeholder, department, notes)
+- Resume only available when tracker is idle, task is own, and task is marked partially complete
+- DA parquet schema includes a `Department` column (defined as `DA_PARQUET_SCHEMA`)
+
 Timing behavior:
 - Uses UTC internally
 - Displays Eastern time to users
@@ -447,8 +484,9 @@ Live updates:
 
 Persistence behavior:
 - Completed uploads write one parquet file into the partitioned completed-task lake
-- Upload also attempts `utils.sync_tasks_parquet_targets()`
+- LS upload also attempts `utils.sync_tasks_parquet_targets()` (DA does not)
 - Archived tasks go into a separate per-user archive folder
+- LS and DA use separate directory constants (`LS_COMPLETED_TASKS_DIR` / `DA_COMPLETED_TASKS_DIR`, etc.)
 
 ### Tasks Analytics (`pages/task-tracker-analytics.py`)
 
@@ -694,8 +732,8 @@ When adding features, try to preserve this style:
 
 ## 13. Known Quirks And Gotchas
 
-1. `config.py` is in `.gitignore`.
-   The local file exists here, but the ignore rule signals that environment-specific values may differ between machines.
+1. `config.py` is in `.gitignore` and auto-synced from the network share on each launch via `StartApp.bat`.
+   The repo is public so config.py must never be committed.
 
 2. `config.json` is effectively legacy.
    Do not assume packaging settings come from there.
@@ -717,7 +755,7 @@ When adding features, try to preserve this style:
 ### Add a new page
 1. Create `CODE - do not open/pages/<new-page>.py`
 2. Follow the standard page pattern:
-   - `st.set_page_config(...)`
+   - `st.set_page_config(..., page_icon=utils.get_app_icon())`
    - `utils.render_app_logo()`
    - `st.markdown(utils.get_global_css(), unsafe_allow_html=True)`
    - `utils.render_page_header(PAGE_TITLE)`
