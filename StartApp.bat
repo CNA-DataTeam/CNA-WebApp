@@ -107,6 +107,9 @@ if errorlevel 1 (
     call :LOG "Git pull failed. Using local version."
   ) else (
     call :LOG "Git pull successful."
+    call :LOG "Clearing Python bytecode cache..."
+    for /d /r "%ROOT_DIR%" %%d in (__pycache__) do @if exist "%%d" rd /s /q "%%d" >nul 2>&1
+    call :LOG "Bytecode cache cleared."
   )
 )
 

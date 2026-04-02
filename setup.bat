@@ -22,6 +22,30 @@ if errorlevel 1 (
   exit /b 1
 )
 
+for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set "PY_VER=%%v"
+for /f "tokens=1,2 delims=." %%a in ("%PY_VER%") do (
+  set "PY_MAJOR=%%a"
+  set "PY_MINOR=%%b"
+)
+if not "%PY_MAJOR%"=="3" (
+  echo WARNING: Python 3.11 is required. Found Python %PY_VER%.
+  echo The app may not work correctly. Press any key to continue anyway, or close this window to cancel.
+  pause
+  goto VENV
+)
+if %PY_MINOR% LSS 11 (
+  echo WARNING: Python 3.11 is required. Found Python %PY_VER%.
+  echo The app may not work correctly. Press any key to continue anyway, or close this window to cancel.
+  pause
+)
+if %PY_MINOR% GTR 11 (
+  echo WARNING: Python 3.11 is required. Found Python %PY_VER%.
+  echo The app may not work correctly. Press any key to continue anyway, or close this window to cancel.
+  pause
+)
+
+:VENV
+
 REM ============================================================
 REM CREATE VENV (IF MISSING)
 REM ============================================================
