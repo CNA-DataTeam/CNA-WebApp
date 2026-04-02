@@ -114,7 +114,7 @@ if not exist "%REQ_FILE%" (
 
 echo Installing dependencies...
 set "VIRTUAL_ENV=%VENV_DIR%"
-"%UV_EXE%" pip install -r "%REQ_FILE%"
+"%UV_EXE%" pip install --link-mode copy -r "%REQ_FILE%"
 if errorlevel 1 (
   echo ERROR: Dependency installation failed.
   pause
