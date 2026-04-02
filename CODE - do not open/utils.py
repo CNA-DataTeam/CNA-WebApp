@@ -431,6 +431,12 @@ def _registry_title_map() -> dict[str, str]:
     return mapping
 
 
+def get_app_icon():
+    """Return path to the app icon for st.set_page_config, or None if missing."""
+    icon_path = Path(__file__).resolve().parent.parent / "icon.png"
+    return str(icon_path) if icon_path.exists() else None
+
+
 def get_registry_page_title(source_file: str | Path, fallback_title: str) -> str:
     """
     Resolve page title from page_registry using the source file path.

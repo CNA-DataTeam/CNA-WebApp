@@ -65,7 +65,7 @@ DEPARTMENT_OPTIONS = [
 # ============================================================
 # PAGE CONFIG
 # ============================================================
-st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon=utils.get_app_icon())
 utils.render_app_logo()
 utils.log_page_open_once("task_tracker_page", LOGGER)
 utils.log_page_open_once("da_task_tracker_page", LOGGER)
@@ -832,8 +832,9 @@ def da_live_activity_section():
 # ============================================================
 # VERSION TOGGLE
 # ============================================================
-if "task_tracker_version" not in st.session_state:
-    st.session_state.task_tracker_version = "logistics"
+# Determine version from which page is active (da-task-tracker.py sets the flag)
+_is_da_page = st.session_state.pop("_da_page_active", False)
+st.session_state.task_tracker_version = "da" if _is_da_page else "logistics"
 
 utils.render_page_header(PAGE_TITLE)
 
@@ -845,8 +846,7 @@ with _v_ls:
         type="primary" if st.session_state.task_tracker_version == "logistics" else "secondary",
         key="tracker_v_ls",
     ):
-        st.session_state.task_tracker_version = "logistics"
-        st.rerun()
+        st.switch_page("pages/task-tracker.py")
 with _v_da:
     if st.button(
         "Data & Analytics",
@@ -854,8 +854,7 @@ with _v_da:
         type="primary" if st.session_state.task_tracker_version == "da" else "secondary",
         key="tracker_v_da",
     ):
-        st.session_state.task_tracker_version = "da"
-        st.rerun()
+        st.switch_page("pages/da-task-tracker.py")
 
 # ============================================================
 # LOGISTICS SUPPORT — UI
@@ -1087,6 +1086,10 @@ else:
         LOGGER.info("Showing DA archived-task toast.")
         st.toast("Task archived")
         st.session_state.da_archived = False
+    if st.session_state.get("da_task_resumed"):
+        LOGGER.info("Showing DA task-resumed toast.")
+        st.toast("Task resumed — fill in any details and press Start", icon="▶️")
+        st.session_state.da_task_resumed = False
 
     spacer_l, left_col, _, mid_col, _, right_col, spacer_r = st.columns([0.4, 4, 0.2, 4, 0.2, 4, 0.4])
     with left_col:
@@ -1240,10 +1243,20 @@ else:
         recent_df = utils.load_recent_tasks(DA_COMPLETED_TASKS_DIR, user_key=user_key, limit=50)
 
     own_tasks_df = load_own_tasks_with_paths(DA_COMPLETED_TASKS_DIR, user_key)
-    own_file_map: dict[str, str] = {}
+    own_task_data_map: dict[str, dict] = {}
     if not own_tasks_df.empty and "StartTimestampUTC" in own_tasks_df.columns:
         for _, orow in own_tasks_df.iterrows():
-            own_file_map[str(orow["StartTimestampUTC"])] = str(orow["_file_path"])
+            ts_key = str(orow["StartTimestampUTC"])
+            pc_val = orow.get("PartiallyComplete", False)
+            own_task_data_map[ts_key] = {
+                "file_path": str(orow["_file_path"]),
+                "task_name": str(orow.get("TaskName") or ""),
+                "account": str(orow.get("CompanyGroup") or ""),
+                "stakeholder": str(orow.get("CoveringFor") or ""),
+                "department": str(orow.get("Department") or ""),
+                "notes": str(orow.get("Notes") or ""),
+                "partially_complete": pc_val is True or pc_val == True,
+            }
 
     if not recent_df.empty:
         recent_df["Duration"] = recent_df["DurationSeconds"].apply(utils.format_hhmmss)
@@ -1261,14 +1274,15 @@ else:
         for _, rrow in recent_df.iterrows():
             is_own = str(rrow.get("UserLogin", "")).strip().lower() == user_login.lower()
             ts_key = str(rrow.get("StartTimestampUTC"))
-            row_file_paths.append(own_file_map.get(ts_key, "") if is_own else "")
+            task_data = own_task_data_map.get(ts_key, {})
+            row_file_paths.append(task_data.get("file_path", "") if is_own else "")
         display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"]].copy()
         display_df.insert(0, "Delete", False)
         edited_df = st.data_editor(
             display_df, hide_index=True, width="stretch",
             disabled=["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"],
             column_config={
-                "Delete": st.column_config.CheckboxColumn("🗑️", width="small", default=False),
+                "Delete": st.column_config.CheckboxColumn(" ", width=25, default=False),
                 "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", disabled=True, width="small"),
                 "Notes": st.column_config.TextColumn("Notes", width="large"),
                 "Uploaded": st.column_config.TextColumn("Uploaded", width="small"),
@@ -1280,16 +1294,48 @@ else:
             non_own = len(checked_indices) - len(deletable)
             if non_own > 0:
                 st.caption("You can only delete your own tasks.")
+            # Find resumable tasks (own + partially complete + tracker idle)
+            resumable = []
+            if st.session_state.da_state == "idle":
+                for i, fpath in deletable:
+                    ts_key = str(recent_df.iloc[i].get("StartTimestampUTC"))
+                    td = own_task_data_map.get(ts_key, {})
+                    if td.get("partially_complete", False):
+                        resumable.append((i, fpath, td))
+            show_resume = len(resumable) == 1
             if deletable:
                 n = len(deletable)
-                if st.button(f"Confirm delete ({n} task{'s' if n > 1 else ''})", key="da_confirm_delete_btn", type="primary"):
-                    for _, fpath in deletable:
-                        delete_completed_task(fpath, DA_COMPLETED_TASKS_DIR, user_key)
-                    utils.load_recent_tasks.clear()
-                    utils.load_all_completed_tasks.clear()
-                    utils.load_completed_tasks_for_analytics.clear()
-                    st.session_state.da_task_deleted = True
-                    st.rerun()
+                if show_resume:
+                    del_col, resume_col = st.columns(2)
+                else:
+                    del_col = st.container()
+                with del_col:
+                    if st.button(f"Confirm delete ({n} task{'s' if n > 1 else ''})", key="da_confirm_delete_btn", type="primary"):
+                        for _, fpath in deletable:
+                            delete_completed_task(fpath, DA_COMPLETED_TASKS_DIR, user_key)
+                        utils.load_recent_tasks.clear()
+                        utils.load_all_completed_tasks.clear()
+                        utils.load_completed_tasks_for_analytics.clear()
+                        st.session_state.da_task_deleted = True
+                        st.rerun()
+                if show_resume:
+                    _, resume_fpath, resume_data = resumable[0]
+                    with resume_col:
+                        if st.button("Resume task", key="da_resume_completed_btn"):
+                            delete_completed_task(resume_fpath, DA_COMPLETED_TASKS_DIR, user_key)
+                            utils.load_recent_tasks.clear()
+                            da_reset_all()
+                            st.session_state.da_restored_task_name = resume_data["task_name"]
+                            st.session_state.da_restored_account = resume_data["account"]
+                            st.session_state.da_restored_primary_stakeholder = resume_data["stakeholder"]
+                            st.session_state.da_restored_department = resume_data["department"]
+                            st.session_state.da_notes = resume_data["notes"]
+                            st.session_state.da_last_task_name = resume_data["task_name"]
+                            st.session_state.da_task_resumed = True
+                            LOGGER.info("Resumed DA partially complete task | task='%s'", resume_data["task_name"])
+                            st.rerun()
+                elif len(resumable) > 1:
+                    st.caption("Select only one partially complete task to resume.")
     else:
         LOGGER.info("No DA tasks completed today to display.")
         st.info("No tasks completed today.")

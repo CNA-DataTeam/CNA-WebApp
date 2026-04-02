@@ -17,7 +17,7 @@ PAGE_TITLE = utils.get_registry_page_title(__file__, "Task Analytics")
 # ============================================================
 # PAGE CONFIG
 # ============================================================
-st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon=utils.get_app_icon())
 utils.render_app_logo()
 utils.log_page_open_once("task_analytics_page", LOGGER)
 utils.log_page_open_once("da_task_analytics_page", LOGGER)
@@ -212,8 +212,6 @@ def main() -> None:
         LOGGER.warning("Unauthorized analytics page access for user '%s'.", user_ctx.user_login)
         st.error("You are not authorized to view this page.")
         return
-
-    utils.render_page_header(PAGE_TITLE)
 
     df = utils.load_completed_tasks_for_analytics(config.COMPLETED_TASKS_DIR)
     if df.empty:
@@ -442,8 +440,6 @@ def da_main() -> None:
         st.error("You are not authorized to view this page.")
         return
 
-    utils.render_page_header(PAGE_TITLE)
-
     df = utils.load_all_completed_tasks(config.DA_COMPLETED_TASKS_DIR)
     if df.empty:
         LOGGER.info("No completed task data available for analytics.")
@@ -483,6 +479,8 @@ def da_main() -> None:
 # ============================================================
 if "analytics_version" not in st.session_state:
     st.session_state.analytics_version = "logistics"
+
+utils.render_page_header(PAGE_TITLE)
 
 _v_ls, _v_da, _ = st.columns([1.3, 1.3, 6])
 with _v_ls:

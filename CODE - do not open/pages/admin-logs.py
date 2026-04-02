@@ -21,7 +21,7 @@ import utils
 LOGGER = utils.get_page_logger("Admin Logs")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Logging")
 
-st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon=utils.get_app_icon())
 utils.render_app_logo()
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 utils.log_page_open_once("admin_logs_page", LOGGER)

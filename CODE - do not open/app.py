@@ -25,7 +25,7 @@ LOGGER.info("App bootstrap started.")
 if _AUTOREFRESH_PRELOAD_ERROR is not None:
     LOGGER.warning("Auto-refresh preload failed: %s", _AUTOREFRESH_PRELOAD_ERROR)
 
-st.set_page_config(initial_sidebar_state="expanded")
+st.set_page_config(initial_sidebar_state="expanded", page_icon=utils.get_app_icon())
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 utils.render_app_logo()
 
@@ -44,6 +44,11 @@ for section_name, entries in visible_sections:
     ]
     pages[section_name] = section_pages
     sidebar_sections.append((section_name, section_pages))
+
+# Hidden pages for URL routing only (not shown in sidebar)
+pages["_routing"] = [
+    st.Page("pages/da-task-tracker.py", title="Task Tracker", icon="\U0001F552"),
+]
 
 navigation = st.navigation(pages, position="hidden")
 with st.sidebar:

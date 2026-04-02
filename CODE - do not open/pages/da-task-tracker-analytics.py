@@ -25,6 +25,7 @@ PAGE_TITLE = utils.get_registry_page_title(__file__, "Tasks Analytics")
 st.set_page_config(
     page_title=PAGE_TITLE,
     layout="wide",
+    page_icon=utils.get_app_icon(),
 )
 utils.render_app_logo()
 utils.log_page_open_once("da_task_analytics_page", LOGGER)

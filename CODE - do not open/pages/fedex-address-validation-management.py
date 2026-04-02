@@ -21,7 +21,7 @@ import utils
 LOGGER = utils.get_page_logger("FedEx Validator Management")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "FedEx Validator Management")
 
-st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+st.set_page_config(page_title=PAGE_TITLE, layout="wide", page_icon=utils.get_app_icon())
 utils.render_app_logo()
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 utils.log_page_open_once("fedex_validation_management_page", LOGGER)

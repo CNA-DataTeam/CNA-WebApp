@@ -150,7 +150,7 @@ call :LOG "Launching Streamlit..."
 netstat -ano | findstr /R /C:":%STREAMLIT_PORT% .*LISTENING" >nul
 if %ERRORLEVEL%==0 (
   call :LOG "App already running. Opening browser."
-  start "" "http://localhost:%STREAMLIT_PORT%"
+  start "" msedge --app="http://localhost:%STREAMLIT_PORT%"
   echo.>> "%LOG_FILE%"
   exit /b 0
 )
@@ -192,7 +192,7 @@ start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "%APP_FILE%" ^
   >> "%LOG_FILE%" 2>&1
 
 timeout /t 2 >nul
-start "" "http://localhost:%STREAMLIT_PORT%"
+start "" msedge --app="http://localhost:%STREAMLIT_PORT%"
 echo.>> "%LOG_FILE%"
 exit /b 0
 
