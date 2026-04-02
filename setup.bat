@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 title Logistics Support App Setup
 
 REM ============================================================
@@ -8,50 +8,71 @@ REM ============================================================
 set "ROOT_DIR=%~dp0"
 if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
 set "CODE_DIR=%ROOT_DIR%\CODE - do not open"
-
 set "VENV_DIR=%ROOT_DIR%\.venv"
 set "REQ_FILE=%CODE_DIR%\requirements.txt"
 
 REM ============================================================
-REM VALIDATE PYTHON
+REM FIND OR INSTALL UV
 REM ============================================================
-where python >nul 2>&1
+set "UV_EXE="
+
+where uv >nul 2>&1
+if not errorlevel 1 (
+  set "UV_EXE=uv"
+  goto UV_FOUND
+)
+
+if exist "%LOCALAPPDATA%\uv\bin\uv.exe" (
+  set "UV_EXE=%LOCALAPPDATA%\uv\bin\uv.exe"
+  goto UV_FOUND
+)
+
+if exist "%APPDATA%\uv\bin\uv.exe" (
+  set "UV_EXE=%APPDATA%\uv\bin\uv.exe"
+  goto UV_FOUND
+)
+
+echo uv not found. Installing automatically...
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 if errorlevel 1 (
-  echo ERROR: Python not found in PATH.
+  echo ERROR: Failed to install uv. Check your internet connection and try again.
   pause
   exit /b 1
 )
 
-for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set "PY_VER=%%v"
-for /f "tokens=1,2 delims=." %%a in ("%PY_VER%") do (
-  set "PY_MAJOR=%%a"
-  set "PY_MINOR=%%b"
+if exist "%LOCALAPPDATA%\uv\bin\uv.exe" (
+  set "UV_EXE=%LOCALAPPDATA%\uv\bin\uv.exe"
+  goto UV_FOUND
 )
-if not "%PY_MAJOR%"=="3" (
-  echo WARNING: Python 3.11 is required. Found Python %PY_VER%.
-  echo The app may not work correctly. Press any key to continue anyway, or close this window to cancel.
-  pause
-  goto VENV
-)
-if %PY_MINOR% LSS 11 (
-  echo WARNING: Python 3.11 is required. Found Python %PY_VER%.
-  echo The app may not work correctly. Press any key to continue anyway, or close this window to cancel.
-  pause
-)
-if %PY_MINOR% GTR 11 (
-  echo WARNING: Python 3.11 is required. Found Python %PY_VER%.
-  echo The app may not work correctly. Press any key to continue anyway, or close this window to cancel.
-  pause
+if exist "%APPDATA%\uv\bin\uv.exe" (
+  set "UV_EXE=%APPDATA%\uv\bin\uv.exe"
+  goto UV_FOUND
 )
 
-:VENV
+echo ERROR: uv was installed but could not be located. Please restart this script.
+pause
+exit /b 1
+
+:UV_FOUND
+echo Found uv: %UV_EXE%
+
+REM ============================================================
+REM ENSURE PYTHON 3.11
+REM ============================================================
+echo Ensuring Python 3.11 is available...
+"%UV_EXE%" python install 3.11
+if errorlevel 1 (
+  echo ERROR: Failed to install Python 3.11.
+  pause
+  exit /b 1
+)
 
 REM ============================================================
 REM CREATE VENV (IF MISSING)
 REM ============================================================
 if not exist "%VENV_DIR%\Scripts\python.exe" (
   echo Creating virtual environment...
-  python -m venv "%VENV_DIR%"
+  "%UV_EXE%" venv "%VENV_DIR%" --python 3.11
   if errorlevel 1 (
     echo ERROR: Failed to create virtual environment.
     pause
@@ -71,9 +92,8 @@ if not exist "%REQ_FILE%" (
 )
 
 echo Installing dependencies...
-"%VENV_DIR%\Scripts\python.exe" -m pip install --upgrade pip
-"%VENV_DIR%\Scripts\python.exe" -m pip install -r "%REQ_FILE%"
-
+set "VIRTUAL_ENV=%VENV_DIR%"
+"%UV_EXE%" pip install -r "%REQ_FILE%"
 if errorlevel 1 (
   echo ERROR: Dependency installation failed.
   pause
