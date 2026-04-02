@@ -706,13 +706,7 @@ def da_confirm_submit(user_login, full_name, user_key, task_name, selected_accou
             eastern_start = utils.to_eastern(st.session_state.da_start_utc)
             fname = f"task_{eastern_start:%Y%m%d_%H%M%S}_{record['TaskID'][:8]}.parquet"
             utils.atomic_write_parquet(df_record, out_dir / fname, schema=DA_PARQUET_SCHEMA)
-            utils.load_all_completed_tasks.clear()
-            utils.load_completed_tasks_for_analytics.clear()
             utils.load_recent_tasks.clear()
-            try:
-                utils.sync_tasks_parquet_targets()
-            except Exception as exc:
-                LOGGER.warning("Completed task uploaded but target sync failed: %s", exc)
             LOGGER.info(
                 "Uploaded DA completed task | task='%s' department='%s' duration_seconds=%s partially_complete=%s",
                 task_name, st.session_state.da_department, parsed_duration,
