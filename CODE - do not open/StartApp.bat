@@ -5,9 +5,9 @@ title Logistics Support App
 REM ============================================================
 REM ROOT / PATHS
 REM ============================================================
-set "ROOT_DIR=%~dp0"
-if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
-set "CODE_DIR=%ROOT_DIR%\CODE - do not open"
+set "CODE_DIR=%~dp0"
+if "%CODE_DIR:~-1%"=="\" set "CODE_DIR=%CODE_DIR:~0,-1%"
+for %%i in ("%CODE_DIR%\..") do set "ROOT_DIR=%%~fi"
 set "APP_FILE=%CODE_DIR%\app.py"
 set "STARTUP_FILE=%CODE_DIR%\startup.py"
 
@@ -191,8 +191,33 @@ start "" /B "%VENV_DIR%\Scripts\pythonw.exe" -m streamlit run "%APP_FILE%" ^
   --browser.gatherUsageStats=false ^
   >> "%LOG_FILE%" 2>&1
 
-timeout /t 2 >nul
-start "" msedge --app="http://localhost:%STREAMLIT_PORT%"
+REM Open splash (or app directly) in isolated Edge profile
+set "EDGE_PROFILE=CNA-WebApp-Edge"
+set "EDGE_DATA=%TEMP%\%EDGE_PROFILE%"
+set "EDGE_FLAGS=--user-data-dir="%EDGE_DATA%" --no-first-run --disable-features=msEdgeOnRampFRE"
+if exist "%CODE_DIR%\splash.html" (
+  call :LOG "Opening splash screen..."
+  start "" msedge --app="file:///%CODE_DIR:\=/%/splash.html" %EDGE_FLAGS%
+) else (
+  timeout /t 2 >nul
+  call :LOG "Opening app..."
+  start "" msedge --app="http://localhost:%STREAMLIT_PORT%" %EDGE_FLAGS%
+)
+
+REM Wait for Edge to start, then poll until all its windows are closed
+call :LOG "Monitoring app window..."
+timeout /t 5 >nul
+:WAIT_CLOSE
+timeout /t 3 >nul
+wmic process where "name='msedge.exe' and commandline like '%%%EDGE_PROFILE%%%'" get processid 2>nul | findstr /r "[0-9]" >nul
+if not errorlevel 1 goto WAIT_CLOSE
+
+REM Edge closed — stop Streamlit
+call :LOG "App window closed. Stopping server..."
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr /R ":%STREAMLIT_PORT% .*LISTENING" 2^>nul') do (
+  taskkill /F /PID %%p >nul 2>&1
+)
+call :LOG "Server stopped."
 echo.>> "%LOG_FILE%"
 exit /b 0
 

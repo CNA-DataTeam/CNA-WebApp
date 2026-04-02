@@ -22,13 +22,13 @@ AppId={{B8F3A2D1-7E4C-4A9B-8D6F-1C2E3F4A5B6C}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={userdesktop}\CNA-WebApp
+DefaultDirName={localappdata}\CNA-WebApp
 DisableProgramGroupPage=yes
-DisableDirPage=no
-OutputDir=output
+DisableDirPage=yes
+OutputDir=..\..\installer-output
 OutputBaseFilename=CNA-WebApp-Setup
 SetupIconFile=..\..\cna_icon.ico
-UninstallDisplayIcon={app}\cna_icon.ico
+UninstallDisplayIcon={localappdata}\CNA-WebApp\cna_icon.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -37,10 +37,6 @@ DefaultGroupName={#MyAppName}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-
-[Messages]
-SelectDirLabel3=The app will be cloned from GitHub into the following folder.
-SelectDirBrowseLabel=Click Next to continue, or click Browse to select a different folder.
 
 [Code]
 var
@@ -237,7 +233,7 @@ begin
 end;
 
 [Icons]
-Name: "{userdesktop}\{#MyAppName}"; Filename: "cmd.exe"; Parameters: "/c ""{app}\StartApp.bat"""; WorkingDir: "{app}"; IconFilename: "{app}\cna_icon.ico"; Comment: "Launch CNA Web App"
+Name: "{userprograms}\{#MyAppName}"; Filename: "wscript.exe"; Parameters: """{app}\StartApp.vbs"""; WorkingDir: "{app}"; IconFilename: "{app}\cna_icon.ico"; Comment: "Launch CNA Web App"
 
 [Run]
-Filename: "cmd.exe"; Parameters: "/c ""{app}\StartApp.bat"""; WorkingDir: "{app}"; Description: "Launch CNA Web App"; Flags: nowait postinstall skipifsilent
+Filename: "wscript.exe"; Parameters: """{app}\StartApp.vbs"""; WorkingDir: "{app}"; Description: "Launch CNA Web App"; Flags: nowait postinstall skipifsilent

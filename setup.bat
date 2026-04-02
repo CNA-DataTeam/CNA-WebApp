@@ -128,7 +128,7 @@ set "SHORTCUT_PATH=%ROOT_DIR%\CNA Web App.lnk"
 set "ICON_FILE=%ROOT_DIR%\cna_icon.ico"
 
 echo Creating shortcut...
-powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='cmd.exe'; $s.Arguments='/c \"%ROOT_DIR%\StartApp.bat\"'; $s.WorkingDirectory='%ROOT_DIR%'; if(Test-Path '%ICON_FILE%'){$s.IconLocation='%ICON_FILE%,0'}; $s.WindowStyle=7; $s.Save()" >nul 2>&1
+powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='wscript.exe'; $s.Arguments='\"%ROOT_DIR%\StartApp.vbs\"'; $s.WorkingDirectory='%ROOT_DIR%'; if(Test-Path '%ICON_FILE%'){$s.IconLocation='%ICON_FILE%,0'}; $s.WindowStyle=1; $s.Save()" >nul 2>&1
 if exist "%SHORTCUT_PATH%" (
   echo Shortcut created: CNA Web App.lnk
   echo Pin it to your taskbar by double-clicking it, then right-clicking its taskbar icon.
@@ -142,7 +142,7 @@ REM ============================================================
 echo.
 echo ============================================
 echo Setup complete.
-echo Run StartApp.bat to launch the application.
+echo Run StartApp.vbs to launch the application.
 echo ============================================
 pause
 exit /b 0

@@ -38,7 +38,7 @@ logs/
 # Generated per-machine
 # -------------------------------------------------
 *.lnk
-CODE - do not open/installer/output/
+installer-output/
 
 # -------------------------------------------------
 # OS junk
