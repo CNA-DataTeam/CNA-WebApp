@@ -64,6 +64,32 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 )
 
 REM ============================================================
+REM SYNC CONFIG FROM NETWORK (FAIL-OPEN)
+REM ============================================================
+set "NETWORK_CONFIG=\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.py"
+set "LOCAL_CONFIG=%ROOT_DIR%\config.py"
+
+call :LOG "Syncing config.py from network..."
+if exist "%NETWORK_CONFIG%" (
+  copy /Y "%NETWORK_CONFIG%" "%LOCAL_CONFIG%" >nul 2>&1
+  if errorlevel 1 (
+    call :LOG "WARNING: config.py copy failed. Using existing local copy."
+  ) else (
+    call :LOG "config.py updated from network."
+  )
+) else (
+  call :LOG "WARNING: Network config not reachable. Using existing local copy."
+)
+
+if not exist "%LOCAL_CONFIG%" (
+  echo ERROR: config.py not found and network is unreachable. Cannot start app.
+  call :LOG "ERROR: config.py missing and network unreachable."
+  pause
+  echo.>> "%LOG_FILE%"
+  exit /b 1
+)
+
+REM ============================================================
 REM OPTIONAL GIT UPDATE (FAIL-OPEN)
 REM ============================================================
 call :LOG "Starting Git check..."

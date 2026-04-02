@@ -49,9 +49,10 @@ navigation = st.navigation(pages, position="hidden")
 with st.sidebar:
     st.page_link(home_page, use_container_width=True)
     for section_name, section_pages in sidebar_sections:
-        st.caption(section_name)
-        for page_obj in section_pages:
-            st.page_link(page_obj, use_container_width=True)
+        section_active = any(p.title == navigation.title for p in section_pages)
+        with st.expander(section_name, expanded=section_active):
+            for page_obj in section_pages:
+                st.page_link(page_obj, use_container_width=True)
 
 LOGGER.info("Navigation initialized | current_page='%s'", navigation.title)
 navigation.run()

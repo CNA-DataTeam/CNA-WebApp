@@ -31,8 +31,7 @@ HOME_PAGE = PageEntry(
 
 SECTION_ORDER = [
     "Admin Tools",
-    "Logistics Support",
-    "Data & Analytics",
+    "Task Tracker",
     "Work in Progress",
 ]
 
@@ -60,7 +59,7 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             admin_only=True,
         ),
     ],
-    "Logistics Support": [
+    "Task Tracker": [
         PageEntry(
             path="pages/task-tracker.py",
             title="Task Tracker",
@@ -70,23 +69,7 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
         ),
         PageEntry(
             path="pages/task-tracker-analytics.py",
-            title="Tasks Analytics",
-            icon="\U0001F4CA",
-            caption="Review team performance and task completion trends with filters for user and date.",
-            quote='"Show me the metrics!"',
-        ),
-    ],
-    "Data & Analytics": [
-        PageEntry(
-            path="pages/da-task-tracker.py",
-            title="Task Tracker",
-            icon="\U0001F552",
-            caption="Log daily operational tasks, track elapsed time, manage cadence, and view live activity.",
-            quote='"Big Brother is watching you"',
-        ),
-        PageEntry(
-            path="pages/da-task-tracker-analytics.py",
-            title="Tasks Analytics",
+            title="Task Analytics",
             icon="\U0001F4CA",
             caption="Review team performance and task completion trends with filters for user and date.",
             quote='"Show me the metrics!"',

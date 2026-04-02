@@ -1,61 +1,14 @@
 """
 pages/task-tracker.py
 
-Purpose:
-    Daily task logging UI with timer + live activity broadcast.
-
-What it does:
-    - Loads tasks/users/accounts metadata.
-    - Lets user:
-        * choose task + cadence
-        * optionally select account + covering-for + notes
-        * start/pause/resume/end a timer
-        * upload completed task record as parquet (partitioned by user/date)
-    - Writes/updates a small per-user live activity parquet while timing,
-      so other users can see who is working on what in real time.
-    - Displays:
-        * Live Activity (other users)
-        * Today's Activity (completed tasks)
-
-Key utils used (inputs -> outputs):
-    - utils.get_global_css() -> str
-    - utils.get_os_user() -> str
-    - utils.get_full_name_for_user(None, user_login) -> str
-    - utils.load_all_user_full_names() -> list[str]
-    - utils.load_tasks() -> DataFrame (active tasks)
-    - utils.load_accounts(personnel_dir) -> list[str] (company groups)
-    - utils.sanitize_key(value) -> str (safe user key)
-    - utils.now_utc() -> datetime
-    - utils.to_eastern(dt) -> datetime
-    - utils.format_hh_mm_parts(seconds) -> (hh, mm)
-    - utils.format_hhmmss(seconds) -> str
-    - utils.parse_hhmmss("HH:MM[:SS]") -> int seconds or -1
-    - utils.format_time_ago(dt) -> str
-    - utils.build_out_dir(completed_dir, user_key, ts) -> Path
-    - utils.atomic_write_parquet(df, path, schema) -> writes parquet atomically
-    - Live Activity:
-        * utils.save_live_activity(...)
-        * utils.update_live_activity_state(...)
-        * utils.load_own_live_activity(...)
-        * utils.delete_live_activity(...)
-        * utils.load_live_activities(...)
-    - Recent tasks:
-        * utils.load_recent_tasks(completed_dir, user_key, limit) -> DataFrame
-
-Primary inputs:
-    - config.* directories (CompletedTasks, LiveActivity, Personnel, Logo)
-    - startup output parquet(s) under config.PERSONNEL_DIR
-
-Primary outputs:
-    - Completed task parquet files written under config.COMPLETED_TASKS_DIR
-      partitioned as: user=<key>/year=<YYYY>/month=<MM>/day=<DD>/*.parquet
-    - Live activity parquet written under config.LIVE_ACTIVITY_DIR as:
-      user=<key>.parquet
-    - Streamlit UI rendering of timer, forms, and data tables
+Combined Task Tracker for Logistics Support and Data & Analytics.
+Toggle between versions using the buttons at the top of the page.
+Defaults to Logistics Support on first load.
 """
 
 import streamlit as st
 import pandas as pd
+import pyarrow as pa
 import uuid
 from pathlib import Path
 import config
@@ -73,10 +26,49 @@ except Exception as exc:
 LOGGER = utils.get_page_logger("Task Tracker")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Task Tracker")
 
-# Page configuration
+# D&A parquet schema (adds Department column)
+DA_PARQUET_SCHEMA = pa.schema([
+    ("TaskID", pa.string()),
+    ("UserLogin", pa.string()),
+    ("FullName", pa.string()),
+    ("TaskName", pa.string()),
+    ("TaskCadence", pa.string()),
+    ("CompanyGroup", pa.string()),
+    ("IsCoveringFor", pa.bool_()),
+    ("CoveringFor", pa.string()),
+    ("Notes", pa.string()),
+    ("PartiallyComplete", pa.bool_()),
+    ("StartTimestampUTC", pa.timestamp("us", tz="UTC")),
+    ("EndTimestampUTC", pa.timestamp("us", tz="UTC")),
+    ("DurationSeconds", pa.int64()),
+    ("UploadTimestampUTC", pa.timestamp("us", tz="UTC")),
+    ("AppVersion", pa.string()),
+    ("Department", pa.string()),
+])
+
+DEPARTMENT_OPTIONS = [
+    "",
+    "Data & Analytics",
+    "Leadership",
+    "Business Relations",
+    "Platform",
+    "Project Services",
+    "Logistics",
+    "FS&D",
+    "Account Support",
+    "Accounts Receivable",
+    "Partnership Development",
+    "Marketing",
+    "Employee Optimization",
+]
+
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 st.set_page_config(page_title=PAGE_TITLE, layout="wide")
 utils.render_app_logo()
 utils.log_page_open_once("task_tracker_page", LOGGER)
+utils.log_page_open_once("da_task_tracker_page", LOGGER)
 if "_task_tracker_render_logged" not in st.session_state:
     st.session_state._task_tracker_render_logged = True
     LOGGER.info("Render UI.")
@@ -87,17 +79,26 @@ if _AUTOREFRESH_IMPORT_ERROR is not None and "_task_tracker_autorefresh_warned" 
         _AUTOREFRESH_IMPORT_ERROR,
     )
 
-# Apply global styling
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 
-# Resolve paths and constants
-COMPLETED_TASKS_DIR = config.COMPLETED_TASKS_DIR
-LIVE_ACTIVITY_DIR = config.LIVE_ACTIVITY_DIR
-ARCHIVED_TASKS_DIR = config.ARCHIVED_TASKS_DIR
+# ============================================================
+# DIRECTORY CONSTANTS
+# ============================================================
+# Logistics Support
+LS_COMPLETED_TASKS_DIR = config.COMPLETED_TASKS_DIR
+LS_LIVE_ACTIVITY_DIR = config.LIVE_ACTIVITY_DIR
+LS_ARCHIVED_TASKS_DIR = config.ARCHIVED_TASKS_DIR
 PERSONNEL_DIR = config.PERSONNEL_DIR
 
-# Session state initialization
-DEFAULT_STATE = {
+# Data & Analytics
+DA_COMPLETED_TASKS_DIR = config.DA_COMPLETED_TASKS_DIR
+DA_LIVE_ACTIVITY_DIR = config.DA_LIVE_ACTIVITY_DIR
+DA_ARCHIVED_TASKS_DIR = config.DA_ARCHIVED_TASKS_DIR
+
+# ============================================================
+# STATE INITIALIZATION — LOGISTICS SUPPORT
+# ============================================================
+LS_DEFAULT_STATE = {
     "state": "idle",
     "start_utc": None,
     "end_utc": None,
@@ -125,16 +126,53 @@ DEFAULT_STATE = {
     "ended_from_paused": False,
     "active_task_name": "",
 }
-# Ensure all default keys are set
-for k, v in DEFAULT_STATE.items():
+for k, v in LS_DEFAULT_STATE.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# Restore state from live activity file on page load/refresh
+# ============================================================
+# STATE INITIALIZATION — DATA & ANALYTICS
+# ============================================================
+DA_DEFAULT_STATE = {
+    "da_state": "idle",
+    "da_start_utc": None,
+    "da_end_utc": None,
+    "da_pause_start_utc": None,
+    "da_paused_seconds": 0,
+    "da_elapsed_seconds": 0,
+    "da_notes": "",
+    "da_last_task_name": "",
+    "da_reset_counter": 0,
+    "da_confirm_open": False,
+    "da_confirm_rendered": False,
+    "da_partially_complete": False,
+    "da_primary_stakeholder": "",
+    "da_department": "",
+    "da_live_activity_saved": False,
+    "da_live_task_name": "",
+    "da_live_account": "",
+    "da_state_restored": False,
+    "da_restored_task_name": None,
+    "da_restored_account": None,
+    "da_restored_primary_stakeholder": None,
+    "da_restored_department": None,
+    "da_review_archive_open": False,
+    "da_review_archive_rendered": False,
+    "da_ended_from_paused": False,
+    "da_active_task_name": "",
+}
+for k, v in DA_DEFAULT_STATE.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ============================================================
+# STATE RESTORATION (both versions, always on page load)
+# ============================================================
 _user_key_for_restore = utils.sanitize_key(utils.get_os_user())
+
 if not st.session_state.state_restored:
     st.session_state.state_restored = True
-    restored = utils.load_own_live_activity(LIVE_ACTIVITY_DIR, _user_key_for_restore)
+    restored = utils.load_own_live_activity(LS_LIVE_ACTIVITY_DIR, _user_key_for_restore)
     if restored:
         st.session_state.state = restored["state"]
         st.session_state.start_utc = restored["start_utc"]
@@ -149,15 +187,49 @@ if not st.session_state.state_restored:
         st.session_state.restored_account = restored["account"]
         st.session_state.restored_covering_for = restored["covering_for"]
         LOGGER.info(
-            "Restored active session | task='%s' cadence='%s' state='%s'",
+            "Restored LS session | task='%s' cadence='%s' state='%s'",
             restored["task_name"],
             restored["cadence"],
             restored["state"],
         )
 
-# Business logic functions
+if not st.session_state.da_state_restored:
+    st.session_state.da_state_restored = True
+    da_restored = utils.load_own_live_activity(DA_LIVE_ACTIVITY_DIR, _user_key_for_restore)
+    if da_restored:
+        st.session_state.da_state = da_restored["state"]
+        st.session_state.da_start_utc = da_restored["start_utc"]
+        st.session_state.da_paused_seconds = da_restored["paused_seconds"]
+        st.session_state.da_pause_start_utc = da_restored["pause_start_utc"]
+        st.session_state.da_notes = da_restored["notes"]
+        st.session_state.da_primary_stakeholder = da_restored.get("covering_for", "")
+        st.session_state.da_live_activity_saved = True
+        st.session_state.da_last_task_name = da_restored["task_name"]
+        st.session_state.da_restored_task_name = da_restored["task_name"]
+        st.session_state.da_restored_account = da_restored["account"]
+        st.session_state.da_restored_primary_stakeholder = da_restored.get("covering_for", "")
+        LOGGER.info(
+            "Restored DA session | task='%s' state='%s'",
+            da_restored["task_name"],
+            da_restored["state"],
+        )
+
+# ============================================================
+# SHARED HELPERS
+# ============================================================
+def format_start_datetime(dt_utc):
+    if not dt_utc:
+        return "None"
+    dt_et = utils.to_eastern(dt_utc)
+    return dt_et.strftime("%m/%d/%Y %I:%M:%S %p").lower()
+
+def get_submit_duration_seconds(default_seconds: int) -> int:
+    return max(0, int(default_seconds))
+
+# ============================================================
+# LOGISTICS SUPPORT — BUSINESS LOGIC
+# ============================================================
 def compute_elapsed_seconds() -> int:
-    """Compute total elapsed seconds for current task (excluding paused time)."""
     if not st.session_state.start_utc:
         return 0
     now = st.session_state.end_utc if st.session_state.state == "ended" else utils.now_utc()
@@ -170,27 +242,19 @@ def compute_elapsed_seconds() -> int:
     return max(0, base - paused)
 
 def reset_all():
-    """Reset all task state and delete current live activity record."""
     if "current_user_key" in st.session_state:
-        utils.delete_live_activity(LIVE_ACTIVITY_DIR, st.session_state.current_user_key)
+        utils.delete_live_activity(LS_LIVE_ACTIVITY_DIR, st.session_state.current_user_key)
     old_counter = st.session_state.reset_counter
     st.session_state.reset_counter += 1
-    # Remove old widget state keys
     for key in [f"task_{old_counter}", f"acct_{old_counter}", f"covering_{old_counter}"]:
         st.session_state.pop(key, None)
-    # Reset all state values (except restoration flag)
-    for k, v in DEFAULT_STATE.items():
+    for k, v in LS_DEFAULT_STATE.items():
         if k != "state_restored":
             st.session_state[k] = v
 
 def start_task():
-    """Start a new task timing."""
     selected_task = str(st.session_state.get(f"task_{st.session_state.reset_counter}", "") or "").strip()
-    LOGGER.info(
-        "Started task timer | task='%s' cadence='%s'",
-        selected_task,
-        st.session_state.selected_cadence,
-    )
+    LOGGER.info("Started LS task timer | task='%s' cadence='%s'", selected_task, st.session_state.selected_cadence)
     st.session_state.active_task_name = selected_task
     st.session_state.state = "running"
     st.session_state.start_utc = utils.now_utc()
@@ -202,27 +266,23 @@ def start_task():
     st.session_state.live_activity_saved = False
 
 def pause_task():
-    """Pause the current task."""
     if st.session_state.state != "running":
         return
-    LOGGER.info("Paused task timer.")
+    LOGGER.info("Paused LS task timer.")
     st.session_state.state = "paused"
     if not st.session_state.pause_start_utc:
         st.session_state.pause_start_utc = utils.now_utc()
     if "current_user_key" in st.session_state:
         utils.update_live_activity_state(
-            LIVE_ACTIVITY_DIR,
-            st.session_state.current_user_key,
-            state="paused",
-            paused_seconds=st.session_state.paused_seconds,
+            LS_LIVE_ACTIVITY_DIR, st.session_state.current_user_key,
+            state="paused", paused_seconds=st.session_state.paused_seconds,
             pause_start_utc=st.session_state.pause_start_utc,
         )
 
 def resume_task():
-    """Resume a paused task."""
     if st.session_state.state != "paused":
         return
-    LOGGER.info("Resumed task timer.")
+    LOGGER.info("Resumed LS task timer.")
     if st.session_state.pause_start_utc:
         pause_delta = int((utils.now_utc() - st.session_state.pause_start_utc).total_seconds())
         if pause_delta > 0:
@@ -231,16 +291,12 @@ def resume_task():
     st.session_state.state = "running"
     if "current_user_key" in st.session_state:
         utils.update_live_activity_state(
-            LIVE_ACTIVITY_DIR,
-            st.session_state.current_user_key,
-            state="running",
-            paused_seconds=st.session_state.paused_seconds,
-            pause_start_utc=None,
+            LS_LIVE_ACTIVITY_DIR, st.session_state.current_user_key,
+            state="running", paused_seconds=st.session_state.paused_seconds, pause_start_utc=None,
         )
 
 def end_task():
-    """End the current task."""
-    LOGGER.info("Ended task timer.")
+    LOGGER.info("Ended LS task timer.")
     if st.session_state.pause_start_utc:
         pause_delta = int((utils.now_utc() - st.session_state.pause_start_utc).total_seconds())
         if pause_delta > 0:
@@ -250,55 +306,29 @@ def end_task():
     st.session_state.state = "ended"
     st.session_state.end_utc = utils.now_utc()
     if "current_user_key" in st.session_state:
-        utils.delete_live_activity(LIVE_ACTIVITY_DIR, st.session_state.current_user_key)
+        utils.delete_live_activity(LS_LIVE_ACTIVITY_DIR, st.session_state.current_user_key)
 
-def format_start_datetime(dt_utc):
-    """Format UTC datetime for human-readable Eastern display."""
-    if not dt_utc:
-        return "None"
-    dt_et = utils.to_eastern(dt_utc)
-    return dt_et.strftime("%m/%d/%Y %I:%M:%S %p").lower()
-
-def get_submit_duration_seconds(default_seconds: int) -> int:
-    """Use effective elapsed time (paused time excluded)."""
-    return max(0, int(default_seconds))
-
-def archive_task(user_login: str, full_name: str, user_key: str, task_name: str, selected_account: str) -> None:
-    """Archive the currently paused task and reset the page state."""
+def archive_task(user_login, full_name, user_key, task_name, selected_account):
     if st.session_state.state != "paused" or not st.session_state.start_utc:
         return
     paused_seconds = int(st.session_state.paused_seconds)
     if st.session_state.pause_start_utc:
         paused_seconds += int((utils.now_utc() - st.session_state.pause_start_utc).total_seconds())
     utils.save_archived_task(
-        ARCHIVED_TASKS_DIR,
-        user_key,
-        user_login,
-        full_name,
-        task_name,
-        st.session_state.selected_cadence,
-        selected_account,
-        st.session_state.covering_for,
-        st.session_state.notes,
-        st.session_state.start_utc,
-        paused_seconds=paused_seconds,
-        pause_start_utc=None,
+        LS_ARCHIVED_TASKS_DIR, user_key, user_login, full_name, task_name,
+        st.session_state.selected_cadence, selected_account, st.session_state.covering_for,
+        st.session_state.notes, st.session_state.start_utc,
+        paused_seconds=paused_seconds, pause_start_utc=None,
     )
     utils.load_archived_tasks.clear()
     if "current_user_key" in st.session_state:
-        utils.delete_live_activity(LIVE_ACTIVITY_DIR, st.session_state.current_user_key)
+        utils.delete_live_activity(LS_LIVE_ACTIVITY_DIR, st.session_state.current_user_key)
     reset_all()
-    LOGGER.info("Archived paused task | task='%s' user='%s'", task_name, user_login)
+    LOGGER.info("Archived LS paused task | task='%s' user='%s'", task_name, user_login)
     st.session_state.archived = True
 
-def select_cadence(cadence: str):
-    """Button callback to select a task cadence."""
-    st.session_state.selected_cadence = cadence
-
-def build_task_record(user_login: str, full_name: str, task_name: str, cadence: str,
-                      account: str, covering_for: str, notes: str,
-                      duration_seconds: int, partially_complete: bool) -> dict:
-    """Build a record dict for a completed task entry."""
+def build_task_record(user_login, full_name, task_name, cadence, account, covering_for,
+                      notes, duration_seconds, partially_complete):
     is_covering_for = bool(covering_for and covering_for.strip())
     return {
         "TaskID": str(uuid.uuid4()),
@@ -318,9 +348,7 @@ def build_task_record(user_login: str, full_name: str, task_name: str, cadence: 
         "AppVersion": config.APP_VERSION,
     }
 
-
-def get_effective_task_name(current_task_name: str) -> str:
-    """Return the best non-empty task name to use for save/log operations."""
+def get_effective_task_name(current_task_name):
     candidates = [
         current_task_name,
         st.session_state.get("active_task_name", ""),
@@ -334,10 +362,193 @@ def get_effective_task_name(current_task_name: str) -> str:
             return task_value
     return ""
 
-# Confirmation dialog for task submission
+# ============================================================
+# DATA & ANALYTICS — BUSINESS LOGIC
+# ============================================================
+def da_compute_elapsed_seconds() -> int:
+    if not st.session_state.da_start_utc:
+        return 0
+    now = st.session_state.da_end_utc if st.session_state.da_state == "ended" else utils.now_utc()
+    base = int((now - st.session_state.da_start_utc).total_seconds())
+    paused = int(st.session_state.da_paused_seconds or 0)
+    if st.session_state.da_pause_start_utc:
+        pause_delta = int((now - st.session_state.da_pause_start_utc).total_seconds())
+        if pause_delta > 0:
+            paused += pause_delta
+    return max(0, base - paused)
+
+def da_reset_all():
+    if "da_current_user_key" in st.session_state:
+        utils.delete_live_activity(DA_LIVE_ACTIVITY_DIR, st.session_state.da_current_user_key)
+    old_counter = st.session_state.da_reset_counter
+    st.session_state.da_reset_counter += 1
+    for key in [f"da_task_{old_counter}", f"da_acct_{old_counter}", f"da_dept_{old_counter}"]:
+        st.session_state.pop(key, None)
+    for k, v in DA_DEFAULT_STATE.items():
+        if k != "da_state_restored":
+            st.session_state[k] = v
+
+def da_start_task():
+    selected_task = str(st.session_state.get(f"da_task_{st.session_state.da_reset_counter}", "") or "").strip()
+    LOGGER.info("Started DA task timer | task='%s'", selected_task)
+    st.session_state.da_active_task_name = selected_task
+    st.session_state.da_state = "running"
+    st.session_state.da_start_utc = utils.now_utc()
+    st.session_state.da_end_utc = None
+    st.session_state.da_paused_seconds = 0
+    st.session_state.da_pause_start_utc = None
+    st.session_state.da_elapsed_seconds = 0
+    st.session_state.da_ended_from_paused = False
+    st.session_state.da_live_activity_saved = False
+
+def da_pause_task():
+    if st.session_state.da_state != "running":
+        return
+    LOGGER.info("Paused DA task timer.")
+    st.session_state.da_state = "paused"
+    if not st.session_state.da_pause_start_utc:
+        st.session_state.da_pause_start_utc = utils.now_utc()
+    if "da_current_user_key" in st.session_state:
+        utils.update_live_activity_state(
+            DA_LIVE_ACTIVITY_DIR, st.session_state.da_current_user_key,
+            state="paused", paused_seconds=st.session_state.da_paused_seconds,
+            pause_start_utc=st.session_state.da_pause_start_utc,
+        )
+
+def da_resume_task():
+    if st.session_state.da_state != "paused":
+        return
+    LOGGER.info("Resumed DA task timer.")
+    if st.session_state.da_pause_start_utc:
+        pause_delta = int((utils.now_utc() - st.session_state.da_pause_start_utc).total_seconds())
+        if pause_delta > 0:
+            st.session_state.da_paused_seconds += pause_delta
+    st.session_state.da_pause_start_utc = None
+    st.session_state.da_state = "running"
+    if "da_current_user_key" in st.session_state:
+        utils.update_live_activity_state(
+            DA_LIVE_ACTIVITY_DIR, st.session_state.da_current_user_key,
+            state="running", paused_seconds=st.session_state.da_paused_seconds, pause_start_utc=None,
+        )
+
+def da_end_task():
+    LOGGER.info("Ended DA task timer.")
+    if st.session_state.da_pause_start_utc:
+        pause_delta = int((utils.now_utc() - st.session_state.da_pause_start_utc).total_seconds())
+        if pause_delta > 0:
+            st.session_state.da_paused_seconds += pause_delta
+    st.session_state.da_pause_start_utc = None
+    st.session_state.da_ended_from_paused = False
+    st.session_state.da_state = "ended"
+    st.session_state.da_end_utc = utils.now_utc()
+    if "da_current_user_key" in st.session_state:
+        utils.delete_live_activity(DA_LIVE_ACTIVITY_DIR, st.session_state.da_current_user_key)
+
+def da_archive_task(user_login, full_name, user_key, task_name, selected_account):
+    if st.session_state.da_state != "paused" or not st.session_state.da_start_utc:
+        return
+    paused_seconds = int(st.session_state.da_paused_seconds)
+    if st.session_state.da_pause_start_utc:
+        paused_seconds += int((utils.now_utc() - st.session_state.da_pause_start_utc).total_seconds())
+    utils.save_archived_task(
+        DA_ARCHIVED_TASKS_DIR, user_key, user_login, full_name, task_name,
+        None, selected_account, st.session_state.da_primary_stakeholder,
+        st.session_state.da_notes, st.session_state.da_start_utc,
+        paused_seconds=paused_seconds, pause_start_utc=None,
+    )
+    utils.load_archived_tasks.clear()
+    if "da_current_user_key" in st.session_state:
+        utils.delete_live_activity(DA_LIVE_ACTIVITY_DIR, st.session_state.da_current_user_key)
+    da_reset_all()
+    LOGGER.info("Archived DA paused task | task='%s' user='%s'", task_name, user_login)
+    st.session_state.da_archived = True
+
+def da_build_task_record(user_login, full_name, task_name, account, primary_stakeholder,
+                         department, notes, duration_seconds, partially_complete):
+    has_stakeholder = bool(primary_stakeholder and primary_stakeholder.strip())
+    return {
+        "TaskID": str(uuid.uuid4()),
+        "UserLogin": user_login,
+        "FullName": full_name or None,
+        "TaskName": task_name,
+        "TaskCadence": None,
+        "CompanyGroup": account or None,
+        "IsCoveringFor": has_stakeholder,
+        "CoveringFor": primary_stakeholder or None,
+        "Notes": notes.strip() if notes and notes.strip() else None,
+        "PartiallyComplete": partially_complete,
+        "StartTimestampUTC": st.session_state.da_start_utc,
+        "EndTimestampUTC": st.session_state.da_end_utc,
+        "DurationSeconds": int(duration_seconds),
+        "UploadTimestampUTC": utils.now_utc(),
+        "AppVersion": config.APP_VERSION,
+        "Department": department or None,
+    }
+
+def da_get_effective_task_name(current_task_name):
+    candidates = [
+        current_task_name,
+        st.session_state.get("da_active_task_name", ""),
+        st.session_state.get("da_live_task_name", ""),
+        st.session_state.get("da_last_task_name", ""),
+        st.session_state.get("da_restored_task_name", ""),
+    ]
+    for candidate in candidates:
+        task_value = str(candidate or "").strip()
+        if task_value:
+            return task_value
+    return ""
+
+# ============================================================
+# DA HELPERS
+# ============================================================
+def load_own_tasks_with_paths(completed_dir: Path, user_key_val: str) -> pd.DataFrame:
+    today_eastern = utils.to_eastern(utils.now_utc()).date()
+    base = (
+        completed_dir
+        / f"user={user_key_val}"
+        / f"year={today_eastern.year}"
+        / f"month={today_eastern.month:02d}"
+        / f"day={today_eastern.day:02d}"
+    )
+    if not base.exists():
+        return pd.DataFrame()
+    files = list(base.glob("*.parquet"))
+    if not files:
+        return pd.DataFrame()
+    frames = []
+    for f in files:
+        try:
+            df_one = pd.read_parquet(f)
+            df_one["_file_path"] = str(f)
+            frames.append(df_one)
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    if "StartTimestampUTC" in df.columns:
+        df["StartTimestampUTC"] = pd.to_datetime(df["StartTimestampUTC"], utc=True)
+        df = df.sort_values("StartTimestampUTC", ascending=False)
+    return df.reset_index(drop=True)
+
+def delete_completed_task(file_path: str, completed_dir: Path, user_key_val: str) -> bool:
+    p = Path(file_path)
+    expected_prefix = str(completed_dir / f"user={user_key_val}")
+    if not str(p).startswith(expected_prefix):
+        LOGGER.warning("Blocked delete outside allowed directory: %s", p)
+        return False
+    if p.exists():
+        p.unlink()
+        LOGGER.info("Deleted completed task file: %s", p.name)
+        return True
+    return False
+
+# ============================================================
+# DIALOGS — LOGISTICS SUPPORT
+# ============================================================
 @st.dialog("Submit?")
 def confirm_submit(user_login, full_name, user_key, task_name, selected_account):
-    """Modal confirmation dialog for submitting a completed task."""
     task_name = get_effective_task_name(task_name)
     st.caption(f"**User:** {full_name}")
     st.caption(f"**Task:** {task_name}")
@@ -368,18 +579,12 @@ def confirm_submit(user_login, full_name, user_key, task_name, selected_account)
             if edited_duration.strip() == current_duration:
                 parsed_duration = effective_duration_seconds
             record = build_task_record(
-                user_login,
-                full_name,
-                task_name,
-                st.session_state.selected_cadence,
-                selected_account,
-                st.session_state.covering_for,
-                st.session_state.notes,
-                parsed_duration,
-                st.session_state.get("submit_partially_complete", False),
+                user_login, full_name, task_name, st.session_state.selected_cadence,
+                selected_account, st.session_state.covering_for, st.session_state.notes,
+                parsed_duration, st.session_state.get("submit_partially_complete", False),
             )
             df_record = pd.DataFrame([record])
-            out_dir = utils.build_out_dir(COMPLETED_TASKS_DIR, user_key, st.session_state.start_utc)
+            out_dir = utils.build_out_dir(LS_COMPLETED_TASKS_DIR, user_key, st.session_state.start_utc)
             eastern_start = utils.to_eastern(st.session_state.start_utc)
             fname = f"task_{eastern_start:%Y%m%d_%H%M%S}_{record['TaskID'][:8]}.parquet"
             utils.atomic_write_parquet(df_record, out_dir / fname)
@@ -390,10 +595,8 @@ def confirm_submit(user_login, full_name, user_key, task_name, selected_account)
             except Exception as exc:
                 LOGGER.warning("Completed task uploaded but target sync failed: %s", exc)
             LOGGER.info(
-                "Uploaded completed task | task='%s' cadence='%s' duration_seconds=%s partially_complete=%s",
-                task_name,
-                st.session_state.selected_cadence,
-                parsed_duration,
+                "Uploaded LS completed task | task='%s' cadence='%s' duration_seconds=%s partially_complete=%s",
+                task_name, st.session_state.selected_cadence, parsed_duration,
                 st.session_state.get("submit_partially_complete", False),
             )
             st.session_state.confirm_open = False
@@ -409,13 +612,11 @@ def confirm_submit(user_login, full_name, user_key, task_name, selected_account)
 
 @st.dialog("Archived Tasks")
 def review_archived_tasks_dialog(user_login, full_name, user_key):
-    """Review archived tasks with options to resume or delete."""
-    archived_df = utils.load_archived_tasks(ARCHIVED_TASKS_DIR, user_key)
+    archived_df = utils.load_archived_tasks(LS_ARCHIVED_TASKS_DIR, user_key)
     if archived_df.empty:
         LOGGER.info("Archived tasks dialog opened but no archived tasks were found.")
         st.info("No archived tasks found.")
         return
-
     st.caption("Resume or delete paused tasks saved in archive.")
     for idx, row in archived_df.iterrows():
         task_name = str(row.get("TaskName") or "")
@@ -428,9 +629,7 @@ def review_archived_tasks_dialog(user_login, full_name, user_key):
             if st.button("Resume", key=f"resume_archive_{idx}", width="stretch"):
                 archive_path_raw = str(row.get("ArchiveFilePath") or "").strip()
                 if archive_path_raw:
-                    archive_path = Path(archive_path_raw)
-                    utils.delete_archived_task_file(archive_path)
-
+                    utils.delete_archived_task_file(Path(archive_path_raw))
                 st.session_state.state = "paused"
                 st.session_state.start_utc = start_utc
                 st.session_state.end_utc = None
@@ -448,326 +647,659 @@ def review_archived_tasks_dialog(user_login, full_name, user_key):
                 st.session_state.review_archive_open = False
                 st.session_state.review_archive_rendered = False
                 utils.load_archived_tasks.clear()
-                LOGGER.info("Resumed archived task | task='%s' user='%s'", task_name, user_login)
+                LOGGER.info("Resumed LS archived task | task='%s' user='%s'", task_name, user_login)
                 st.rerun()
         with delete_col:
             if st.button("Delete", key=f"delete_archive_{idx}", width="stretch"):
                 archive_path_raw = str(row.get("ArchiveFilePath") or "").strip()
                 if archive_path_raw:
-                    archive_path = Path(archive_path_raw)
-                    utils.delete_archived_task_file(archive_path)
+                    utils.delete_archived_task_file(Path(archive_path_raw))
                 utils.load_archived_tasks.clear()
                 st.session_state.review_archive_open = True
                 st.session_state.review_archive_rendered = False
-                LOGGER.info("Deleted archived task | task='%s' user='%s'", task_name, user_login)
+                LOGGER.info("Deleted LS archived task | task='%s' user='%s'", task_name, user_login)
                 st.rerun()
         st.divider()
 
-# Live activity section (refreshes periodically to show team activity)
+# ============================================================
+# DIALOGS — DATA & ANALYTICS
+# ============================================================
+@st.dialog("Submit?")
+def da_confirm_submit(user_login, full_name, user_key, task_name, selected_account):
+    task_name = da_get_effective_task_name(task_name)
+    st.caption(f"**User:** {full_name}")
+    st.caption(f"**Task:** {task_name}")
+    st.caption(f"**Started On:** {format_start_datetime(st.session_state.da_start_utc)}")
+    stakeholder = st.session_state.da_primary_stakeholder
+    st.caption(f"**Primary Stakeholder:** {stakeholder if stakeholder and stakeholder.strip() else 'None'}")
+    st.caption(f"**Department:** {st.session_state.da_department if st.session_state.da_department else 'None'}")
+    st.caption(f"**Account:** {selected_account if selected_account else 'None'}")
+    st.caption(f"**Notes:** {st.session_state.da_notes if st.session_state.da_notes else 'None'}")
+    st.caption(f"**Partially Complete:** {'Yes' if st.session_state.get('da_submit_partially_complete', False) else 'No'}")
+    st.divider()
+    effective_duration_seconds = get_submit_duration_seconds(st.session_state.da_elapsed_seconds)
+    current_duration = utils.format_hhmmss(effective_duration_seconds)
+    edited_duration = st.text_input("Duration", value=current_duration, key="da_edit_duration", max_chars=8)
+    parsed_duration = utils.parse_hhmmss(edited_duration)
+    if parsed_duration < 0:
+        parsed_duration = effective_duration_seconds
+        LOGGER.warning("Invalid edited duration format '%s'. Reverting to original duration.", edited_duration)
+        st.warning("Invalid format - using original duration")
+    st.divider()
+    left, right = st.columns(2)
+    with left:
+        if st.button("Submit", type="primary", width="stretch"):
+            if not task_name:
+                LOGGER.warning("Submit blocked because task name is blank.")
+                st.error("Task name is required. Please reset and select a task again.")
+                return
+            if edited_duration.strip() == current_duration:
+                parsed_duration = effective_duration_seconds
+            record = da_build_task_record(
+                user_login, full_name, task_name, selected_account,
+                st.session_state.da_primary_stakeholder, st.session_state.da_department,
+                st.session_state.da_notes, parsed_duration,
+                st.session_state.get("da_submit_partially_complete", False),
+            )
+            df_record = pd.DataFrame([record])
+            out_dir = utils.build_out_dir(DA_COMPLETED_TASKS_DIR, user_key, st.session_state.da_start_utc)
+            eastern_start = utils.to_eastern(st.session_state.da_start_utc)
+            fname = f"task_{eastern_start:%Y%m%d_%H%M%S}_{record['TaskID'][:8]}.parquet"
+            utils.atomic_write_parquet(df_record, out_dir / fname, schema=DA_PARQUET_SCHEMA)
+            utils.load_all_completed_tasks.clear()
+            utils.load_completed_tasks_for_analytics.clear()
+            utils.load_recent_tasks.clear()
+            try:
+                utils.sync_tasks_parquet_targets()
+            except Exception as exc:
+                LOGGER.warning("Completed task uploaded but target sync failed: %s", exc)
+            LOGGER.info(
+                "Uploaded DA completed task | task='%s' department='%s' duration_seconds=%s partially_complete=%s",
+                task_name, st.session_state.da_department, parsed_duration,
+                st.session_state.get("da_submit_partially_complete", False),
+            )
+            st.session_state.da_confirm_open = False
+            st.session_state.da_confirm_rendered = False
+            da_reset_all()
+            st.session_state.da_uploaded = True
+            st.rerun()
+    with right:
+        if st.button("Cancel", width="stretch"):
+            st.session_state.da_confirm_open = False
+            st.session_state.da_confirm_rendered = False
+            st.rerun()
+
+@st.dialog("Archived Tasks")
+def da_review_archived_tasks_dialog(user_login, full_name, user_key):
+    archived_df = utils.load_archived_tasks(DA_ARCHIVED_TASKS_DIR, user_key)
+    if archived_df.empty:
+        LOGGER.info("Archived tasks dialog opened but no archived tasks were found.")
+        st.info("No archived tasks found.")
+        return
+    st.caption("Resume or delete paused tasks saved in archive.")
+    for idx, row in archived_df.iterrows():
+        task_name = str(row.get("TaskName") or "")
+        start_utc = pd.to_datetime(row.get("StartTimestampUTC"), utc=True).to_pydatetime()
+        start_text = format_start_datetime(start_utc)
+        st.markdown(f"**{task_name}**")
+        st.caption(f"Start: {start_text}")
+        resume_col, delete_col = st.columns(2)
+        with resume_col:
+            if st.button("Resume", key=f"da_resume_archive_{idx}", width="stretch"):
+                archive_path_raw = str(row.get("ArchiveFilePath") or "").strip()
+                if archive_path_raw:
+                    utils.delete_archived_task_file(Path(archive_path_raw))
+                st.session_state.da_state = "paused"
+                st.session_state.da_start_utc = start_utc
+                st.session_state.da_end_utc = None
+                st.session_state.da_paused_seconds = int(row.get("PausedSeconds", 0) or 0)
+                st.session_state.da_pause_start_utc = utils.now_utc()
+                st.session_state.da_notes = str(row.get("Notes") or "")
+                st.session_state.da_primary_stakeholder = str(row.get("CoveringFor") or "")
+                st.session_state.da_restored_task_name = task_name
+                st.session_state.da_restored_account = str(row.get("CompanyGroup") or "")
+                st.session_state.da_restored_primary_stakeholder = st.session_state.da_primary_stakeholder
+                st.session_state.da_live_activity_saved = False
+                st.session_state.da_last_task_name = task_name
+                st.session_state.da_review_archive_open = False
+                st.session_state.da_review_archive_rendered = False
+                utils.load_archived_tasks.clear()
+                LOGGER.info("Resumed DA archived task | task='%s' user='%s'", task_name, user_login)
+                st.rerun()
+        with delete_col:
+            if st.button("Delete", key=f"da_delete_archive_{idx}", width="stretch"):
+                archive_path_raw = str(row.get("ArchiveFilePath") or "").strip()
+                if archive_path_raw:
+                    utils.delete_archived_task_file(Path(archive_path_raw))
+                utils.load_archived_tasks.clear()
+                st.session_state.da_review_archive_open = True
+                st.session_state.da_review_archive_rendered = False
+                LOGGER.info("Deleted DA archived task | task='%s' user='%s'", task_name, user_login)
+                st.rerun()
+        st.divider()
+
+# ============================================================
+# FRAGMENTS — LIVE ACTIVITY
+# ============================================================
 @st.fragment(run_every=30)
 def live_activity_section():
-    # Load live activities for all other users
-    live_activities_df = utils.load_live_activities(LIVE_ACTIVITY_DIR, _exclude_user_key=st.session_state.get("current_user_key"))
+    live_activities_df = utils.load_live_activities(LS_LIVE_ACTIVITY_DIR, _exclude_user_key=st.session_state.get("current_user_key"))
     if not live_activities_df.empty:
         st.divider()
         st.markdown(
-            """
-            <h3 style="margin-bottom: 0;">
-                <span class="live-activity-pulse"></span>
-                Live Activity
-            </h3>
-            """,
+            '<h3 style="margin-bottom: 0;"><span class="live-activity-pulse"></span> Live Activity</h3>',
             unsafe_allow_html=True,
         )
         st.caption("Tasks currently in progress by other team members")
         live_display_df = live_activities_df[["StartTimestampUTC", "FullName", "UserLogin", "TaskName", "Notes"]].copy()
         start_utc = pd.to_datetime(live_display_df["StartTimestampUTC"], utc=True)
-        live_display_df["Start Time"] = start_utc.dt.tz_convert(utils.EASTERN_TZ).dt.strftime("%#I:%M %p").str.lower() + " - " + start_utc.apply(lambda x: utils.format_time_ago(x))
-        if "Notes" not in live_display_df.columns:
-            live_display_df["Notes"] = ""
+        live_display_df["Start Time"] = (
+            start_utc.dt.tz_convert(utils.EASTERN_TZ).dt.strftime("%#I:%M %p").str.lower()
+            + " - "
+            + start_utc.apply(lambda x: utils.format_time_ago(x))
+        )
         live_display_df["Notes"] = live_display_df["Notes"].fillna("")
-        # Resolve display name
         live_display_df["User"] = live_display_df["FullName"].fillna("").astype(str).str.strip()
         mask_blank = live_display_df["User"].eq("")
         live_display_df.loc[mask_blank, "User"] = live_display_df.loc[mask_blank, "UserLogin"].fillna("").astype(str)
-        # Prepare final display DataFrame
-        display_cols = pd.DataFrame({
-            "User": live_display_df["User"],
-            "Task": live_display_df["TaskName"],
-            "Start Time": live_display_df["Start Time"],
-            "Notes": live_display_df["Notes"],
-        })
-        st.dataframe(display_cols, hide_index=True, width="stretch")
+        st.dataframe(
+            pd.DataFrame({"User": live_display_df["User"], "Task": live_display_df["TaskName"],
+                          "Start Time": live_display_df["Start Time"], "Notes": live_display_df["Notes"]}),
+            hide_index=True, width="stretch",
+        )
 
-# Header
+@st.fragment(run_every=30)
+def da_live_activity_section():
+    live_activities_df = utils.load_live_activities(DA_LIVE_ACTIVITY_DIR, _exclude_user_key=st.session_state.get("da_current_user_key"))
+    if not live_activities_df.empty:
+        st.divider()
+        st.markdown(
+            '<h3 style="margin-bottom: 0;"><span class="live-activity-pulse"></span> Live Activity</h3>',
+            unsafe_allow_html=True,
+        )
+        st.caption("Tasks currently in progress by other team members")
+        live_display_df = live_activities_df[["StartTimestampUTC", "FullName", "UserLogin", "TaskName", "Notes"]].copy()
+        start_utc = pd.to_datetime(live_display_df["StartTimestampUTC"], utc=True)
+        live_display_df["Start Time"] = (
+            start_utc.dt.tz_convert(utils.EASTERN_TZ).dt.strftime("%#I:%M %p").str.lower()
+            + " - "
+            + start_utc.apply(lambda x: utils.format_time_ago(x))
+        )
+        live_display_df["Notes"] = live_display_df["Notes"].fillna("")
+        live_display_df["User"] = live_display_df["FullName"].fillna("").astype(str).str.strip()
+        mask_blank = live_display_df["User"].eq("")
+        live_display_df.loc[mask_blank, "User"] = live_display_df.loc[mask_blank, "UserLogin"].fillna("").astype(str)
+        st.dataframe(
+            pd.DataFrame({"User": live_display_df["User"], "Task": live_display_df["TaskName"],
+                          "Start Time": live_display_df["Start Time"], "Notes": live_display_df["Notes"]}),
+            hide_index=True, width="stretch",
+        )
+
+# ============================================================
+# VERSION TOGGLE
+# ============================================================
+if "task_tracker_version" not in st.session_state:
+    st.session_state.task_tracker_version = "logistics"
+
 utils.render_page_header(PAGE_TITLE)
-if st.session_state.get("uploaded"):
-    LOGGER.info("Showing upload success toast.")
-    st.toast("Upload Successful", icon="✅")
-    st.session_state.uploaded = False
-if st.session_state.get("archived"):
-    LOGGER.info("Showing archived-task toast.")
-    st.toast("Task archived")
-    st.session_state.archived = False
 
-# Main layout columns
-spacer_l, left_col, _, mid_col, _, right_col, spacer_r = st.columns([0.4, 4, 0.2, 4, 0.2, 4, 0.4])
-with left_col:
-    user_login = utils.get_os_user()
-    full_name = utils.get_full_name_for_user(None, user_login)
-    user_key = utils.sanitize_key(user_login)
-    st.session_state.current_user_key = user_key
-    inputs_locked = st.session_state.state != "idle"
-    st.text_input("User", value=full_name, disabled=True)
-    all_users = utils.load_all_user_full_names(department="Logistics - Support")
-    # Exclude current user from covering list
-    covering_options = [""] + [u for u in all_users if u != full_name]
-    covering_key = f"covering_{st.session_state.reset_counter}"
-    # Restore covering selection if present
-    if st.session_state.restored_covering_for and covering_key not in st.session_state:
-        if st.session_state.restored_covering_for in covering_options:
-            st.session_state[covering_key] = st.session_state.restored_covering_for
-    covering_for = st.selectbox(
-        "Covering For (optional)",
-        covering_options,
-        disabled=inputs_locked,
-        key=covering_key,
-    )
-    account_options = [""] + utils.load_accounts(str(PERSONNEL_DIR))
-    acct_key = f"acct_{st.session_state.reset_counter}"
-    if st.session_state.restored_account and acct_key not in st.session_state:
-        if st.session_state.restored_account in account_options:
-            st.session_state[acct_key] = st.session_state.restored_account
-    selected_account = st.selectbox("Account (optional)", account_options, key=acct_key)
-    st.session_state.covering_for = covering_for
-    archived_count = len(utils.load_archived_tasks(ARCHIVED_TASKS_DIR, user_key))
-    data_signature = (
-        len([u for u in covering_options if u]),
-        len([a for a in account_options if a]),
-        archived_count,
-    )
-    if st.session_state.get("_task_tracker_data_signature") != data_signature:
-        st.session_state._task_tracker_data_signature = data_signature
-        LOGGER.info(
-            "Data snapshot | covering_users=%s accounts=%s archived_tasks=%s",
-            data_signature[0],
-            data_signature[1],
-            data_signature[2],
-        )
+_v_ls, _v_da, _ = st.columns([1.3, 1.3, 6])
+with _v_ls:
+    if st.button(
+        "Logistics Support",
+        use_container_width=True,
+        type="primary" if st.session_state.task_tracker_version == "logistics" else "secondary",
+        key="tracker_v_ls",
+    ):
+        st.session_state.task_tracker_version = "logistics"
+        st.rerun()
+with _v_da:
+    if st.button(
+        "Data & Analytics",
+        use_container_width=True,
+        type="primary" if st.session_state.task_tracker_version == "da" else "secondary",
+        key="tracker_v_da",
+    ):
+        st.session_state.task_tracker_version = "da"
+        st.rerun()
 
-with mid_col:
-    tasks_df = utils.load_tasks()
-    task_options = [""] + sorted(tasks_df["TaskName"].unique()) if not tasks_df.empty else [""]
-    task_key = f"task_{st.session_state.reset_counter}"
-    if st.session_state.restored_task_name and task_key not in st.session_state:
-        if st.session_state.restored_task_name in task_options:
-            st.session_state[task_key] = st.session_state.restored_task_name
-    task_name = st.selectbox("Task", task_options, disabled=inputs_locked, key=task_key)
-    effective_task_name = get_effective_task_name(task_name)
-    CADENCE_ORDER = ["Daily", "Weekly", "Periodic"]
-    available_cadences = []
-    if task_name:
-        available_cadences = tasks_df.loc[tasks_df["TaskName"] == task_name, "TaskCadence"].dropna().unique().tolist()
-    ordered_available_cadences = [c for c in CADENCE_ORDER if c in available_cadences]
-    # Auto-select cadence if needed
-    if task_name and st.session_state.state == "idle":
-        if task_name != st.session_state.last_task_name:
-            st.session_state.selected_cadence = None
-            st.session_state.last_task_name = task_name
-        if st.session_state.selected_cadence not in ordered_available_cadences:
-            st.session_state.selected_cadence = next((c for c in CADENCE_ORDER if c in ordered_available_cadences), None)
-    cadence_pills_key = (
-        f"cad_pills_{st.session_state.reset_counter}_"
-        f"{utils.sanitize_key(task_name) if task_name else 'none'}"
-    )
-    if not task_name:
-        cadence_options = CADENCE_ORDER
-        cadence_default = None
-        cadence_disabled = True
-    elif ordered_available_cadences:
-        cadence_options = ordered_available_cadences
-        cadence_default = (
-            st.session_state.selected_cadence
-            if st.session_state.selected_cadence in ordered_available_cadences
-            else ordered_available_cadences[0]
+# ============================================================
+# LOGISTICS SUPPORT — UI
+# ============================================================
+if st.session_state.task_tracker_version == "logistics":
+    if st.session_state.get("uploaded"):
+        LOGGER.info("Showing LS upload success toast.")
+        st.toast("Upload Successful", icon="✅")
+        st.session_state.uploaded = False
+    if st.session_state.get("archived"):
+        LOGGER.info("Showing LS archived-task toast.")
+        st.toast("Task archived")
+        st.session_state.archived = False
+
+    spacer_l, left_col, _, mid_col, _, right_col, spacer_r = st.columns([0.4, 4, 0.2, 4, 0.2, 4, 0.4])
+    with left_col:
+        user_login = utils.get_os_user()
+        full_name = utils.get_full_name_for_user(None, user_login)
+        user_key = utils.sanitize_key(user_login)
+        st.session_state.current_user_key = user_key
+        inputs_locked = st.session_state.state != "idle"
+        st.text_input("User", value=full_name, disabled=True)
+        all_users = utils.load_all_user_full_names(department="Logistics - Support")
+        covering_options = [""] + [u for u in all_users if u != full_name]
+        covering_key = f"covering_{st.session_state.reset_counter}"
+        if st.session_state.restored_covering_for and covering_key not in st.session_state:
+            if st.session_state.restored_covering_for in covering_options:
+                st.session_state[covering_key] = st.session_state.restored_covering_for
+        covering_for = st.selectbox("Covering For (optional)", covering_options, disabled=inputs_locked, key=covering_key)
+        account_options = [""] + utils.load_accounts(str(PERSONNEL_DIR))
+        acct_key = f"acct_{st.session_state.reset_counter}"
+        if st.session_state.restored_account and acct_key not in st.session_state:
+            if st.session_state.restored_account in account_options:
+                st.session_state[acct_key] = st.session_state.restored_account
+        selected_account = st.selectbox("Account (optional)", account_options, key=acct_key)
+        st.session_state.covering_for = covering_for
+        archived_count = len(utils.load_archived_tasks(LS_ARCHIVED_TASKS_DIR, user_key))
+        data_signature = (len([u for u in covering_options if u]), len([a for a in account_options if a]), archived_count)
+        if st.session_state.get("_task_tracker_data_signature") != data_signature:
+            st.session_state._task_tracker_data_signature = data_signature
+            LOGGER.info("Data snapshot | covering_users=%s accounts=%s archived_tasks=%s", *data_signature)
+
+    with mid_col:
+        tasks_df = utils.load_tasks()
+        task_options = [""] + sorted(tasks_df["TaskName"].unique()) if not tasks_df.empty else [""]
+        task_key = f"task_{st.session_state.reset_counter}"
+        if st.session_state.restored_task_name and task_key not in st.session_state:
+            if st.session_state.restored_task_name in task_options:
+                st.session_state[task_key] = st.session_state.restored_task_name
+        task_name = st.selectbox("Task", task_options, disabled=inputs_locked, key=task_key)
+        effective_task_name = get_effective_task_name(task_name)
+        CADENCE_ORDER = ["Daily", "Weekly", "Periodic"]
+        available_cadences = []
+        if task_name:
+            available_cadences = tasks_df.loc[tasks_df["TaskName"] == task_name, "TaskCadence"].dropna().unique().tolist()
+        ordered_available_cadences = [c for c in CADENCE_ORDER if c in available_cadences]
+        if task_name and st.session_state.state == "idle":
+            if task_name != st.session_state.last_task_name:
+                st.session_state.selected_cadence = None
+                st.session_state.last_task_name = task_name
+            if st.session_state.selected_cadence not in ordered_available_cadences:
+                st.session_state.selected_cadence = next((c for c in CADENCE_ORDER if c in ordered_available_cadences), None)
+        cadence_pills_key = f"cad_pills_{st.session_state.reset_counter}_{utils.sanitize_key(task_name) if task_name else 'none'}"
+        if not task_name:
+            cadence_options = CADENCE_ORDER
+            cadence_default = None
+            cadence_disabled = True
+        elif ordered_available_cadences:
+            cadence_options = ordered_available_cadences
+            cadence_default = (
+                st.session_state.selected_cadence
+                if st.session_state.selected_cadence in ordered_available_cadences
+                else ordered_available_cadences[0]
+            )
+            cadence_disabled = inputs_locked
+        else:
+            cadence_options = CADENCE_ORDER
+            cadence_default = None
+            cadence_disabled = True
+        cadence_choice = st.pills(
+            "Cadence", cadence_options, selection_mode="single",
+            default=cadence_default, key=cadence_pills_key, disabled=cadence_disabled, width="stretch",
         )
-        cadence_disabled = inputs_locked
+        if cadence_choice in ordered_available_cadences:
+            st.session_state.selected_cadence = cadence_choice
+        st.text_area("Notes (optional)", key="notes", height=120)
+
+    with right_col:
+        st.session_state.elapsed_seconds = compute_elapsed_seconds()
+        hh, mm = utils.format_hh_mm_parts(st.session_state.elapsed_seconds)
+        colon_class = "blink-colon" if st.session_state.state == "running" else ""
+        st.markdown(
+            f'<div style="text-align:center;margin-bottom:20px;">'
+            f'<div style="font-size:36px;font-weight:600;">{hh}<span class="{colon_class}">:</span>{mm}</div>'
+            f'<div style="font-size:15px;color:#6b6b6b;">Elapsed Time</div></div>',
+            unsafe_allow_html=True,
+        )
+        if st.session_state.state == "idle":
+            c1, c2 = st.columns(2)
+            can_start = bool(task_name and st.session_state.selected_cadence)
+            with c1:
+                st.button("Start", width="stretch", disabled=not can_start,
+                          help=None if can_start else "Select a task to start time",
+                          on_click=start_task if can_start else None)
+            with c2:
+                st.button("End", width="stretch", disabled=True)
+        elif st.session_state.state == "running":
+            c1, c2 = st.columns(2)
+            with c1:
+                st.button("Pause", width="stretch", on_click=pause_task)
+            with c2:
+                st.button("End", width="stretch", on_click=end_task)
+        elif st.session_state.state == "paused":
+            c1, c2 = st.columns(2)
+            with c1:
+                st.button("Resume", width="stretch", on_click=resume_task)
+            with c2:
+                st.button("End", width="stretch", on_click=end_task)
+        if st.session_state.state == "paused":
+            st.button("Archive", width="stretch", on_click=archive_task,
+                      args=(user_login, full_name, user_key, effective_task_name, selected_account))
+        if archived_count > 0:
+            if st.button(f"You have {archived_count} archived tasks, click here to review",
+                         key="review_archived_link", type="tertiary"):
+                LOGGER.info("User opened archived tasks review with %s archived item(s).", archived_count)
+                st.session_state.review_archive_open = True
+                st.session_state.review_archive_rendered = False
+                st.rerun()
+        if st.session_state.state == "ended":
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Upload", type="primary", width="stretch"):
+                    if not effective_task_name:
+                        LOGGER.warning("Upload blocked because effective task name is blank.")
+                        st.error("Task name is missing. Please reset and select a task again.")
+                    else:
+                        st.session_state.submit_partially_complete = st.session_state.get("partially_complete", False)
+                        st.session_state.confirm_open = True
+                        st.session_state.confirm_rendered = False
+                        st.rerun()
+            with c2:
+                st.button("Reset", width="stretch", on_click=reset_all)
+        if st.session_state.state != "idle":
+            pc_left, pc_right = st.columns([1.4, 3])
+            with pc_left:
+                st.markdown("<div style='padding-top: 8px;'>Partially complete?</div>", unsafe_allow_html=True)
+            with pc_right:
+                st.toggle("Partially complete", key="partially_complete", label_visibility="collapsed")
+
+    if st.session_state.state in ("running", "paused") and not st.session_state.live_activity_saved and effective_task_name and st.session_state.selected_cadence:
+        utils.save_live_activity(
+            LS_LIVE_ACTIVITY_DIR, user_key, user_login, full_name,
+            effective_task_name, st.session_state.selected_cadence, selected_account,
+            st.session_state.covering_for, st.session_state.notes, st.session_state.start_utc,
+            state=st.session_state.state, paused_seconds=st.session_state.paused_seconds,
+            pause_start_utc=st.session_state.pause_start_utc,
+        )
+        st.session_state.live_activity_saved = True
+        st.session_state.live_task_name = effective_task_name
+        st.session_state.live_cadence = st.session_state.selected_cadence
+        st.session_state.live_account = selected_account
+        LOGGER.info("LS live activity saved | task='%s' cadence='%s' state='%s'",
+                    effective_task_name, st.session_state.selected_cadence, st.session_state.state)
+
+    if st.session_state.confirm_open and not st.session_state.get("confirm_rendered"):
+        st.session_state.confirm_rendered = True
+        confirm_submit(user_login, full_name, user_key, effective_task_name, selected_account)
+    if st.session_state.review_archive_open and not st.session_state.get("review_archive_rendered"):
+        st.session_state.review_archive_rendered = True
+        review_archived_tasks_dialog(user_login, full_name, user_key)
+
+    live_activity_section()
+
+    st.divider()
+    title_col, text_col, toggle_col = st.columns([6, 5, 0.5], vertical_alignment="center")
+    with title_col:
+        st.subheader("Today's Activity", anchor=False)
+    with text_col:
+        st.markdown("Show all users?", text_alignment="right")
+    with toggle_col:
+        show_all_users = st.toggle("Show all users?", value=True, key="show_all_users", label_visibility="collapsed")
+    _last_show_all = st.session_state.get("_last_show_all_users")
+    if _last_show_all is None or _last_show_all != show_all_users:
+        LOGGER.info("Today's Activity filter changed | show_all_users=%s", show_all_users)
+        st.session_state._last_show_all_users = show_all_users
+
+    if show_all_users:
+        recent_df = utils.load_recent_tasks(LS_COMPLETED_TASKS_DIR, user_key=None, limit=50)
     else:
-        cadence_options = CADENCE_ORDER
-        cadence_default = None
-        cadence_disabled = True
-
-    cadence_choice = st.pills(
-        "Cadence",
-        cadence_options,
-        selection_mode="single",
-        default=cadence_default,
-        key=cadence_pills_key,
-        disabled=cadence_disabled,
-        width="stretch",
-    )
-    if cadence_choice in ordered_available_cadences:
-        st.session_state.selected_cadence = cadence_choice
-    st.text_area("Notes (optional)", key="notes", height=120)
-
-with right_col:
-    st.session_state.elapsed_seconds = compute_elapsed_seconds()
-    hh, mm = utils.format_hh_mm_parts(st.session_state.elapsed_seconds)
-    colon_class = "blink-colon" if st.session_state.state == "running" else ""
-    st.markdown(
-        f"""
-        <div style="text-align:center;margin-bottom:20px;">
-            <div style="font-size:36px;font-weight:600;">
-                {hh}<span class="{colon_class}">:</span>{mm}
-            </div>
-            <div style="font-size:15px;color:#6b6b6b;">Elapsed Time</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.session_state.state == "idle":
-        c1, c2 = st.columns(2)
-        can_start = bool(task_name and st.session_state.selected_cadence)
-        with c1:
-            st.button("Start", width="stretch", disabled=not can_start,
-                      help=None if can_start else "Select a task to start time",
-                      on_click=start_task if can_start else None)
-        with c2:
-            st.button("End", width="stretch", disabled=True)
-    elif st.session_state.state == "running":
-        c1, c2 = st.columns(2)
-        with c1:
-            st.button("Pause", width="stretch", on_click=pause_task)
-        with c2:
-            st.button("End", width="stretch", on_click=end_task)
-    elif st.session_state.state == "paused":
-        c1, c2 = st.columns(2)
-        with c1:
-            st.button("Resume", width="stretch", on_click=resume_task)
-        with c2:
-            st.button("End", width="stretch", on_click=end_task)
-    if st.session_state.state == "paused":
-        st.button(
-            "Archive",
-            width="stretch",
-            on_click=archive_task,
-            args=(user_login, full_name, user_key, effective_task_name, selected_account),
+        recent_df = utils.load_recent_tasks(LS_COMPLETED_TASKS_DIR, user_key=user_key, limit=50)
+    if not recent_df.empty:
+        recent_df["Duration"] = recent_df["DurationSeconds"].apply(utils.format_hhmmss)
+        recent_df["Uploaded"] = pd.to_datetime(recent_df["EndTimestampUTC"], utc=True).apply(lambda x: utils.format_time_ago(x))
+        if "PartiallyComplete" not in recent_df.columns:
+            recent_df["PartiallyComplete"] = pd.Series([pd.NA] * len(recent_df), dtype="boolean")
+        else:
+            recent_df["PartiallyComplete"] = recent_df["PartiallyComplete"].astype("boolean")
+        recent_df["Part. Completed?"] = recent_df["PartiallyComplete"].fillna(False).astype(bool)
+        recent_df["Notes"] = recent_df.get("Notes", pd.Series([""] * len(recent_df))).fillna("")
+        recent_df["DisplayUser"] = recent_df["FullName"].fillna("").astype(str).str.strip()
+        mask_blank = recent_df["DisplayUser"].eq("")
+        recent_df.loc[mask_blank, "DisplayUser"] = recent_df.loc[mask_blank, "UserLogin"].fillna("").astype(str)
+        display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"]]
+        st.dataframe(
+            display_df, hide_index=True, width="stretch",
+            column_config={
+                "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", disabled=True, width="small"),
+                "Notes": st.column_config.TextColumn("Notes", width="large"),
+                "Uploaded": st.column_config.TextColumn("Uploaded", width="small"),
+            },
         )
-    if archived_count > 0:
-        if st.button(
-            f"You have {archived_count} archived tasks, click here to review",
-            key="review_archived_link",
-            type="tertiary",
-        ):
-            LOGGER.info("User opened archived tasks review with %s archived item(s).", archived_count)
-            st.session_state.review_archive_open = True
-            st.session_state.review_archive_rendered = False
-            st.rerun()
-    if st.session_state.state == "ended":
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Upload", type="primary", width="stretch"):
-                if not effective_task_name:
-                    LOGGER.warning("Upload blocked because effective task name is blank.")
-                    st.error("Task name is missing. Please reset and select a task again.")
-                else:
-                    st.session_state.submit_partially_complete = st.session_state.get("partially_complete", False)
-                    st.session_state.confirm_open = True
-                    st.session_state.confirm_rendered = False
+    else:
+        LOGGER.info("No LS tasks completed today to display.")
+        st.info("No tasks completed today.")
+
+    st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")
+    if st.session_state.state == "running":
+        st_autorefresh(interval=10000, key="timer")
+
+# ============================================================
+# DATA & ANALYTICS — UI
+# ============================================================
+else:
+    if st.session_state.get("da_uploaded"):
+        LOGGER.info("Showing DA upload success toast.")
+        st.toast("Upload Successful", icon="✅")
+        st.session_state.da_uploaded = False
+    if st.session_state.get("da_archived"):
+        LOGGER.info("Showing DA archived-task toast.")
+        st.toast("Task archived")
+        st.session_state.da_archived = False
+
+    spacer_l, left_col, _, mid_col, _, right_col, spacer_r = st.columns([0.4, 4, 0.2, 4, 0.2, 4, 0.4])
+    with left_col:
+        user_login = utils.get_os_user()
+        full_name = utils.get_full_name_for_user(None, user_login)
+        user_key = utils.sanitize_key(user_login)
+        st.session_state.da_current_user_key = user_key
+        inputs_locked = st.session_state.da_state != "idle"
+        st.text_input("User", value=full_name, disabled=True, key="da_user_display")
+        stakeholder_key = f"da_stakeholder_{st.session_state.da_reset_counter}"
+        if st.session_state.da_restored_primary_stakeholder and stakeholder_key not in st.session_state:
+            st.session_state[stakeholder_key] = st.session_state.da_restored_primary_stakeholder
+        primary_stakeholder = st.text_input("Primary Stakeholder (optional)", disabled=inputs_locked, key=stakeholder_key)
+        st.session_state.da_primary_stakeholder = primary_stakeholder
+        dept_key = f"da_dept_{st.session_state.da_reset_counter}"
+        if st.session_state.da_restored_department and dept_key not in st.session_state:
+            if st.session_state.da_restored_department in DEPARTMENT_OPTIONS:
+                st.session_state[dept_key] = st.session_state.da_restored_department
+        selected_department = st.selectbox("Department (optional)", DEPARTMENT_OPTIONS, key=dept_key, disabled=inputs_locked)
+        st.session_state.da_department = selected_department
+        account_options = [""] + utils.load_accounts(str(PERSONNEL_DIR))
+        acct_key = f"da_acct_{st.session_state.da_reset_counter}"
+        if st.session_state.da_restored_account and acct_key not in st.session_state:
+            if st.session_state.da_restored_account in account_options:
+                st.session_state[acct_key] = st.session_state.da_restored_account
+        selected_account = st.selectbox("Account (optional)", account_options, key=acct_key, disabled=inputs_locked)
+        archived_count = len(utils.load_archived_tasks(DA_ARCHIVED_TASKS_DIR, user_key))
+        data_signature = (len([a for a in account_options if a]), archived_count)
+        if st.session_state.get("da__task_tracker_data_signature") != data_signature:
+            st.session_state.da__task_tracker_data_signature = data_signature
+            LOGGER.info("DA data snapshot | accounts=%s archived_tasks=%s", *data_signature)
+
+    with mid_col:
+        task_key = f"da_task_{st.session_state.da_reset_counter}"
+        if st.session_state.da_restored_task_name and task_key not in st.session_state:
+            st.session_state[task_key] = st.session_state.da_restored_task_name
+        task_name = st.text_input("Task", disabled=inputs_locked, key=task_key)
+        effective_task_name = da_get_effective_task_name(task_name)
+        st.text_area("Notes (optional)", key="da_notes", height=120)
+
+    with right_col:
+        st.session_state.da_elapsed_seconds = da_compute_elapsed_seconds()
+        hh, mm = utils.format_hh_mm_parts(st.session_state.da_elapsed_seconds)
+        colon_class = "blink-colon" if st.session_state.da_state == "running" else ""
+        st.markdown(
+            f'<div style="text-align:center;margin-bottom:20px;">'
+            f'<div style="font-size:36px;font-weight:600;">{hh}<span class="{colon_class}">:</span>{mm}</div>'
+            f'<div style="font-size:15px;color:#6b6b6b;">Elapsed Time</div></div>',
+            unsafe_allow_html=True,
+        )
+        if st.session_state.da_state == "idle":
+            c1, c2 = st.columns(2)
+            can_start = bool(task_name)
+            with c1:
+                st.button("Start", width="stretch", disabled=not can_start,
+                          help=None if can_start else "Select a task to start time",
+                          on_click=da_start_task if can_start else None,
+                          key="da_start_btn")
+            with c2:
+                st.button("End", width="stretch", disabled=True, key="da_end_disabled")
+        elif st.session_state.da_state == "running":
+            c1, c2 = st.columns(2)
+            with c1:
+                st.button("Pause", width="stretch", on_click=da_pause_task, key="da_pause_btn")
+            with c2:
+                st.button("End", width="stretch", on_click=da_end_task, key="da_end_btn")
+        elif st.session_state.da_state == "paused":
+            c1, c2 = st.columns(2)
+            with c1:
+                st.button("Resume", width="stretch", on_click=da_resume_task, key="da_resume_btn")
+            with c2:
+                st.button("End", width="stretch", on_click=da_end_task, key="da_end_paused_btn")
+        if st.session_state.da_state == "paused":
+            st.button("Archive", width="stretch", on_click=da_archive_task,
+                      args=(user_login, full_name, user_key, effective_task_name, selected_account),
+                      key="da_archive_btn")
+        if archived_count > 0:
+            if st.button(f"You have {archived_count} archived tasks, click here to review",
+                         key="da_review_archived_link", type="tertiary"):
+                LOGGER.info("User opened DA archived tasks review with %s archived item(s).", archived_count)
+                st.session_state.da_review_archive_open = True
+                st.session_state.da_review_archive_rendered = False
+                st.rerun()
+        if st.session_state.da_state == "ended":
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Upload", type="primary", width="stretch", key="da_upload_btn"):
+                    if not effective_task_name:
+                        LOGGER.warning("Upload blocked because effective task name is blank.")
+                        st.error("Task name is missing. Please reset and select a task again.")
+                    else:
+                        st.session_state.da_submit_partially_complete = st.session_state.get("da_partially_complete", False)
+                        st.session_state.da_confirm_open = True
+                        st.session_state.da_confirm_rendered = False
+                        st.rerun()
+            with c2:
+                st.button("Reset", width="stretch", on_click=da_reset_all, key="da_reset_btn")
+        if st.session_state.da_state != "idle":
+            pc_left, pc_right = st.columns([1.4, 3])
+            with pc_left:
+                st.markdown("<div style='padding-top: 8px;'>Partially complete?</div>", unsafe_allow_html=True)
+            with pc_right:
+                st.toggle("Partially complete", key="da_partially_complete", label_visibility="collapsed")
+
+    if st.session_state.da_state in ("running", "paused") and not st.session_state.da_live_activity_saved and effective_task_name:
+        try:
+            utils.save_live_activity(
+                DA_LIVE_ACTIVITY_DIR, user_key, user_login, full_name,
+                effective_task_name, None, selected_account,
+                st.session_state.da_primary_stakeholder, st.session_state.da_notes,
+                st.session_state.da_start_utc, state=st.session_state.da_state,
+                paused_seconds=st.session_state.da_paused_seconds,
+                pause_start_utc=st.session_state.da_pause_start_utc,
+            )
+            st.session_state.da_live_activity_saved = True
+            st.session_state.da_live_task_name = effective_task_name
+            st.session_state.da_live_account = selected_account
+            LOGGER.info("DA live activity saved | task='%s' state='%s'", effective_task_name, st.session_state.da_state)
+        except Exception as exc:
+            LOGGER.warning("Failed to save DA live activity: %s", exc)
+
+    if st.session_state.da_confirm_open and not st.session_state.get("da_confirm_rendered"):
+        st.session_state.da_confirm_rendered = True
+        da_confirm_submit(user_login, full_name, user_key, effective_task_name, selected_account)
+    if st.session_state.da_review_archive_open and not st.session_state.get("da_review_archive_rendered"):
+        st.session_state.da_review_archive_rendered = True
+        da_review_archived_tasks_dialog(user_login, full_name, user_key)
+
+    da_live_activity_section()
+
+    st.divider()
+    title_col, text_col, toggle_col = st.columns([6, 5, 0.5], vertical_alignment="center")
+    with title_col:
+        st.subheader("Today's Activity", anchor=False)
+    with text_col:
+        st.markdown("Show all users?", text_alignment="right")
+    with toggle_col:
+        show_all_users = st.toggle("Show all users?", value=True, key="da_show_all_users", label_visibility="collapsed")
+    _last_show_all = st.session_state.get("da__last_show_all_users")
+    if _last_show_all is None or _last_show_all != show_all_users:
+        LOGGER.info("DA Today's Activity filter changed | show_all_users=%s", show_all_users)
+        st.session_state.da__last_show_all_users = show_all_users
+
+    if st.session_state.get("da_task_deleted"):
+        st.toast("Task deleted", icon="🗑️")
+        st.session_state.da_task_deleted = False
+
+    if show_all_users:
+        recent_df = utils.load_recent_tasks(DA_COMPLETED_TASKS_DIR, user_key=None, limit=50)
+    else:
+        recent_df = utils.load_recent_tasks(DA_COMPLETED_TASKS_DIR, user_key=user_key, limit=50)
+
+    own_tasks_df = load_own_tasks_with_paths(DA_COMPLETED_TASKS_DIR, user_key)
+    own_file_map: dict[str, str] = {}
+    if not own_tasks_df.empty and "StartTimestampUTC" in own_tasks_df.columns:
+        for _, orow in own_tasks_df.iterrows():
+            own_file_map[str(orow["StartTimestampUTC"])] = str(orow["_file_path"])
+
+    if not recent_df.empty:
+        recent_df["Duration"] = recent_df["DurationSeconds"].apply(utils.format_hhmmss)
+        recent_df["Uploaded"] = pd.to_datetime(recent_df["EndTimestampUTC"], utc=True).apply(lambda x: utils.format_time_ago(x))
+        if "PartiallyComplete" not in recent_df.columns:
+            recent_df["PartiallyComplete"] = pd.Series([pd.NA] * len(recent_df), dtype="boolean")
+        else:
+            recent_df["PartiallyComplete"] = recent_df["PartiallyComplete"].astype("boolean")
+        recent_df["Part. Completed?"] = recent_df["PartiallyComplete"].fillna(False).astype(bool)
+        recent_df["Notes"] = recent_df.get("Notes", pd.Series([""] * len(recent_df))).fillna("")
+        recent_df["DisplayUser"] = recent_df["FullName"].fillna("").astype(str).str.strip()
+        mask_blank = recent_df["DisplayUser"].eq("")
+        recent_df.loc[mask_blank, "DisplayUser"] = recent_df.loc[mask_blank, "UserLogin"].fillna("").astype(str)
+        row_file_paths: list[str] = []
+        for _, rrow in recent_df.iterrows():
+            is_own = str(rrow.get("UserLogin", "")).strip().lower() == user_login.lower()
+            ts_key = str(rrow.get("StartTimestampUTC"))
+            row_file_paths.append(own_file_map.get(ts_key, "") if is_own else "")
+        display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"]].copy()
+        display_df.insert(0, "Delete", False)
+        edited_df = st.data_editor(
+            display_df, hide_index=True, width="stretch",
+            disabled=["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"],
+            column_config={
+                "Delete": st.column_config.CheckboxColumn("🗑️", width="small", default=False),
+                "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", disabled=True, width="small"),
+                "Notes": st.column_config.TextColumn("Notes", width="large"),
+                "Uploaded": st.column_config.TextColumn("Uploaded", width="small"),
+            },
+        )
+        checked_indices = edited_df.index[edited_df["Delete"]].tolist()
+        if checked_indices:
+            deletable = [(i, row_file_paths[i]) for i in checked_indices if row_file_paths[i]]
+            non_own = len(checked_indices) - len(deletable)
+            if non_own > 0:
+                st.caption("You can only delete your own tasks.")
+            if deletable:
+                n = len(deletable)
+                if st.button(f"Confirm delete ({n} task{'s' if n > 1 else ''})", key="da_confirm_delete_btn", type="primary"):
+                    for _, fpath in deletable:
+                        delete_completed_task(fpath, DA_COMPLETED_TASKS_DIR, user_key)
+                    utils.load_recent_tasks.clear()
+                    utils.load_all_completed_tasks.clear()
+                    utils.load_completed_tasks_for_analytics.clear()
+                    st.session_state.da_task_deleted = True
                     st.rerun()
-        with c2:
-            st.button("Reset", width="stretch", on_click=reset_all)
-    if st.session_state.state != "idle":
-        pc_left, pc_right = st.columns([1.4, 3])
-        with pc_left:
-            st.markdown("<div style='padding-top: 8px;'>Partially complete?</div>", unsafe_allow_html=True)
-        with pc_right:
-            st.toggle("Partially complete", key="partially_complete", label_visibility="collapsed")
-
-# Save live activity after input changes (to broadcast running task to others)
-if st.session_state.state in ("running", "paused") and not st.session_state.live_activity_saved and effective_task_name and st.session_state.selected_cadence:
-    utils.save_live_activity(
-        LIVE_ACTIVITY_DIR, user_key, user_login, full_name,
-        effective_task_name, st.session_state.selected_cadence, selected_account,
-        st.session_state.covering_for, st.session_state.notes,
-        st.session_state.start_utc,
-        state=st.session_state.state,
-        paused_seconds=st.session_state.paused_seconds,
-        pause_start_utc=st.session_state.pause_start_utc,
-    )
-    st.session_state.live_activity_saved = True
-    st.session_state.live_task_name = effective_task_name
-    st.session_state.live_cadence = st.session_state.selected_cadence
-    st.session_state.live_account = selected_account
-    LOGGER.info(
-        "Live activity saved | task='%s' cadence='%s' state='%s'",
-        effective_task_name,
-        st.session_state.selected_cadence,
-        st.session_state.state,
-    )
-
-# Open confirmation modal if triggered
-if st.session_state.confirm_open and not st.session_state.get("confirm_rendered"):
-    st.session_state.confirm_rendered = True
-    confirm_submit(user_login, full_name, user_key, effective_task_name, selected_account)
-if st.session_state.review_archive_open and not st.session_state.get("review_archive_rendered"):
-    st.session_state.review_archive_rendered = True
-    review_archived_tasks_dialog(user_login, full_name, user_key)
-
-# Render live activity section (ongoing tasks of other users)
-live_activity_section()
-
-# Today's completed tasks section
-st.divider()
-title_col, text_col, toggle_col = st.columns([6, 5, 0.5], vertical_alignment="center")
-with title_col:
-    st.subheader("Today's Activity", anchor=False)
-with text_col:
-    st.markdown("Show all users?", text_alignment="right")
-with toggle_col:
-    show_all_users = st.toggle("Show all users?", value=True, key="show_all_users", label_visibility="collapsed")
-_last_show_all = st.session_state.get("_last_show_all_users")
-if _last_show_all is None or _last_show_all != show_all_users:
-    LOGGER.info("Today's Activity filter changed | show_all_users=%s", show_all_users)
-    st.session_state._last_show_all_users = show_all_users
-
-# Load and display today's completed tasks
-if show_all_users:
-    recent_df = utils.load_recent_tasks(COMPLETED_TASKS_DIR, user_key=None, limit=50)
-else:
-    recent_df = utils.load_recent_tasks(COMPLETED_TASKS_DIR, user_key=user_key, limit=50)
-if not recent_df.empty:
-    recent_df["Duration"] = recent_df["DurationSeconds"].apply(utils.format_hhmmss)
-    recent_df["Uploaded"] = pd.to_datetime(recent_df["EndTimestampUTC"], utc=True).apply(lambda x: utils.format_time_ago(x))
-    if "PartiallyComplete" not in recent_df.columns:
-        recent_df["PartiallyComplete"] = pd.Series([pd.NA] * len(recent_df), dtype="boolean")
     else:
-        recent_df["PartiallyComplete"] = recent_df["PartiallyComplete"].astype("boolean")
-    recent_df["Part. Completed?"] = recent_df["PartiallyComplete"].fillna(False).astype(bool)
-    if "Notes" not in recent_df.columns:
-        recent_df["Notes"] = ""
-    recent_df["Notes"] = recent_df["Notes"].fillna("")
-    if "FullName" not in recent_df.columns:
-        recent_df["FullName"] = ""
-    recent_df["DisplayUser"] = recent_df["FullName"].fillna("").astype(str).str.strip()
-    mask_blank = recent_df["DisplayUser"].eq("")
-    recent_df.loc[mask_blank, "DisplayUser"] = recent_df.loc[mask_blank, "UserLogin"].fillna("").astype(str)
-    display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"]]
-    st.dataframe(
-        display_df,
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", disabled=True, width="small"),
-            "Notes": st.column_config.TextColumn("Notes", width="large"),
-            "Uploaded": st.column_config.TextColumn("Uploaded", width="small"),
-        },
-    )
-else:
-    LOGGER.info("No tasks completed today to display.")
-    st.info("No tasks completed today.")
+        LOGGER.info("No DA tasks completed today to display.")
+        st.info("No tasks completed today.")
 
-# Footer with app version
-st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")
-if st.session_state.state == "running":
-    st_autorefresh(interval=10000, key="timer")
+    st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")
+    if st.session_state.da_state == "running":
+        st_autorefresh(interval=10000, key="da_timer")
