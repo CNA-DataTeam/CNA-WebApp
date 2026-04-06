@@ -48,10 +48,13 @@ Before changing code, keep these project-specific rules in mind:
    These steps must ALWAYS be run in this order before any git operation:
    1. Rebuild the exe: `RebuildExe.bat`
    2. Encrypt config: `.venv\Scripts\python.exe "CODE - do not open\config_manager.py" encrypt`
-   3. Rebuild the installer: `RebuildInstaller.bat` (best-effort — if Inno Setup is not installed, log a warning but do not block the commit)
+   3. Rebuild the installer: `RebuildInstaller.bat`
    Then stage and commit both `CNA Web App.exe` and `config.enc` alongside your other changes (the installer output is gitignored).
    This applies even if the user does not mention rebuilding or encryption — assume all three are always needed unless the user explicitly says to skip them. Many users of this project are not aware of these technical requirements, so it is YOUR responsibility to always run all steps before any git operation. Never commit `config.py` directly — the repo is public.
    See section 4 for full details on the config encryption system.
+
+9. **Keep the commit skill in sync with pre-commit and commit steps.**
+   The file `.claude/skills/commit/SKILL.md` defines the commit workflow that the AI follows when using the `/commit` command. Any time a pre-commit step, commit step, or related process is added, removed, or changed in this document or in the batch files, the commit skill MUST be updated to match. The skill is the executable version of these instructions — if they diverge, commits will be wrong.
 
 ## 3. Repository Layout
 
@@ -120,7 +123,7 @@ Key files:
 Workflow for ANY git commit or push (whether or not config.py or launcher files were changed):
 1. Rebuild the exe: `RebuildExe.bat`
 2. Encrypt config: `.venv\Scripts\python.exe "CODE - do not open\config_manager.py" encrypt`
-3. Rebuild the installer: `RebuildInstaller.bat` (best-effort — skip if Inno Setup not installed)
+3. Rebuild the installer: `RebuildInstaller.bat`
 4. Stage both `CNA Web App.exe` and `config.enc` alongside your other changes (installer output is gitignored)
 5. Commit and push
 

@@ -33,9 +33,15 @@ This updates `CODE - do not open/config.enc` with the latest `config.py`. If it 
 
 ### 3. Rebuild the installer
 
-Run `RebuildInstaller.bat` from the project root. This uses ISCC.exe (Inno Setup CLI compiler) to build `installer-output/CNA-WebApp-Setup.exe`. If it fails because Inno Setup is not installed, log a warning but do NOT block the commit — the installer rebuild is best-effort.
+Run `RebuildInstaller.bat` from the project root:
 
-Note: The installer output (`installer-output/`) is gitignored and is NOT committed. This step just ensures the local installer artifact stays current.
+```
+cmd.exe /c RebuildInstaller.bat
+```
+
+This uses ISCC.exe (Inno Setup CLI compiler) to build `installer-output/CNA-WebApp-Setup.exe`. If it fails, stop and tell the user.
+
+Note: The installer output (`installer-output/`) is gitignored and is NOT committed. This step ensures the local installer artifact stays current.
 
 ### 4. Review changes
 

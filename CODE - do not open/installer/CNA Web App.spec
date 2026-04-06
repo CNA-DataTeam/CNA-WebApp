@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['C:\\Users\\jramsey\\OneDrive - clarkinc.biz\\Desktop\\WebApp\\CNA-WebApp\\CODE - do not open\\stub_launcher.py'],
+    ['C:/Users/jramsey/OneDrive - clarkinc.biz/Desktop/WebApp/CNA-WebApp/CODE - do not open/stub_launcher.py'],
     pathex=[],
     binaries=[],
     datas=[],

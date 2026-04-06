@@ -35,8 +35,29 @@ if not errorlevel 1 (
     goto :found
 )
 
-echo ERROR: Inno Setup (ISCC.exe) not found.
-echo Install Inno Setup 6 from https://jrsoftware.org/isinfo.php
+echo Inno Setup not found. Installing via winget (current user only)...
+winget install --id JRSoftware.InnoSetup -e --silent --scope user --accept-package-agreements --accept-source-agreements
+if errorlevel 1 (
+    echo ERROR: Failed to install Inno Setup via winget.
+    echo Install manually from https://jrsoftware.org/isinfo.php
+    exit /b 1
+)
+
+REM Re-check common paths after install
+if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" (
+    set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+    goto :found
+)
+if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe" (
+    set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+    goto :found
+)
+if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" (
+    set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
+    goto :found
+)
+
+echo ERROR: Inno Setup was installed but ISCC.exe could not be located.
 exit /b 1
 
 :found

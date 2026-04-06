@@ -157,22 +157,29 @@ if exist "%CONFIG_ENC%" (
 )
 
 REM ============================================================
-REM BUILD LAUNCHER EXE (if _internal/ is missing and PyInstaller is available)
+REM BUILD LAUNCHER EXE (if _internal/ is missing)
 REM ============================================================
 set "EXE_FILE=%ROOT_DIR%\CNA Web App.exe"
 set "INTERNAL_DIR=%ROOT_DIR%\_internal"
 set "BUILD_DIST=%CODE_DIR%\installer\dist"
 if not exist "%INTERNAL_DIR%" (
+  echo _internal folder missing — building launcher exe...
   "%VENV_DIR%\Scripts\python.exe" -c "import PyInstaller" >nul 2>&1
-  if not errorlevel 1 (
-    echo Building launcher exe (onedir)...
-    if exist "%BUILD_DIST%" rmdir /s /q "%BUILD_DIST%" >nul 2>&1
-    "%VENV_DIR%\Scripts\pyinstaller.exe" --onedir --noconsole --icon="%ROOT_DIR%\cna_icon.ico" --name="CNA Web App" --distpath="%BUILD_DIST%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%CODE_DIR%\stub_launcher.py" >nul 2>&1
-    if exist "%BUILD_DIST%\CNA Web App\CNA Web App.exe" (
-      move /Y "%BUILD_DIST%\CNA Web App\CNA Web App.exe" "%ROOT_DIR%\" >nul
-      move /Y "%BUILD_DIST%\CNA Web App\_internal" "%ROOT_DIR%\" >nul
-      rmdir /s /q "%BUILD_DIST%" 2>nul
-    )
+  if errorlevel 1 (
+    echo Installing PyInstaller...
+    set "VIRTUAL_ENV=%VENV_DIR%"
+    "%UV_EXE%" pip install pyinstaller
+  )
+  if exist "%BUILD_DIST%" rmdir /s /q "%BUILD_DIST%" >nul 2>&1
+  echo Building CNA Web App.exe (onedir)...
+  "%VENV_DIR%\Scripts\pyinstaller.exe" --onedir --noconsole --icon="%ROOT_DIR%\cna_icon.ico" --name="CNA Web App" --distpath="%BUILD_DIST%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%CODE_DIR%\stub_launcher.py"
+  if exist "%BUILD_DIST%\CNA Web App\CNA Web App.exe" (
+    move /Y "%BUILD_DIST%\CNA Web App\CNA Web App.exe" "%ROOT_DIR%\" >nul
+    xcopy /E /I /Y /Q "%BUILD_DIST%\CNA Web App\_internal" "%ROOT_DIR%\_internal"
+    rmdir /s /q "%BUILD_DIST%" 2>nul
+    echo Launcher exe built successfully.
+  ) else (
+    echo WARNING: Failed to build launcher exe. You can run RebuildExe.bat manually.
   )
 )
 
