@@ -16,3 +16,4 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 - [Git Bash batch file pitfalls](feedback_git_bash_bat_files.md) — .bat files and Windows exes don't work right from Git Bash
 - [Installer fresh install flow](project_installer_flow.md) — how _internal/ gets built on fresh installs
 - [Pre-commit steps are non-negotiable](feedback_precommit_mandatory.md) — never skip or soften pre-commit steps
+- [cmd.exe errorlevel + redirect bug](feedback_cmd_errorlevel_redirect.md) — >nul 2>&1 clobbers errorlevel; use file checks instead

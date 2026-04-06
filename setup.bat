@@ -159,29 +159,48 @@ if exist "%CONFIG_ENC%" (
 REM ============================================================
 REM BUILD LAUNCHER EXE (if _internal/ is missing)
 REM ============================================================
+REM The exe from a git clone is useless without _internal/ (which is
+REM gitignored).  When _internal/ is missing we must build a fresh
+REM matched exe + _internal pair with PyInstaller.
+REM ============================================================
 set "EXE_FILE=%ROOT_DIR%\CNA Web App.exe"
 set "INTERNAL_DIR=%ROOT_DIR%\_internal"
 set "BUILD_DIST=%CODE_DIR%\installer\dist"
-if not exist "%INTERNAL_DIR%" (
-  echo _internal folder missing — building launcher exe...
-  "%VENV_DIR%\Scripts\python.exe" -c "import PyInstaller" >nul 2>&1
-  if errorlevel 1 (
-    echo Installing PyInstaller...
-    set "VIRTUAL_ENV=%VENV_DIR%"
-    "%UV_EXE%" pip install pyinstaller
-  )
-  if exist "%BUILD_DIST%" rmdir /s /q "%BUILD_DIST%" >nul 2>&1
-  echo Building CNA Web App.exe (onedir)...
-  "%VENV_DIR%\Scripts\pyinstaller.exe" --onedir --noconsole --icon="%ROOT_DIR%\cna_icon.ico" --name="CNA Web App" --distpath="%BUILD_DIST%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%CODE_DIR%\stub_launcher.py"
-  if exist "%BUILD_DIST%\CNA Web App\CNA Web App.exe" (
-    move /Y "%BUILD_DIST%\CNA Web App\CNA Web App.exe" "%ROOT_DIR%\" >nul
-    xcopy /E /I /Y /Q "%BUILD_DIST%\CNA Web App\_internal" "%ROOT_DIR%\_internal"
-    rmdir /s /q "%BUILD_DIST%" 2>nul
-    echo Launcher exe built successfully.
-  ) else (
-    echo WARNING: Failed to build launcher exe. You can run RebuildExe.bat manually.
-  )
+if exist "%INTERNAL_DIR%" goto SKIP_BUILD
+
+echo _internal folder missing -- building launcher exe...
+
+REM Install PyInstaller if not already present (check for exe directly;
+REM do NOT use "python -c import" with >nul -- cmd.exe clobbers errorlevel)
+if not exist "%VENV_DIR%\Scripts\pyinstaller.exe" (
+  echo Installing PyInstaller...
+  set "VIRTUAL_ENV=%VENV_DIR%"
+  "%UV_EXE%" pip install pyinstaller
 )
+if not exist "%VENV_DIR%\Scripts\pyinstaller.exe" (
+  echo ERROR: PyInstaller installation failed. Run RebuildExe.bat manually after setup.
+  goto SKIP_BUILD
+)
+
+REM Clean any stale build artifacts and the git-cloned exe (it won't
+REM match the _internal/ we're about to build)
+if exist "%BUILD_DIST%" rmdir /s /q "%BUILD_DIST%" >nul 2>&1
+if exist "%EXE_FILE%" del /f "%EXE_FILE%" >nul 2>&1
+if exist "%CODE_DIR%\installer\CNA Web App.spec" del /f "%CODE_DIR%\installer\CNA Web App.spec" >nul 2>&1
+
+echo Building CNA Web App.exe + _internal (onedir)...
+"%VENV_DIR%\Scripts\pyinstaller.exe" --onedir --noconsole --icon="%ROOT_DIR%\cna_icon.ico" --name="CNA Web App" --distpath="%BUILD_DIST%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%CODE_DIR%\stub_launcher.py"
+
+if not exist "%BUILD_DIST%\CNA Web App\CNA Web App.exe" (
+  echo ERROR: PyInstaller build failed. Run RebuildExe.bat manually after setup.
+  goto SKIP_BUILD
+)
+move /Y "%BUILD_DIST%\CNA Web App\CNA Web App.exe" "%ROOT_DIR%\" >nul
+xcopy /E /I /Y /Q "%BUILD_DIST%\CNA Web App\_internal" "%ROOT_DIR%\_internal"
+rmdir /s /q "%BUILD_DIST%" 2>nul
+echo Launcher exe + _internal built successfully.
+
+:SKIP_BUILD
 
 REM ============================================================
 REM CREATE DESKTOP SHORTCUT
