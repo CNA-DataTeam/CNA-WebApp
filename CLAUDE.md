@@ -2,6 +2,16 @@
 
 This file is automatically loaded by Claude Code at the start of every conversation. It documents how the project works so changes can be made safely and consistently.
 
+## Shared Project Memory
+
+This project maintains shared memory in `.claude/memory/` that persists across conversations and developers. The index is `.claude/memory/MEMORY.md`.
+
+**Reading memory:** At the start of a conversation, if the user's question might benefit from past context, read `.claude/memory/MEMORY.md` and any relevant memory files it references.
+
+**Writing memory:** When you learn something non-obvious through experience — a pitfall, a workaround, a user preference, a project decision — add it as a new memory file and update the index. Do not duplicate information already in this CLAUDE.md. Memory is for hard-won lessons, not documented rules.
+
+**Updating memory:** If a memory is stale or wrong based on the current state of the code, update or remove it. Memory files are committed to git, so everyone benefits.
+
 ## 1. Project Summary
 
 This repository is a Windows-first internal Streamlit suite for Logistics Support work.
@@ -55,6 +65,26 @@ Before changing code, keep these project-specific rules in mind:
 
 9. **Keep the commit skill in sync with pre-commit and commit steps.**
    The file `.claude/skills/commit/SKILL.md` defines the commit workflow that the AI follows when using the `/commit` command. Any time a pre-commit step, commit step, or related process is added, removed, or changed in this document or in the batch files, the commit skill MUST be updated to match. The skill is the executable version of these instructions — if they diverge, commits will be wrong.
+
+10. **Running batch files and Windows executables from Claude Code (Git Bash).**
+    Claude Code runs in Git Bash, not cmd.exe. This causes two recurring problems:
+    - **Batch files run via `cmd.exe /c` produce no visible output** and may appear to hang. Do NOT try `cmd.exe /c SomeFile.bat` — instead, run the underlying commands directly from bash (e.g. call `.venv/Scripts/pyinstaller.exe ...` instead of running `RebuildExe.bat`).
+    - **Spaces in paths break argument parsing** when calling Windows-native executables (like ISCC.exe) from bash. The shell splits arguments on spaces even inside quotes. The fix is to write a small temp `.bat` file that accepts the root directory as `%~1` and handles quoting internally, then call it via `cmd //c`.
+    See the commit skill (`.claude/skills/commit/SKILL.md`) for the exact commands that work.
+
+11. **Resolve merge conflicts when pushing — don't just give up.**
+    Multiple developers use this repo with Claude Code. When `git push` is rejected because the remote has newer commits:
+    1. Run `git pull --rebase` to replay local commits on top of the latest remote.
+    2. If the rebase applies cleanly, push again.
+    3. If there are merge conflicts, resolve them yourself when the intent of both changes is clear and both can be preserved. Common safe merges:
+       - **Additive changes to different files** — keep both.
+       - **Additive changes to the same file in different sections** — keep both.
+       - **CLAUDE.md or MEMORY.md index additions** — keep all entries from both sides.
+       - **`config.enc`** — always re-run the encrypt command after resolving other conflicts and use the freshly encrypted result.
+       - **`CNA Web App.exe`** — always re-run the exe rebuild after resolving other conflicts and use the fresh build.
+    4. If the conflicting changes are **logically incompatible** (e.g. two people changed the same function in contradictory ways, renamed the same thing differently, or deleted something the other modified), **stop and tell the user** what the conflict is before resolving. Do not guess which side should win when both changes alter the same behavior.
+    5. After resolving, run `git rebase --continue`, then push.
+    See the commit skill for the step-by-step implementation.
 
 ## 3. Repository Layout
 
