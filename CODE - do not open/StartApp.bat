@@ -22,6 +22,10 @@ if defined PYTHONPATH (
 )
 set "STREAMLIT_CONFIG_DIR=%CODE_DIR%\.streamlit"
 
+REM Skip pause commands when called with --no-launch (hidden window from .exe)
+set "SILENT=0"
+if "%~1"=="--no-launch" set "SILENT=1"
+
 set "LOG_BASE=\\therestaurantstore.com\920\Data\Logistics\Logistics App\Logs"
 set "LOG_DIR=%LOG_BASE%\%USERNAME%"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
@@ -50,7 +54,7 @@ REM ============================================================
 if not exist "%APP_FILE%" (
   echo [%date% %time%] [Launcher] ERROR: app.py not found>> "%LOG_FILE%"
   echo ERROR: app.py not found in CODE directory.
-  pause
+  if "%SILENT%"=="0" pause
   echo.>> "%LOG_FILE%"
   exit /b 1
 )
@@ -58,7 +62,7 @@ if not exist "%APP_FILE%" (
 if not exist "%VENV_DIR%\Scripts\python.exe" (
   echo [%date% %time%] [Launcher] ERROR: venv missing>> "%LOG_FILE%"
   echo ERROR: Virtual environment not found. Run setup.bat first.
-  pause
+  if "%SILENT%"=="0" pause
   echo.>> "%LOG_FILE%"
   exit /b 1
 )
@@ -98,7 +102,7 @@ if exist "%CONFIG_ENC%" (
 if not exist "%LOCAL_CONFIG%" (
   echo ERROR: config.py not found and could not be decrypted.
   call :LOG "ERROR: config.py missing and decryption unavailable."
-  pause
+  if "%SILENT%"=="0" pause
   echo.>> "%LOG_FILE%"
   exit /b 1
 )
@@ -110,21 +114,12 @@ call :LOG "Starting background update check..."
 start /B "" "%VENV_DIR%\Scripts\pythonw.exe" "%CODE_DIR%\check_updates.py"
 
 REM ============================================================
-REM PRE-LAUNCH VALIDATION
+REM RUN STARTUP.PY
 REM ============================================================
-"%VENV_DIR%\Scripts\python.exe" -c "import streamlit" >> "%LOG_FILE%" 2>&1
-if errorlevel 1 (
-  call :LOG "ERROR: Streamlit not installed."
-  echo ERROR: Streamlit missing. Run setup.bat.
-  pause
-  echo.>> "%LOG_FILE%"
-  exit /b 1
-)
-
 if not exist "%STARTUP_FILE%" (
   call :LOG "ERROR: startup.py not found."
   echo ERROR: startup.py not found in CODE directory.
-  pause
+  if "%SILENT%"=="0" pause
   echo.>> "%LOG_FILE%"
   exit /b 1
 )
@@ -135,7 +130,7 @@ set "STARTUP_CALLER=StartApp.bat"
 if errorlevel 1 (
   call :LOG "ERROR: startup.py failed."
   echo ERROR: startup.py failed. Check logs for details.
-  pause
+  if "%SILENT%"=="0" pause
   echo.>> "%LOG_FILE%"
   exit /b 1
 )

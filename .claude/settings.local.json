@@ -21,7 +21,29 @@
       "Bash(rm:*)",
       "Bash(cp:*)",
       "Bash(mv:*)",
-      "Bash(file:*)"
+      "Bash(file:*)",
+      "Bash(where iscc:*)",
+      "Read(//c/Program Files \\(x86\\)/Inno Setup 6/**)",
+      "Read(//c/Program Files/Inno Setup 6/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Read(//c/Program Files/**)",
+      "Bash(reg query:*)",
+      "Read(//c/Users/jramsey/**)",
+      "Bash(find /c -maxdepth 3 -name \"ISCC.exe\")",
+      "Bash(\"/c/Users/jramsey/AppData/Local/Programs/Inno Setup 6/ISCC.exe\" /?)",
+      "Bash(cmd.exe /c RebuildInstaller.bat)",
+      "Bash(cmd.exe /c \"RebuildInstaller.bat\")",
+      "Bash(\"/c/Users/jramsey/AppData/Local/Programs/Inno Setup 6/ISCC.exe\" /O\"installer-output\" \"CODE - do not open/installer/CNA-WebApp-Setup.iss\")",
+      "Bash(\"/c/Users/jramsey/AppData/Local/Programs/Inno Setup 6/ISCC.exe\" \"/Oinstaller-output\" \"CODE - do not open\\\\\\\\installer\\\\\\\\CNA-WebApp-Setup.iss\")",
+      "Bash(cmd.exe /c \"cd /d \\\\\"C:\\\\Users\\\\jramsey\\\\OneDrive - clarkinc.biz\\\\Desktop\\\\WebApp\\\\CNA-WebApp\\\\\" && \\\\\"%LOCALAPPDATA%\\\\Programs\\\\Inno Setup 6\\\\ISCC.exe\\\\\" /O\\\\\"installer-output\\\\\" \\\\\"CODE - do not open\\\\installer\\\\CNA-WebApp-Setup.iss\\\\\"\")",
+      "Bash(cmd.exe /c \"\\\\\"%LOCALAPPDATA%\\\\\\\\Programs\\\\\\\\Inno Setup 6\\\\\\\\ISCC.exe\\\\\" \\\\\"/OC:\\\\\\\\Users\\\\\\\\jramsey\\\\\\\\OneDrive - clarkinc.biz\\\\\\\\Desktop\\\\\\\\WebApp\\\\\\\\CNA-WebApp\\\\\\\\installer-output\\\\\" \\\\\"C:\\\\\\\\Users\\\\\\\\jramsey\\\\\\\\OneDrive - clarkinc.biz\\\\\\\\Desktop\\\\\\\\WebApp\\\\\\\\CNA-WebApp\\\\\\\\CODE - do not open\\\\\\\\installer\\\\\\\\CNA-WebApp-Setup.iss\\\\\"\")",
+      "Bash(\"/c/Users/jramsey/AppData/Local/Programs/Inno Setup 6/ISCC.exe\")",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import PyInstaller\")",
+      "Bash(\".venv/Scripts/python.exe\" -c \"import streamlit; print\\(streamlit.__version__\\)\")",
+      "Bash(xargs grep:*)",
+      "Bash(grep:*)",
+      "Bash(find \"C:\\\\Users\\\\jramsey\\\\OneDrive - clarkinc.biz\\\\Desktop\\\\WebApp\\\\CNA-WebApp\\\\.venv\\\\Lib\\\\site-packages\\\\streamlit\" -type f -name \"*.py\" -exec grep -l \"RootContainer\\\\|SIDEBAR\" {} \\\\;)",
+      "WebSearch"
     ]
   }
 }

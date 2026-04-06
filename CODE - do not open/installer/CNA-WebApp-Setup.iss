@@ -210,11 +210,22 @@ begin
     Exit;
   end;
 
-  // ---- Step 3: Run setup.bat ----
+  // ---- Step 3: Patch setup.bat then run it ----
   SetProgress(35);
-  UpdateStatus('Running setup (installing Python, dependencies, creating shortcut)...');
   SetupBat := InstallDir + '\setup.bat';
-  Exec('cmd.exe', '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '"',
+
+  // Replace bare "pause" commands with non-blocking timeout so the hidden
+  // window never hangs waiting for a keypress.  This handles older versions
+  // of setup.bat that were cloned before the /silent flag was added.
+  UpdateStatus('Preparing setup script...');
+  Exec('cmd.exe',
+       '/c cd /d "' + InstallDir + '" && powershell -NoProfile -Command "' +
+       '(Get-Content ''setup.bat'' -Raw) -replace ''(?m)^\s*pause\s*$'', ''timeout /t 3 /nobreak >nul 2>nul'' ' +
+       '| Set-Content ''setup.bat'' -NoNewline"',
+       InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  UpdateStatus('Running setup (installing Python, dependencies, creating shortcut)...');
+  Exec('cmd.exe', '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '" /silent',
        InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if ResultCode <> 0 then

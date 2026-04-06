@@ -32,14 +32,11 @@ def main():
         )
         sys.exit(1)
 
-    # ── Phase 1: Run setup steps only (config, updates, startup.py) ──
-    subprocess.run(
-        ["cmd.exe", "/c", str(bat), "--no-launch"],
-        cwd=str(root),
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    # Skip running StartApp.bat here — launch_app.py will run it in the
+    # background while the splash screen is already visible, so the user
+    # isn't staring at nothing for 30+ seconds.
 
-    # ── Phase 2: Launch the pywebview app in THIS process ──
+    # ── Launch the pywebview app in THIS process ──
     # Add the venv's site-packages so we can import webview, streamlit, etc.
     venv_site = root / ".venv" / "Lib" / "site-packages"
     sys.path.insert(0, str(venv_site))
@@ -69,6 +66,13 @@ def main():
             0x10,
         )
         sys.exit(1)
+    finally:
+        # Release the app folder so Windows allows deletion.
+        # Without this, the .exe process holds the CWD handle until exit.
+        try:
+            os.chdir(os.environ.get("TEMP", "C:\\"))
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

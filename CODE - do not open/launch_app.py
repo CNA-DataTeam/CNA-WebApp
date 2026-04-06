@@ -1,13 +1,20 @@
 """
 PyWebView launcher for CNA Web App.
 
-Opens Streamlit in a native OS window with a custom icon and built-in
-loading screen. Kills the Streamlit server when the window is closed.
+Opens Streamlit in a native OS window with a white title bar, built-in
+loading screen, and custom icon. Kills the Streamlit server when the
+window is closed.
+
+Startup flow:
+  1. Show splash screen immediately (so the user isn't staring at nothing)
+  2. Run StartApp.bat --no-launch (config decrypt, update check, startup.py)
+     while the splash is visible
+  3. Start Streamlit server
+  4. Redirect to the app once ready
 """
 
 import ctypes
 import os
-import signal
 import socket
 import subprocess
 import sys
@@ -28,6 +35,9 @@ APP_FILE = APP_DIR / "app.py"
 ICON_FILE = ROOT_DIR / "cna_icon.ico"
 STREAMLIT_PORT = 8501
 APP_URL = f"http://localhost:{STREAMLIT_PORT}"
+
+# Module-level handle so cleanup can find it after webview.start() returns
+_server_proc: subprocess.Popen | None = None
 
 LOADING_HTML = """\
 <!DOCTYPE html>
@@ -123,6 +133,9 @@ LOADING_HTML = """\
 """
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def is_port_in_use(port: int) -> bool:
     """Check if a port is already listening."""
     try:
@@ -140,6 +153,18 @@ def wait_for_server(port: int, timeout: int = 120) -> bool:
             return True
         time.sleep(0.5)
     return False
+
+
+def run_setup():
+    """Run StartApp.bat --no-launch (config decrypt, update check, startup.py)."""
+    bat = APP_DIR / "StartApp.bat"
+    if not bat.exists():
+        return
+    subprocess.run(
+        ["cmd.exe", "/c", str(bat), "--no-launch"],
+        cwd=str(ROOT_DIR),
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 def start_streamlit() -> subprocess.Popen | None:
@@ -163,12 +188,44 @@ def start_streamlit() -> subprocess.Popen | None:
     )
 
 
-def set_window_icon():
-    """Set the window icon via Win32 API (more reliable than pywebview's icon param)."""
-    if not ICON_FILE.exists():
-        return
+def set_window_icon_and_style():
+    """Set the window icon and title bar color via Win32 / DWM APIs."""
     try:
         user32 = ctypes.windll.user32
+
+        hwnd = None
+        for _ in range(10):
+            hwnd = user32.FindWindowW(None, "CNA Web App")
+            if hwnd:
+                break
+            time.sleep(0.3)
+
+        if not hwnd:
+            return
+
+        # Remove title text and icon from the title bar
+        user32.SetWindowTextW(hwnd, "")
+        GWL_EXSTYLE = -20
+        WS_EX_DLGMODALFRAME = 0x00000001
+        ex_style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style | WS_EX_DLGMODALFRAME)
+        user32.SetWindowPos(
+            hwnd, 0, 0, 0, 0, 0,
+            0x0020 | 0x0002 | 0x0001 | 0x0004,  # FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER
+        )
+
+        # Set title bar color via DWM (#eeeeee → BGR 0x00EEEEEE)
+        DWMWA_CAPTION_COLOR = 35
+        color = ctypes.c_int(0x00EEEEEE)  # COLORREF in BGR
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_CAPTION_COLOR,
+            ctypes.byref(color), ctypes.sizeof(color),
+        )
+
+        # Set icon
+        if not ICON_FILE.exists():
+            return
+
         WM_SETICON = 0x0080
         ICON_SMALL = 0
         ICON_BIG = 1
@@ -177,7 +234,6 @@ def set_window_icon():
 
         icon_path_str = str(ICON_FILE)
 
-        # Load the icon from file at both sizes
         hicon_big = user32.LoadImageW(
             None, icon_path_str, IMAGE_ICON, 48, 48, LR_LOADFROMFILE,
         )
@@ -185,32 +241,26 @@ def set_window_icon():
             None, icon_path_str, IMAGE_ICON, 16, 16, LR_LOADFROMFILE,
         )
 
-        if not hicon_big and not hicon_small:
-            return
-
-        # Retry finding the window a few times (it may not exist yet)
-        hwnd = None
-        for _ in range(10):
-            hwnd = user32.FindWindowW(None, "CNA Web App")
-            if hwnd:
-                break
-            time.sleep(0.3)
-
-        if hwnd:
-            if hicon_big:
-                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
-            if hicon_small:
-                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
+        if hicon_big:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_big)
+        if hicon_small:
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_small)
     except Exception:
         pass
 
 
-def redirect_to_app(window: webview.Window):
-    """Wait for Streamlit to be ready, then navigate the window to the app."""
-    # Set the window icon via Win32 API
-    set_window_icon()
+def setup_and_redirect(window: webview.Window):
+    """Run setup steps while splash is visible, start Streamlit, then redirect."""
+    global _server_proc
+    set_window_icon_and_style()
 
-    # Give Streamlit a moment to fully initialize after the port opens
+    # Run config decrypt, update check, startup.py while splash is showing
+    run_setup()
+
+    # Start the Streamlit server
+    _server_proc = start_streamlit()
+
+    # Wait for it to be ready, then navigate
     if wait_for_server(STREAMLIT_PORT):
         time.sleep(2)
         window.load_url(APP_URL)
@@ -221,13 +271,16 @@ def redirect_to_app(window: webview.Window):
         )
 
 
+def on_shown(window: webview.Window):
+    """Called when window is shown — set icon and title bar color."""
+    set_window_icon_and_style()
+
+
 def main():
+    global _server_proc
+
     # If the app is already running, just open a window to it
     already_running = is_port_in_use(STREAMLIT_PORT)
-
-    server_proc = None
-    if not already_running:
-        server_proc = start_streamlit()
 
     # Determine the icon path
     icon_path = str(ICON_FILE) if ICON_FILE.exists() else None
@@ -242,7 +295,7 @@ def main():
             min_size=(800, 600),
         )
     else:
-        # Show loading screen, redirect when ready
+        # Show loading screen immediately, do setup + start server in background
         window = webview.create_window(
             "CNA Web App",
             html=LOADING_HTML,
@@ -251,25 +304,24 @@ def main():
             min_size=(800, 600),
         )
 
-    def on_shown(window: webview.Window):
-        """Called when window is shown — set icon for 'already running' case."""
-        set_window_icon()
-
     # Start the GUI — blocks until window is closed
     webview.start(
-        redirect_to_app if not already_running else on_shown,
+        setup_and_redirect if not already_running else on_shown,
         window,
         icon=icon_path,
     )
 
-    # Window closed — stop the server if we started it
-    if server_proc is not None:
+    # Window closed — stop the server process tree if we started it
+    if _server_proc is not None:
         try:
-            server_proc.terminate()
-            server_proc.wait(timeout=5)
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(_server_proc.pid)],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=10,
+            )
         except Exception:
             try:
-                server_proc.kill()
+                _server_proc.kill()
             except Exception:
                 pass
 

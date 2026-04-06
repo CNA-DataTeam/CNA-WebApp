@@ -7,6 +7,7 @@ Purpose:
 import streamlit as st
 import pandas as pd
 import altair as alt
+from datetime import date, timedelta
 import config
 import utils
 
@@ -41,6 +42,29 @@ def _safe_col(df: pd.DataFrame, col: str, default: str = "") -> pd.Series:
     if col not in df.columns:
         return pd.Series(default, index=df.index)
     return df[col].fillna(default).astype(str).str.strip()
+
+
+# ============================================================
+# SPRINT HELPERS (D&A)
+# ============================================================
+# Sprint 92 = Mon 4/6/2026 – Sun 4/19/2026 (inclusive), 2-week cadence.
+_SPRINT_ANCHOR_DATE = date(2026, 4, 6)
+_SPRINT_ANCHOR_NUMBER = 92
+_SPRINT_DAYS = 14
+
+
+def _sprint_number_for_date(d: date) -> int:
+    return _SPRINT_ANCHOR_NUMBER + (d - _SPRINT_ANCHOR_DATE).days // _SPRINT_DAYS
+
+
+def _sprint_dates(n: int) -> tuple[date, date]:
+    start = _SPRINT_ANCHOR_DATE + timedelta(days=(n - _SPRINT_ANCHOR_NUMBER) * _SPRINT_DAYS)
+    return start, start + timedelta(days=_SPRINT_DAYS - 1)
+
+
+def _sprint_label(n: int) -> str:
+    s, e = _sprint_dates(n)
+    return f"Sprint {n}  ({s.strftime('%m/%d')} – {e.strftime('%m/%d/%Y')})"
 
 
 # ============================================================
@@ -242,7 +266,7 @@ def main() -> None:
 def da_main_filters(df: pd.DataFrame) -> pd.DataFrame:
     st.subheader("Filters", anchor=False)
 
-    c1, c2, c3, c4, c5, c6 = st.columns([1.5, 1.6, 1.6, 1.6, 1.2, 1.9])
+    c1, c2, c3, c4, c5 = st.columns([1.5, 1.6, 1.6, 1.6, 1.2])
 
     with c1:
         user_filter = st.selectbox(
@@ -295,10 +319,31 @@ def da_main_filters(df: pd.DataFrame) -> pd.DataFrame:
             == "Exclude"
         )
 
-    with c6:
+    # --- Second filter row: Sprint + Date Range ---
+    s1, s2, _ = st.columns([2, 2, 4])
+
+    sprint_nums = sorted(df["Sprint"].unique())
+    sprint_options = ["All"] + [_sprint_label(n) for n in sprint_nums]
+
+    with s1:
+        sprint_selection = st.selectbox(
+            "Sprint",
+            options=sprint_options,
+            key="da_analytics_sprint_filter",
+        )
+
+    # When a sprint is selected, override the date range default
+    if sprint_selection != "All":
+        selected_sprint_num = sprint_nums[sprint_options.index(sprint_selection) - 1]
+        sprint_start, sprint_end = _sprint_dates(selected_sprint_num)
+        default_date_range = (sprint_start, sprint_end)
+    else:
+        default_date_range = (df["Date"].min(), df["Date"].max())
+
+    with s2:
         date_range = st.date_input(
             "Date Range",
-            value=(df["Date"].min(), df["Date"].max()),
+            value=default_date_range,
             key="da_analytics_date_range",
         )
 
@@ -334,18 +379,20 @@ def da_main_filters(df: pd.DataFrame) -> pd.DataFrame:
         tuple(sorted(department_filter)),
         tuple(sorted(account_filter)),
         exclude_partial,
+        sprint_selection,
         str(start_date),
         str(end_date),
     )
     if st.session_state.get("da__analytics_filter_signature") != filter_signature:
         st.session_state.da__analytics_filter_signature = filter_signature
         LOGGER.info(
-            "Filters updated | user='%s' stakeholders=%s depts=%s accounts=%s exclude_partial=%s date_range=%s..%s",
+            "Filters updated | user='%s' stakeholders=%s depts=%s accounts=%s exclude_partial=%s sprint='%s' date_range=%s..%s",
             user_filter,
             len(stakeholder_filter),
             len(department_filter),
             len(account_filter),
             exclude_partial,
+            sprint_selection,
             start_date,
             end_date,
         )
@@ -462,6 +509,8 @@ def da_main() -> None:
     if "Date" not in df.columns:
         df["StartTimestampUTC"] = pd.to_datetime(df["StartTimestampUTC"], utc=True)
         df["Date"] = df["StartTimestampUTC"].dt.date
+
+    df["Sprint"] = df["Date"].apply(_sprint_number_for_date)
 
     filtered_df = da_main_filters(df)
     LOGGER.info("Filter result | source_rows=%s filtered_rows=%s", len(df), len(filtered_df))

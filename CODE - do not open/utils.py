@@ -212,6 +212,10 @@ def get_global_css() -> str:
     }
     /* Hide default Streamlit footer */
     footer {visibility: hidden;}
+    /* Hide default Streamlit hamburger menu (3 vertical dots) */
+    [data-testid="stMainMenu"] {
+        display: none !important;
+    }
     /* Adjust main container padding */
     .block-container {
         padding-top: 1rem;
@@ -225,8 +229,109 @@ def get_global_css() -> str:
     [data-testid="stSidebar"] [data-testid="stPageLink"] span {
         font-size: 0.92rem !important;
     }
+    /* Tighten sidebar page links inside expanders */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stPageLink"] {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+        min-height: unset !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stVerticalBlock"] {
+        gap: 16px !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] {
+        padding-bottom: 0 !important;
+        margin-bottom: 10px !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] .stElementContainer {
+        margin-bottom: 0 !important;
+        padding: 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+        height: 20px !important;
+        overflow: visible !important;
+    }
+    /* Thin dividers between page rows inside expanders */
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] > div {
+        position: relative !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] > div::before {
+        content: "" !important;
+        position: absolute !important;
+        top: -12px !important;
+        left: 0 !important;
+        right: 0 !important;
+        height: 1px !important;
+        background: #e6e6e6 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] > div:first-child::before {
+        display: none !important;
+    }
+    /* Sidebar page link icons — nudge up to align with text */
+    [data-testid="stSidebar"] [data-testid="stPageLink"] [data-testid="stIconMaterial"],
+    [data-testid="stSidebar"] [data-testid="stPageLink"] span[class*="icon"] {
+        position: relative !important;
+        top: -1px !important;
+    }
+    /* Favorite star: hover toggle and positioning */
+    .star-toggle {
+        position: relative !important;
+        top: -2px !important;
+        width: 20px !important;
+        height: 34px !important;
+    }
+    .star-toggle img {
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
+    }
+    .star-toggle .star-hover {
+        visibility: hidden !important;
+    }
+    .star-toggle:hover .star-default {
+        visibility: hidden !important;
+    }
+    .star-toggle:hover .star-hover {
+        visibility: visible !important;
+    }
+    /* Favorite star: image visible, button invisible but clickable on top */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child {
+        position: relative !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child [data-testid="stBaseButton-tertiary"] {
+        position: absolute !important;
+        inset: 0 !important;
+        opacity: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        cursor: pointer !important;
+        min-height: unset !important;
+        padding: 0 !important;
+    }
     [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
         font-size: 0.72rem !important;
+    }
+    /* Settings popover — clean dropdown style (popover body portals outside sidebar) */
+    [data-testid="stPopoverBody"] {
+        padding: 4px 0 !important;
+    }
+    [data-testid="stPopoverBody"] [data-testid="stVerticalBlock"] {
+        gap: 0 !important;
+    }
+    [data-testid="stPopoverBody"] .stElementContainer {
+        border-bottom: 1px solid #e6e6e6 !important;
+    }
+    [data-testid="stPopoverBody"] .stElementContainer:last-child {
+        border-bottom: none !important;
+    }
+    [data-testid="stPopoverBody"] [data-testid="stBaseButton-tertiary"] {
+        padding: 2px 8px !important;
+        min-height: unset !important;
+        border-radius: 0 !important;
+    }
+    [data-testid="stPopoverBody"] [data-testid="stBaseButton-tertiary"] p {
+        font-size: 0.85rem !important;
+        text-align: left !important;
     }
     /* Header styling */
     .header-row {

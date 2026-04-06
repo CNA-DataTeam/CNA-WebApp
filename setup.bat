@@ -3,6 +3,13 @@ setlocal EnableDelayedExpansion
 title Logistics Support App Setup
 
 REM ============================================================
+REM SILENT MODE (skip pause commands — used by installer)
+REM ============================================================
+set "SILENT=0"
+if /i "%~1"=="/silent" set "SILENT=1"
+if /i "%~1"=="--silent" set "SILENT=1"
+
+REM ============================================================
 REM ROOT / PATHS
 REM ============================================================
 set "ROOT_DIR=%~dp0"
@@ -36,7 +43,7 @@ echo uv not found. Installing automatically...
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 if errorlevel 1 (
   echo ERROR: Failed to install uv. Check your internet connection and try again.
-  pause
+  if "%SILENT%"=="0" pause
   exit /b 1
 )
 
@@ -65,7 +72,7 @@ for /f "delims=" %%i in ('where /R "%USERPROFILE%" uv.exe 2^>nul') do (
 )
 
 echo ERROR: uv was installed but could not be located. Please restart this script.
-pause
+if "%SILENT%"=="0" pause
 exit /b 1
 
 :UV_FOUND
@@ -83,7 +90,7 @@ echo Installing Python 3.11...
 "%UV_EXE%" python install 3.11
 if errorlevel 1 (
   echo ERROR: Failed to install Python 3.11.
-  pause
+  if "%SILENT%"=="0" pause
   exit /b 1
 )
 
@@ -96,7 +103,7 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
   "%UV_EXE%" venv "%VENV_DIR%" --python 3.11
   if errorlevel 1 (
     echo ERROR: Failed to create virtual environment.
-    pause
+    if "%SILENT%"=="0" pause
     exit /b 1
   )
 ) else (
@@ -108,7 +115,7 @@ REM INSTALL DEPENDENCIES
 REM ============================================================
 if not exist "%REQ_FILE%" (
   echo ERROR: requirements.txt not found in CODE directory.
-  pause
+  if "%SILENT%"=="0" pause
   exit /b 1
 )
 
@@ -117,7 +124,7 @@ set "VIRTUAL_ENV=%VENV_DIR%"
 "%UV_EXE%" pip install --link-mode copy -r "%REQ_FILE%"
 if errorlevel 1 (
   echo ERROR: Dependency installation failed.
-  pause
+  if "%SILENT%"=="0" pause
   exit /b 1
 )
 
@@ -150,14 +157,22 @@ if exist "%CONFIG_ENC%" (
 )
 
 REM ============================================================
-REM BUILD LAUNCHER EXE (if missing and PyInstaller is available)
+REM BUILD LAUNCHER EXE (if _internal/ is missing and PyInstaller is available)
 REM ============================================================
 set "EXE_FILE=%ROOT_DIR%\CNA Web App.exe"
-if not exist "%EXE_FILE%" (
+set "INTERNAL_DIR=%ROOT_DIR%\_internal"
+set "BUILD_DIST=%CODE_DIR%\installer\dist"
+if not exist "%INTERNAL_DIR%" (
   "%VENV_DIR%\Scripts\python.exe" -c "import PyInstaller" >nul 2>&1
   if not errorlevel 1 (
-    echo Building launcher exe...
-    "%VENV_DIR%\Scripts\pyinstaller.exe" --onefile --noconsole --icon="%ROOT_DIR%\cna_icon.ico" --name="CNA Web App" --distpath="%ROOT_DIR%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%CODE_DIR%\stub_launcher.py" >nul 2>&1
+    echo Building launcher exe (onedir)...
+    if exist "%BUILD_DIST%" rmdir /s /q "%BUILD_DIST%" >nul 2>&1
+    "%VENV_DIR%\Scripts\pyinstaller.exe" --onedir --noconsole --icon="%ROOT_DIR%\cna_icon.ico" --name="CNA Web App" --distpath="%BUILD_DIST%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%CODE_DIR%\stub_launcher.py" >nul 2>&1
+    if exist "%BUILD_DIST%\CNA Web App\CNA Web App.exe" (
+      move /Y "%BUILD_DIST%\CNA Web App\CNA Web App.exe" "%ROOT_DIR%\" >nul
+      move /Y "%BUILD_DIST%\CNA Web App\_internal" "%ROOT_DIR%\" >nul
+      rmdir /s /q "%BUILD_DIST%" 2>nul
+    )
   )
 )
 
@@ -189,5 +204,5 @@ echo ============================================
 echo Setup complete.
 echo Run StartApp.vbs to launch the application.
 echo ============================================
-pause
+if "%SILENT%"=="0" timeout /t 5 >nul
 exit /b 0

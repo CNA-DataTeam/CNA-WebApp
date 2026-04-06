@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['..\\stub_launcher.py'],
+    ['C:\\Users\\jramsey\\OneDrive - clarkinc.biz\\Desktop\\WebApp\\CNA-WebApp\\CODE - do not open\\stub_launcher.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -19,16 +19,13 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='CNA Web App',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -36,4 +33,13 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['C:\\Users\\jramsey\\OneDrive - clarkinc.biz\\Desktop\\WebApp\\CNA-WebApp\\cna_icon.ico'],
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='CNA Web App',
 )

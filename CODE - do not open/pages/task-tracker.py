@@ -53,13 +53,16 @@ DEPARTMENT_OPTIONS = [
     "Business Relations",
     "Platform",
     "Project Services",
-    "Logistics",
+    "Logistics Support",
+    "Project Fulfillment",
     "FS&D",
     "Account Support",
     "Accounts Receivable",
     "Partnership Development",
     "Marketing",
     "Employee Optimization",
+    "Procurement",
+    "Misc.",
 ]
 
 # ============================================================
@@ -1099,17 +1102,27 @@ else:
         st.session_state.da_current_user_key = user_key
         inputs_locked = st.session_state.da_state != "idle"
         st.text_input("User", value=full_name, disabled=True, key="da_user_display")
-        stakeholder_key = f"da_stakeholder_{st.session_state.da_reset_counter}"
-        if st.session_state.da_restored_primary_stakeholder and stakeholder_key not in st.session_state:
-            st.session_state[stakeholder_key] = st.session_state.da_restored_primary_stakeholder
-        primary_stakeholder = st.text_input("Primary Stakeholder (optional)", disabled=inputs_locked, key=stakeholder_key)
-        st.session_state.da_primary_stakeholder = primary_stakeholder
+        task_key = f"da_task_{st.session_state.da_reset_counter}"
+        if st.session_state.da_restored_task_name and task_key not in st.session_state:
+            st.session_state[task_key] = st.session_state.da_restored_task_name
+        task_name = st.text_input("Task", disabled=inputs_locked, key=task_key)
+        effective_task_name = da_get_effective_task_name(task_name)
+        st.text_area("Notes (optional)", key="da_notes", height=120)
+
+    with mid_col:
         dept_key = f"da_dept_{st.session_state.da_reset_counter}"
         if st.session_state.da_restored_department and dept_key not in st.session_state:
             if st.session_state.da_restored_department in DEPARTMENT_OPTIONS:
                 st.session_state[dept_key] = st.session_state.da_restored_department
-        selected_department = st.selectbox("Department (optional)", DEPARTMENT_OPTIONS, key=dept_key, disabled=inputs_locked)
-        st.session_state.da_department = selected_department
+        selected_department = st.selectbox("Department", DEPARTMENT_OPTIONS, key=dept_key, disabled=inputs_locked)
+        if not inputs_locked:
+            st.session_state.da_department = selected_department
+        stakeholder_key = f"da_stakeholder_{st.session_state.da_reset_counter}"
+        if st.session_state.da_restored_primary_stakeholder and stakeholder_key not in st.session_state:
+            st.session_state[stakeholder_key] = st.session_state.da_restored_primary_stakeholder
+        primary_stakeholder = st.text_input("Primary Stakeholder (optional)", disabled=inputs_locked, key=stakeholder_key)
+        if not inputs_locked:
+            st.session_state.da_primary_stakeholder = primary_stakeholder
         account_options = [""] + utils.load_accounts(str(PERSONNEL_DIR))
         acct_key = f"da_acct_{st.session_state.da_reset_counter}"
         if st.session_state.da_restored_account and acct_key not in st.session_state:
@@ -1121,14 +1134,6 @@ else:
         if st.session_state.get("da__task_tracker_data_signature") != data_signature:
             st.session_state.da__task_tracker_data_signature = data_signature
             LOGGER.info("DA data snapshot | accounts=%s archived_tasks=%s", *data_signature)
-
-    with mid_col:
-        task_key = f"da_task_{st.session_state.da_reset_counter}"
-        if st.session_state.da_restored_task_name and task_key not in st.session_state:
-            st.session_state[task_key] = st.session_state.da_restored_task_name
-        task_name = st.text_input("Task", disabled=inputs_locked, key=task_key)
-        effective_task_name = da_get_effective_task_name(task_name)
-        st.text_area("Notes (optional)", key="da_notes", height=120)
 
     with right_col:
         st.session_state.da_elapsed_seconds = da_compute_elapsed_seconds()
@@ -1142,10 +1147,10 @@ else:
         )
         if st.session_state.da_state == "idle":
             c1, c2 = st.columns(2)
-            can_start = bool(task_name)
+            can_start = bool(task_name and selected_department)
             with c1:
                 st.button("Start", width="stretch", disabled=not can_start,
-                          help=None if can_start else "Select a task to start time",
+                          help=None if can_start else "Enter a task and select a department to start",
                           on_click=da_start_task if can_start else None,
                           key="da_start_btn")
             with c2:
@@ -1258,6 +1263,10 @@ else:
                 "partially_complete": pc_val is True or pc_val == True,
             }
 
+    if st.session_state.get("da_task_edited"):
+        st.toast("Changes saved", icon="✅")
+        st.session_state.da_task_edited = False
+
     if not recent_df.empty:
         recent_df["Duration"] = recent_df["DurationSeconds"].apply(utils.format_hhmmss)
         recent_df["Uploaded"] = pd.to_datetime(recent_df["EndTimestampUTC"], utc=True).apply(lambda x: utils.format_time_ago(x))
@@ -1267,29 +1276,92 @@ else:
             recent_df["PartiallyComplete"] = recent_df["PartiallyComplete"].astype("boolean")
         recent_df["Part. Completed?"] = recent_df["PartiallyComplete"].fillna(False).astype(bool)
         recent_df["Notes"] = recent_df.get("Notes", pd.Series([""] * len(recent_df))).fillna("")
+        recent_df["Department"] = recent_df.get("Department", pd.Series([""] * len(recent_df))).fillna("")
         recent_df["DisplayUser"] = recent_df["FullName"].fillna("").astype(str).str.strip()
         mask_blank = recent_df["DisplayUser"].eq("")
         recent_df.loc[mask_blank, "DisplayUser"] = recent_df.loc[mask_blank, "UserLogin"].fillna("").astype(str)
         row_file_paths: list[str] = []
+        row_is_own: list[bool] = []
         for _, rrow in recent_df.iterrows():
             is_own = str(rrow.get("UserLogin", "")).strip().lower() == user_login.lower()
+            row_is_own.append(is_own)
             ts_key = str(rrow.get("StartTimestampUTC"))
             task_data = own_task_data_map.get(ts_key, {})
             row_file_paths.append(task_data.get("file_path", "") if is_own else "")
-        display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"]].copy()
+        display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[
+            ["User", "Task", "Department", "Part. Completed?", "Uploaded", "Duration", "Notes"]
+        ].copy()
         display_df.insert(0, "Delete", False)
         edited_df = st.data_editor(
             display_df, hide_index=True, width="stretch",
-            disabled=["User", "Task", "Part. Completed?", "Uploaded", "Duration", "Notes"],
+            disabled=["User", "Uploaded"],
             column_config={
                 "Delete": st.column_config.CheckboxColumn(" ", width=25, default=False),
-                "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", disabled=True, width="small"),
+                "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", width="small"),
+                "Department": st.column_config.SelectboxColumn("Department", options=DEPARTMENT_OPTIONS[1:], width="small"),
                 "Notes": st.column_config.TextColumn("Notes", width="large"),
                 "Uploaded": st.column_config.TextColumn("Uploaded", width="small"),
             },
         )
+
+        # --- Detect edits on non-Delete columns ---
+        editable_cols = ["Task", "Department", "Part. Completed?", "Duration", "Notes"]
+        edited_own_rows: list[int] = []
+        edited_other_rows: list[int] = []
+        for i in display_df.index:
+            changed = False
+            for col in editable_cols:
+                orig_val = display_df.at[i, col]
+                new_val = edited_df.at[i, col]
+                if col == "Part. Completed?":
+                    if bool(orig_val) != bool(new_val):
+                        changed = True
+                        break
+                else:
+                    if str(orig_val) != str(new_val):
+                        changed = True
+                        break
+            if changed:
+                if row_file_paths[i]:
+                    edited_own_rows.append(i)
+                else:
+                    edited_other_rows.append(i)
+
+        if edited_other_rows:
+            st.caption("You can only edit your own tasks. Changes to other users' rows will be ignored.")
+
+        # --- Action buttons row ---
         checked_indices = edited_df.index[edited_df["Delete"]].tolist()
-        if checked_indices:
+        has_edits = len(edited_own_rows) > 0
+        has_deletes = len(checked_indices) > 0
+
+        if has_edits and not has_deletes:
+            if st.button(f"Save changes ({len(edited_own_rows)} row{'s' if len(edited_own_rows) > 1 else ''})", key="da_save_edits_btn", type="primary"):
+                for i in edited_own_rows:
+                    fpath = row_file_paths[i]
+                    try:
+                        src_df = pd.read_parquet(fpath)
+                        src_df["TaskName"] = str(edited_df.at[i, "Task"])
+                        src_df["Notes"] = str(edited_df.at[i, "Notes"]) if edited_df.at[i, "Notes"] else None
+                        src_df["PartiallyComplete"] = bool(edited_df.at[i, "Part. Completed?"])
+                        new_dept = str(edited_df.at[i, "Department"]) if edited_df.at[i, "Department"] else None
+                        if "Department" in src_df.columns:
+                            src_df["Department"] = new_dept
+                        new_dur = utils.parse_hhmmss(str(edited_df.at[i, "Duration"]))
+                        if new_dur >= 0:
+                            src_df["DurationSeconds"] = int(new_dur)
+                        utils.atomic_write_parquet(src_df, Path(fpath), schema=DA_PARQUET_SCHEMA)
+                        LOGGER.info("Edited DA task | file='%s'", Path(fpath).name)
+                    except Exception as exc:
+                        LOGGER.warning("Failed to save edit for %s: %s", fpath, exc)
+                        st.error(f"Failed to save edit: {exc}")
+                utils.load_recent_tasks.clear()
+                utils.load_all_completed_tasks.clear()
+                utils.load_completed_tasks_for_analytics.clear()
+                st.session_state.da_task_edited = True
+                st.rerun()
+
+        if has_deletes:
             deletable = [(i, row_file_paths[i]) for i in checked_indices if row_file_paths[i]]
             non_own = len(checked_indices) - len(deletable)
             if non_own > 0:

@@ -12,6 +12,7 @@ set "VENV_DIR=%ROOT_DIR%\.venv"
 set "ICON_FILE=%ROOT_DIR%\cna_icon.ico"
 set "STUB_FILE=%CODE_DIR%\stub_launcher.py"
 set "EXE_FILE=%ROOT_DIR%\CNA Web App.exe"
+set "BUILD_DIST=%CODE_DIR%\installer\dist"
 
 REM ============================================================
 REM VALIDATE VENV
@@ -60,29 +61,71 @@ if errorlevel 1 (
 )
 
 REM ============================================================
-REM REMOVE OLD EXE
+REM REMOVE OLD BUILD ARTIFACTS
 REM ============================================================
 if exist "%EXE_FILE%" (
   echo Removing old exe...
   del /f "%EXE_FILE%" >nul 2>&1
 )
+if exist "%ROOT_DIR%\_internal" (
+  echo Removing old _internal...
+  rmdir /s /q "%ROOT_DIR%\_internal" >nul 2>&1
+)
+if exist "%BUILD_DIST%" (
+  rmdir /s /q "%BUILD_DIST%" >nul 2>&1
+)
+REM Remove old spec file so PyInstaller doesn't reuse stale onefile config
+if exist "%CODE_DIR%\installer\CNA Web App.spec" (
+  del /f "%CODE_DIR%\installer\CNA Web App.spec" >nul 2>&1
+)
 
 REM ============================================================
-REM BUILD
+REM BUILD (onedir — no temp extraction, much faster cold start)
 REM ============================================================
-echo Building CNA Web App.exe...
-"%VENV_DIR%\Scripts\pyinstaller.exe" --onefile --noconsole --icon="%ICON_FILE%" --name="CNA Web App" --distpath="%ROOT_DIR%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%STUB_FILE%"
+echo Building CNA Web App.exe (onedir mode)...
+"%VENV_DIR%\Scripts\pyinstaller.exe" --onedir --noconsole --icon="%ICON_FILE%" --name="CNA Web App" --distpath="%BUILD_DIST%" --specpath="%CODE_DIR%\installer" --workpath="%CODE_DIR%\installer\build" "%STUB_FILE%"
 
-if not exist "%EXE_FILE%" (
+REM Move exe and _internal from build subdir to project root
+if exist "%BUILD_DIST%\CNA Web App\CNA Web App.exe" (
+  echo Moving build output to project root...
+  move /Y "%BUILD_DIST%\CNA Web App\CNA Web App.exe" "%ROOT_DIR%\"
+  if errorlevel 1 (
+    echo ERROR: Failed to move exe to project root.
+    pause
+    exit /b 1
+  )
+  REM Use xcopy for _internal — more reliable than move for directories on OneDrive
+  xcopy /E /I /Y /Q "%BUILD_DIST%\CNA Web App\_internal" "%ROOT_DIR%\_internal"
+  if errorlevel 1 (
+    echo ERROR: Failed to copy _internal to project root.
+    pause
+    exit /b 1
+  )
+  rmdir /s /q "%BUILD_DIST%" 2>nul
+) else (
   echo.
   echo ERROR: Build failed. Check the output above for details.
   pause
   exit /b 1
 )
 
+if not exist "%EXE_FILE%" (
+  echo.
+  echo ERROR: Build failed. exe not found after move.
+  pause
+  exit /b 1
+)
+
+if not exist "%ROOT_DIR%\_internal" (
+  echo.
+  echo ERROR: Build failed. _internal folder not found after copy.
+  pause
+  exit /b 1
+)
+
 echo.
 echo ============================================
-echo Build complete: CNA Web App.exe
+echo Build complete: CNA Web App.exe + _internal/
 echo ============================================
 pause
 exit /b 0
