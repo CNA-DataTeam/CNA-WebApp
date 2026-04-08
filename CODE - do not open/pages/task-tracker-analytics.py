@@ -58,6 +58,7 @@ def _sprint_number_for_date(d: date) -> int:
 
 
 def _sprint_dates(n: int) -> tuple[date, date]:
+    n = int(n)
     start = _SPRINT_ANCHOR_DATE + timedelta(days=(n - _SPRINT_ANCHOR_NUMBER) * _SPRINT_DAYS)
     return start, start + timedelta(days=_SPRINT_DAYS - 1)
 

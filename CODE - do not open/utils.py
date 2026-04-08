@@ -289,26 +289,35 @@ def get_global_css() -> str:
     .star-toggle .star-hover {
         visibility: hidden !important;
     }
-    .star-toggle:hover .star-default {
+    /* Hover on the parent COLUMN (not .star-toggle) because the invisible
+       button sits on top with z-index and intercepts all pointer events.
+       Hovering the button still bubbles :hover up to the column ancestor. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child:hover .star-default {
         visibility: hidden !important;
     }
-    .star-toggle:hover .star-hover {
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child:hover .star-hover {
         visibility: visible !important;
     }
-    /* Favorite star: image visible, button invisible but clickable on top */
+    /* Favorite star: column is the positioned ancestor for the absolute button */
     [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child {
         position: relative !important;
     }
+    /* Reset all intermediate wrapper divs so position:absolute on the button
+       anchors to the column, not a nested Streamlit container. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child div {
+        position: static !important;
+    }
+    /* Invisible button covers the full column area for click capture. */
     [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child [data-testid="stBaseButton-tertiary"] {
         position: absolute !important;
         inset: 0 !important;
         opacity: 0 !important;
+        z-index: 10 !important;
         width: 100% !important;
         height: 100% !important;
         cursor: pointer !important;
         min-height: unset !important;
         padding: 0 !important;
-        z-index: 10 !important;
     }
     [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
         font-size: 0.72rem !important;
