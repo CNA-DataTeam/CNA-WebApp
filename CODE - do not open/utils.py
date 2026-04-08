@@ -880,9 +880,11 @@ def load_recent_tasks(completed_dir: Path, user_key: str | None = None, limit: i
     if not files:
         return pd.DataFrame()
     try:
-        needed_cols = ["StartTimestampUTC", "EndTimestampUTC", "DurationSeconds", "PartiallyComplete", "Notes", "FullName", "UserLogin", "TaskName"]
+        needed_cols = ["StartTimestampUTC", "EndTimestampUTC", "DurationSeconds", "PartiallyComplete", "Notes", "FullName", "UserLogin", "TaskName", "Department"]
         dataset = ds.dataset(files, format="parquet")
-        table = dataset.to_table(columns=needed_cols)
+        available = set(dataset.schema.names)
+        selected = [c for c in needed_cols if c in available]
+        table = dataset.to_table(columns=selected)
         df = table.to_pandas()
     except Exception as e:
         get_page_logger("Shared Utilities").exception("Failed to load recent tasks: %s", e)

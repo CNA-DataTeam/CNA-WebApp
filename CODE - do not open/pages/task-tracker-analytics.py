@@ -440,11 +440,9 @@ def da_main_charts(filtered_df: pd.DataFrame) -> None:
 
     left, right = st.columns(2)
     with left:
-        dept_df = (
-            filtered_df.loc[filtered_df["Department"] != ""]
-            .groupby("Department", as_index=False)["DurationSeconds"]
-            .sum()
-        )
+        dept_agg = filtered_df.loc[filtered_df["Department"] != ""].groupby("Department", as_index=False)
+        dept_df = dept_agg["DurationSeconds"].sum()
+        dept_df["Tasks"] = dept_agg.size()["size"].values
         dept_df["Hours"] = (dept_df["DurationSeconds"] / 3600).round(2)
         dept_chart = (
             alt.Chart(dept_df)
@@ -452,18 +450,17 @@ def da_main_charts(filtered_df: pd.DataFrame) -> None:
             .encode(
                 x=alt.X("Department:N", sort="-y"),
                 y="Hours:Q",
-                tooltip=["Department", "Hours"],
+                tooltip=["Department", "Hours", "Tasks"],
             )
             .properties(title="Total Hours by Department")
         )
         st.altair_chart(dept_chart, use_container_width=True)
 
     with right:
-        task_df = (
-            filtered_df.groupby("TaskName", as_index=False)["DurationSeconds"]
-            .sum()
-            .nlargest(10, "DurationSeconds")
-        )
+        task_agg = filtered_df.groupby("TaskName", as_index=False)
+        task_df = task_agg["DurationSeconds"].sum().nlargest(10, "DurationSeconds")
+        task_counts = task_agg.size().rename(columns={"size": "Tasks"})
+        task_df = task_df.merge(task_counts, on="TaskName")
         task_df["Hours"] = (task_df["DurationSeconds"] / 3600).round(2)
         task_chart = (
             alt.Chart(task_df)
@@ -471,11 +468,26 @@ def da_main_charts(filtered_df: pd.DataFrame) -> None:
             .encode(
                 x=alt.X("TaskName:N", sort="-y", title="Task"),
                 y="Hours:Q",
-                tooltip=["TaskName", "Hours"],
+                tooltip=["TaskName", "Hours", "Tasks"],
             )
             .properties(title="Top 10 Tasks by Total Hours")
         )
         st.altair_chart(task_chart, use_container_width=True)
+
+    # --- Task detail table ---
+    st.divider()
+    st.subheader("Task Details", anchor=False)
+    detail_df = filtered_df[["Date", "Sprint", "FullName", "TaskName", "Department", "Account", "PrimaryStakeholder", "DurationSeconds", "PartiallyComplete"]].copy()
+    detail_df["Duration"] = detail_df["DurationSeconds"].apply(format_duration)
+    detail_df = detail_df.drop(columns=["DurationSeconds"])
+    detail_df = detail_df.rename(columns={
+        "FullName": "User",
+        "TaskName": "Task",
+        "PrimaryStakeholder": "Stakeholder",
+        "PartiallyComplete": "Partial",
+    })
+    detail_df = detail_df.sort_values("Date", ascending=False).reset_index(drop=True)
+    st.dataframe(detail_df, hide_index=True, use_container_width=True)
 
 
 def da_main() -> None:

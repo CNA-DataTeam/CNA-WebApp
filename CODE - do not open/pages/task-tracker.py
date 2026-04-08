@@ -10,6 +10,7 @@ import streamlit as st
 import pandas as pd
 import pyarrow as pa
 import uuid
+from datetime import date, timedelta
 from pathlib import Path
 import config
 import utils
@@ -97,6 +98,29 @@ PERSONNEL_DIR = config.PERSONNEL_DIR
 DA_COMPLETED_TASKS_DIR = config.DA_COMPLETED_TASKS_DIR
 DA_LIVE_ACTIVITY_DIR = config.DA_LIVE_ACTIVITY_DIR
 DA_ARCHIVED_TASKS_DIR = config.DA_ARCHIVED_TASKS_DIR
+
+# ============================================================
+# SPRINT HELPERS (D&A)
+# ============================================================
+_SPRINT_ANCHOR_DATE = date(2026, 4, 6)
+_SPRINT_ANCHOR_NUMBER = 92
+_SPRINT_DAYS = 14
+
+
+def _sprint_number_for_date(d: date) -> int:
+    return _SPRINT_ANCHOR_NUMBER + (d - _SPRINT_ANCHOR_DATE).days // _SPRINT_DAYS
+
+
+def _sprint_dates(n: int) -> tuple[date, date]:
+    n = int(n)
+    start = _SPRINT_ANCHOR_DATE + timedelta(days=(n - _SPRINT_ANCHOR_NUMBER) * _SPRINT_DAYS)
+    return start, start + timedelta(days=_SPRINT_DAYS - 1)
+
+
+def _sprint_label(n: int) -> str:
+    s, e = _sprint_dates(n)
+    return f"Sprint {n}  ({s.strftime('%m/%d')} – {e.strftime('%m/%d/%Y')})"
+
 
 # ============================================================
 # STATE INITIALIZATION — LOGISTICS SUPPORT
@@ -1226,42 +1250,116 @@ else:
     da_live_activity_section()
 
     st.divider()
+
+    # --- Recent Activity header row ---
     title_col, text_col, toggle_col = st.columns([6, 5, 0.5], vertical_alignment="center")
     with title_col:
-        st.subheader("Today's Activity", anchor=False)
+        st.subheader("Recent Activity", anchor=False)
     with text_col:
         st.markdown("Show all users?", text_alignment="right")
     with toggle_col:
         show_all_users = st.toggle("Show all users?", value=True, key="da_show_all_users", label_visibility="collapsed")
     _last_show_all = st.session_state.get("da__last_show_all_users")
     if _last_show_all is None or _last_show_all != show_all_users:
-        LOGGER.info("DA Today's Activity filter changed | show_all_users=%s", show_all_users)
+        LOGGER.info("DA Recent Activity filter changed | show_all_users=%s", show_all_users)
         st.session_state.da__last_show_all_users = show_all_users
+
+    # --- Date-range view toggle buttons ---
+    today_eastern = utils.to_eastern(utils.now_utc()).date()
+    current_sprint_num = _sprint_number_for_date(today_eastern)
+    sprint_start, sprint_end = _sprint_dates(current_sprint_num)
+
+    if "da_activity_view" not in st.session_state:
+        st.session_state.da_activity_view = "Today"
+
+    view_cols = st.columns(4)
+    view_options = ["Today", "This Week", "This Sprint", "All Time"]
+    for idx, label in enumerate(view_options):
+        with view_cols[idx]:
+            btn_type = "primary" if st.session_state.da_activity_view == label else "secondary"
+            if st.button(label, key=f"da_view_{label}", use_container_width=True, type=btn_type):
+                st.session_state.da_activity_view = label
+                st.rerun()
+
+    active_view = st.session_state.da_activity_view
+
+    # Compute date boundaries for the active view
+    if active_view == "Today":
+        view_start, view_end = today_eastern, today_eastern
+    elif active_view == "This Week":
+        view_start = today_eastern - timedelta(days=today_eastern.weekday())  # Monday
+        view_end = today_eastern
+    elif active_view == "This Sprint":
+        view_start, view_end = sprint_start, sprint_end
+    else:  # All Time
+        view_start, view_end = None, None
+
+    # All Time date range filter
+    if active_view == "All Time":
+        d1, d2 = st.columns(2)
+        with d1:
+            alltime_start = st.date_input("From", value=today_eastern - timedelta(days=30), key="da_alltime_start")
+        with d2:
+            alltime_end = st.date_input("To", value=today_eastern, key="da_alltime_end")
+        if alltime_start and alltime_end:
+            view_start = alltime_start
+            view_end = alltime_end
 
     if st.session_state.get("da_task_deleted"):
         st.toast("Task deleted", icon="🗑️")
         st.session_state.da_task_deleted = False
 
-    if show_all_users:
-        recent_df = utils.load_recent_tasks(DA_COMPLETED_TASKS_DIR, user_key=None, limit=50)
+    # --- Load data based on view ---
+    if active_view == "Today":
+        if show_all_users:
+            recent_df = utils.load_recent_tasks(DA_COMPLETED_TASKS_DIR, user_key=None, limit=50)
+        else:
+            recent_df = utils.load_recent_tasks(DA_COMPLETED_TASKS_DIR, user_key=user_key, limit=50)
     else:
-        recent_df = utils.load_recent_tasks(DA_COMPLETED_TASKS_DIR, user_key=user_key, limit=50)
+        all_df = utils.load_all_completed_tasks(DA_COMPLETED_TASKS_DIR)
+        if not all_df.empty:
+            if not show_all_users:
+                all_df = all_df[all_df["UserLogin"].str.strip().str.lower() == user_key.lower()]
+            if view_start is not None and view_end is not None:
+                all_df = all_df[(all_df["Date"] >= view_start) & (all_df["Date"] <= view_end)]
+            recent_df = all_df.sort_values("StartTimestampUTC", ascending=False).reset_index(drop=True)
+        else:
+            recent_df = pd.DataFrame()
 
-    own_tasks_df = load_own_tasks_with_paths(DA_COMPLETED_TASKS_DIR, user_key)
+    # --- Build own-task data map for edits/deletes (load from all matching dates) ---
     own_task_data_map: dict[str, dict] = {}
-    if not own_tasks_df.empty and "StartTimestampUTC" in own_tasks_df.columns:
-        for _, orow in own_tasks_df.iterrows():
-            ts_key = str(orow["StartTimestampUTC"])
-            pc_val = orow.get("PartiallyComplete", False)
-            own_task_data_map[ts_key] = {
-                "file_path": str(orow["_file_path"]),
-                "task_name": str(orow.get("TaskName") or ""),
-                "account": str(orow.get("CompanyGroup") or ""),
-                "stakeholder": str(orow.get("CoveringFor") or ""),
-                "department": str(orow.get("Department") or ""),
-                "notes": str(orow.get("Notes") or ""),
-                "partially_complete": pc_val is True or pc_val == True,
-            }
+    if not recent_df.empty:
+        if active_view == "Today":
+            own_tasks_df = load_own_tasks_with_paths(DA_COMPLETED_TASKS_DIR, user_key)
+        else:
+            own_files = list(DA_COMPLETED_TASKS_DIR.glob(f"user={user_key}/year=*/month=*/day=*/*.parquet"))
+            if own_files:
+                frames = []
+                for f in own_files:
+                    try:
+                        df_one = pd.read_parquet(f)
+                        df_one["_file_path"] = str(f)
+                        frames.append(df_one)
+                    except Exception:
+                        continue
+                own_tasks_df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+                if not own_tasks_df.empty and "StartTimestampUTC" in own_tasks_df.columns:
+                    own_tasks_df["StartTimestampUTC"] = pd.to_datetime(own_tasks_df["StartTimestampUTC"], utc=True)
+            else:
+                own_tasks_df = pd.DataFrame()
+        if not own_tasks_df.empty and "StartTimestampUTC" in own_tasks_df.columns:
+            for _, orow in own_tasks_df.iterrows():
+                ts_key = str(orow["StartTimestampUTC"])
+                pc_val = orow.get("PartiallyComplete", False)
+                own_task_data_map[ts_key] = {
+                    "file_path": str(orow["_file_path"]),
+                    "task_name": str(orow.get("TaskName") or ""),
+                    "account": str(orow.get("CompanyGroup") or ""),
+                    "stakeholder": str(orow.get("CoveringFor") or ""),
+                    "department": str(orow.get("Department") or ""),
+                    "notes": str(orow.get("Notes") or ""),
+                    "partially_complete": pc_val is True or pc_val == True,
+                }
 
     if st.session_state.get("da_task_edited"):
         st.toast("Changes saved", icon="✅")
@@ -1270,6 +1368,10 @@ else:
     if not recent_df.empty:
         recent_df["Duration"] = recent_df["DurationSeconds"].apply(utils.format_hhmmss)
         recent_df["Uploaded"] = pd.to_datetime(recent_df["EndTimestampUTC"], utc=True).apply(lambda x: utils.format_time_ago(x))
+        # Add Date column (Eastern time)
+        recent_df["Date"] = pd.to_datetime(recent_df["StartTimestampUTC"], utc=True).apply(
+            lambda x: utils.to_eastern(x).date()
+        )
         if "PartiallyComplete" not in recent_df.columns:
             recent_df["PartiallyComplete"] = pd.Series([pd.NA] * len(recent_df), dtype="boolean")
         else:
@@ -1289,14 +1391,15 @@ else:
             task_data = own_task_data_map.get(ts_key, {})
             row_file_paths.append(task_data.get("file_path", "") if is_own else "")
         display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[
-            ["User", "Task", "Department", "Part. Completed?", "Uploaded", "Duration", "Notes"]
+            ["Date", "User", "Task", "Department", "Part. Completed?", "Uploaded", "Duration", "Notes"]
         ].copy()
         display_df.insert(0, "Delete", False)
         edited_df = st.data_editor(
             display_df, hide_index=True, width="stretch",
-            disabled=["User", "Uploaded"],
+            disabled=["Date", "User", "Uploaded"],
             column_config={
                 "Delete": st.column_config.CheckboxColumn(" ", width=25, default=False),
+                "Date": st.column_config.DateColumn("Date", width="small"),
                 "Part. Completed?": st.column_config.CheckboxColumn("Part. Completed?", width="small"),
                 "Department": st.column_config.SelectboxColumn("Department", options=DEPARTMENT_OPTIONS[1:], width="small"),
                 "Notes": st.column_config.TextColumn("Notes", width="large"),
@@ -1409,8 +1512,7 @@ else:
                 elif len(resumable) > 1:
                     st.caption("Select only one partially complete task to resume.")
     else:
-        LOGGER.info("No DA tasks completed today to display.")
-        st.info("No tasks completed today.")
+        st.info("No tasks found for this view.")
 
     st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")
     if st.session_state.da_state == "running":
