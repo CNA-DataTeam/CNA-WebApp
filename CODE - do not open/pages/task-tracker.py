@@ -1347,11 +1347,11 @@ else:
                     own_tasks_df["StartTimestampUTC"] = pd.to_datetime(own_tasks_df["StartTimestampUTC"], utc=True)
             else:
                 own_tasks_df = pd.DataFrame()
-        if not own_tasks_df.empty and "StartTimestampUTC" in own_tasks_df.columns:
+        if not own_tasks_df.empty and "TaskID" in own_tasks_df.columns:
             for _, orow in own_tasks_df.iterrows():
-                ts_key = str(orow["StartTimestampUTC"])
+                tid = str(orow["TaskID"]).strip()
                 pc_val = orow.get("PartiallyComplete", False)
-                own_task_data_map[ts_key] = {
+                own_task_data_map[tid] = {
                     "file_path": str(orow["_file_path"]),
                     "task_name": str(orow.get("TaskName") or ""),
                     "account": str(orow.get("CompanyGroup") or ""),
@@ -1387,8 +1387,8 @@ else:
         for _, rrow in recent_df.iterrows():
             is_own = str(rrow.get("UserLogin", "")).strip().lower() == user_login.lower()
             row_is_own.append(is_own)
-            ts_key = str(rrow.get("StartTimestampUTC"))
-            task_data = own_task_data_map.get(ts_key, {})
+            tid = str(rrow.get("TaskID", "")).strip()
+            task_data = own_task_data_map.get(tid, {})
             row_file_paths.append(task_data.get("file_path", "") if is_own else "")
         display_df = recent_df.rename(columns={"TaskName": "Task", "DisplayUser": "User"})[
             ["Date", "User", "Task", "Department", "Part. Completed?", "Uploaded", "Duration", "Notes"]
@@ -1473,8 +1473,8 @@ else:
             resumable = []
             if st.session_state.da_state == "idle":
                 for i, fpath in deletable:
-                    ts_key = str(recent_df.iloc[i].get("StartTimestampUTC"))
-                    td = own_task_data_map.get(ts_key, {})
+                    tid = str(recent_df.iloc[i].get("TaskID", "")).strip()
+                    td = own_task_data_map.get(tid, {})
                     if td.get("partially_complete", False):
                         resumable.append((i, fpath, td))
             show_resume = len(resumable) == 1

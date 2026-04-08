@@ -880,7 +880,7 @@ def load_recent_tasks(completed_dir: Path, user_key: str | None = None, limit: i
     if not files:
         return pd.DataFrame()
     try:
-        needed_cols = ["StartTimestampUTC", "EndTimestampUTC", "DurationSeconds", "PartiallyComplete", "Notes", "FullName", "UserLogin", "TaskName", "Department"]
+        needed_cols = ["TaskID", "StartTimestampUTC", "EndTimestampUTC", "DurationSeconds", "PartiallyComplete", "Notes", "FullName", "UserLogin", "TaskName", "Department"]
         dataset = ds.dataset(files, format="parquet")
         available = set(dataset.schema.names)
         selected = [c for c in needed_cols if c in available]
