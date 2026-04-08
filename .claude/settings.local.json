@@ -43,7 +43,17 @@
       "Bash(xargs grep:*)",
       "Bash(grep:*)",
       "Bash(find \"C:\\\\Users\\\\jramsey\\\\OneDrive - clarkinc.biz\\\\Desktop\\\\WebApp\\\\CNA-WebApp\\\\.venv\\\\Lib\\\\site-packages\\\\streamlit\" -type f -name \"*.py\" -exec grep -l \"RootContainer\\\\|SIDEBAR\" {} \\\\;)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(cmd.exe /c \"RebuildExe.bat < nul\")",
+      "Bash(rm -f \"CNA Web App.exe\")",
+      "Bash(rm -rf \"_internal\")",
+      "Bash(rm -rf \"CODE - do not open/installer/dist\")",
+      "Bash(rm -f \"CODE - do not open/installer/CNA Web App.spec\")",
+      "Bash(mv \"CODE - do not open/installer/dist/CNA Web App/CNA Web App.exe\" .)",
+      "Bash(cp -r \"CODE - do not open/installer/dist/CNA Web App/_internal\" .)",
+      "Bash(cmd.exe /c \"RebuildInstaller.bat < nul\")",
+      "Bash(tasklist)",
+      "Bash(kill 911:*)"
     ]
   }
 }

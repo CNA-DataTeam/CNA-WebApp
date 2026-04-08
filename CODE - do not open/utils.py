@@ -279,6 +279,7 @@ def get_global_css() -> str:
         top: -2px !important;
         width: 20px !important;
         height: 34px !important;
+        pointer-events: none !important;
     }
     .star-toggle img {
         position: absolute !important;
@@ -307,6 +308,7 @@ def get_global_css() -> str:
         cursor: pointer !important;
         min-height: unset !important;
         padding: 0 !important;
+        z-index: 10 !important;
     }
     [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {
         font-size: 0.72rem !important;
@@ -722,12 +724,12 @@ def load_own_live_activity(live_activity_dir: Path, user_key: str) -> dict | Non
             return None
         row = df.iloc[0]
         return {
-            "full_name": row.get("FullName") or "",
-            "task_name": row.get("TaskName"),
-            "cadence": row.get("TaskCadence"),
-            "account": row.get("CompanyGroup") or "",
-            "covering_for": row.get("CoveringFor") or "",
-            "notes": row.get("Notes") or "",
+            "full_name": str(row.get("FullName") or ""),
+            "task_name": str(row.get("TaskName") or ""),
+            "cadence": str(row.get("TaskCadence") or ""),
+            "account": str(row.get("CompanyGroup") or ""),
+            "covering_for": str(row.get("CoveringFor") or ""),
+            "notes": str(row.get("Notes") or ""),
             "start_utc": pd.to_datetime(row.get("StartTimestampUTC"), utc=True).to_pydatetime(),
             "state": row.get("State", "running"),
             "paused_seconds": int(row.get("PausedSeconds", 0) or 0),
