@@ -272,6 +272,11 @@ def _get_task_definition_df(full_df: pd.DataFrame, col_map: dict[str, str]) -> p
 
 
 def _format_new_is_active(raw_value: bool, active_series: pd.Series) -> object:
+    if pd.api.types.is_bool_dtype(active_series):
+        return bool(raw_value)
+    if pd.api.types.is_numeric_dtype(active_series):
+        return 1 if raw_value else 0
+
     clean_series = active_series.dropna()
     if clean_series.empty:
         return bool(raw_value)
