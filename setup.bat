@@ -19,6 +19,20 @@ set "VENV_DIR=%ROOT_DIR%\.venv"
 set "REQ_FILE=%CODE_DIR%\requirements.txt"
 
 REM ============================================================
+REM SELF-HEAL: discard local modifications to regenerated tracked
+REM artifacts. These (the launcher exe and PyInstaller spec) are
+REM rebuilt by every commit, so any local divergence in this clone
+REM would block `git pull --ff-only`. Best-effort; quiet on failure.
+REM ============================================================
+where git >nul 2>&1
+if not errorlevel 1 (
+  pushd "%ROOT_DIR%" >nul
+  git checkout -- "CNA Web App.exe" >nul 2>&1
+  git checkout -- "CODE - do not open\installer\CNA Web App.spec" >nul 2>&1
+  popd >nul
+)
+
+REM ============================================================
 REM FIND OR INSTALL UV
 REM ============================================================
 set "UV_EXE="

@@ -108,10 +108,16 @@ if not exist "%LOCAL_CONFIG%" (
 )
 
 REM ============================================================
-REM BACKGROUND GIT UPDATE CHECK
+REM GIT UPDATE CHECK + PULL (synchronous — once per day)
 REM ============================================================
-call :LOG "Starting background update check..."
-start /B "" "%VENV_DIR%\Scripts\pythonw.exe" "%CODE_DIR%\check_updates.py"
+REM Running this synchronously (rather than backgrounded) is important: the
+REM check now performs the actual `git pull` itself when an update is
+REM available, so it must finish before Streamlit imports the app modules.
+REM The check is gated by .last_update_check and is a no-op on subsequent
+REM launches the same day, so this only adds latency on the day's first
+REM launch.
+call :LOG "Running update check..."
+"%VENV_DIR%\Scripts\python.exe" "%CODE_DIR%\check_updates.py" >> "%LOG_FILE%" 2>&1
 
 REM ============================================================
 REM RUN STARTUP.PY

@@ -181,12 +181,23 @@ begin
   SetProgress(15);
   if FileExists(InstallDir + '\setup.bat') then
   begin
-    UpdateStatus('Existing installation detected — pulling latest...');
+    UpdateStatus('Existing installation detected — cleaning state and pulling latest...');
+    // Discard local modifications to regenerated build artifacts before pull.
+    // Without this, `git pull` aborts with "Your local changes would be
+    // overwritten" whenever the launcher exe was rebuilt locally.
     if GitInstalled and CommandExists('git') then
-      RunAndWait('cmd.exe', '/c cd /d "' + InstallDir + '" && git pull', InstallDir)
+      RunAndWait('cmd.exe',
+        '/c cd /d "' + InstallDir + '" && ' +
+        'git checkout -- "CNA Web App.exe" 2>nul & ' +
+        'git checkout -- "CODE - do not open\installer\CNA Web App.spec" 2>nul & ' +
+        'git pull --ff-only',
+        InstallDir)
     else
       RunAndWait('cmd.exe',
-        '/c cd /d "' + InstallDir + '" && "C:\Program Files\Git\cmd\git.exe" pull',
+        '/c cd /d "' + InstallDir + '" && ' +
+        '"C:\Program Files\Git\cmd\git.exe" checkout -- "CNA Web App.exe" 2>nul & ' +
+        '"C:\Program Files\Git\cmd\git.exe" checkout -- "CODE - do not open\installer\CNA Web App.spec" 2>nul & ' +
+        '"C:\Program Files\Git\cmd\git.exe" pull --ff-only',
         InstallDir);
   end
   else
