@@ -39,23 +39,57 @@ utils.render_app_logo()
 # -----------------------------------------------------------------
 # Update notification — blocks app usage until user clicks Update Now
 # -----------------------------------------------------------------
-def _apply_update():
-    """Pull latest code, clear caches, remove flag."""
+# Build artifacts that are tracked but routinely diverge in the AppData clone
+# (rebuilt by RebuildExe.bat / PyInstaller). Discarding local changes to these
+# before pull is safe because every commit ships a freshly-built copy.
+_REGENERATED_TRACKED_ARTIFACTS = (
+    "CNA Web App.exe",
+    "CODE - do not open/installer/CNA Web App.spec",
+)
+
+
+def _apply_update() -> tuple[bool, str]:
+    """Pull latest code, clear caches, remove flag.
+
+    Returns (success, error_message). On failure the update flag is preserved
+    so the user is prompted to retry on next launch.
+    """
+    for artifact in _REGENERATED_TRACKED_ARTIFACTS:
+        try:
+            subprocess.run(
+                ["git", "checkout", "--", artifact],
+                cwd=ROOT_DIR,
+                capture_output=True,
+                timeout=15,
+            )
+        except Exception:
+            pass
+
     try:
-        subprocess.run(
+        pull = subprocess.run(
             ["git", "pull", "--ff-only"],
             cwd=ROOT_DIR,
             capture_output=True,
+            text=True,
             timeout=60,
         )
-        # Clear Python bytecache
+    except Exception as exc:
+        return False, f"git pull invocation failed: {exc}"
+
+    if pull.returncode != 0:
+        message = (pull.stderr or pull.stdout or "git pull --ff-only failed").strip()
+        return False, message
+
+    try:
+        import shutil
         for d in ROOT_DIR.rglob("__pycache__"):
             if d.is_dir():
-                import shutil
                 shutil.rmtree(d, ignore_errors=True)
     except Exception:
         pass
+
     UPDATE_FLAG.unlink(missing_ok=True)
+    return True, ""
 
 
 def _check_for_updates_manual():
@@ -90,11 +124,19 @@ if UPDATE_FLAG.exists():
         st.markdown("Please update to continue.")
         if st.button("Update Now", type="primary", use_container_width=True):
             with st.spinner("Updating..."):
-                _apply_update()
-            st.success("Updated! Restarting...")
-            import time
-            time.sleep(1)
-            st.rerun()
+                ok, err = _apply_update()
+            if ok:
+                st.success("Updated! Restarting...")
+                import time
+                time.sleep(1)
+                st.rerun()
+            else:
+                LOGGER.error("Auto-update failed: %s", err)
+                st.error(f"Update failed:\n\n```\n{err}\n```")
+                st.caption(
+                    "The update flag has been kept so you can retry on next launch. "
+                    "If this persists, share the error above."
+                )
 
     _update_dialog()
     st.stop()
