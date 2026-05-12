@@ -171,7 +171,8 @@ end;
 // -------------------------------------------------------
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath: String;
+  InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath, CloneLog: String;
+  CloneLogContent: AnsiString;
   ResultCode, WingetCode: Integer;
 begin
   if CurStep <> ssInstall then
@@ -226,32 +227,53 @@ begin
   end;
 
   // ---- Step 2: Clone repo ----
+  // Capture stdout+stderr to a log file so we can surface the real git error
+  // on failure (network/proxy/cert issues, "destination already exists", etc.)
+  // instead of the generic "Failed to clone" message.
+  //
+  // The outer "" wrapping around the entire /c argument is the standard cmd
+  // quoting trick: with multiple quoted args (exe path + URL + dest), cmd
+  // strips the outermost quote pair, leaving the inner quoted exe path
+  // intact. Without it, a git.exe path containing spaces (e.g. user folder
+  // 'John Doe' or 'C:\Program Files\...') ends up tokenized at the space
+  // and cmd tries to run a non-existent file.
   SetProgress(15);
+  CloneLog := ExpandConstant('{tmp}') + '\cna-git.log';
+  SaveStringToFile(CloneLog, '', False);
+
   if FileExists(InstallDir + '\setup.bat') then
   begin
     UpdateStatus('Existing installation detected — cleaning state and pulling latest...');
     // Discard local modifications to regenerated build artifacts before pull.
     // Without this, `git pull` aborts with "Your local changes would be
     // overwritten" whenever the launcher exe was rebuilt locally.
-    RunAndWait('cmd.exe',
-      '/c cd /d "' + InstallDir + '" && ' +
-      '"' + GitExePath + '" checkout -- "CNA Web App.exe" 2>nul & ' +
-      '"' + GitExePath + '" checkout -- "CODE - do not open\installer\CNA Web App.spec" 2>nul & ' +
-      '"' + GitExePath + '" pull --ff-only',
+    ResultCode := RunAndWait('cmd.exe',
+      '/c ""' + GitExePath + '" checkout -- "CNA Web App.exe" >>"' + CloneLog + '" 2>&1 & ' +
+      '"' + GitExePath + '" checkout -- "CODE - do not open\installer\CNA Web App.spec" >>"' + CloneLog + '" 2>&1 & ' +
+      '"' + GitExePath + '" pull --ff-only >>"' + CloneLog + '" 2>&1"',
       InstallDir);
   end
   else
   begin
     UpdateStatus('Cloning CNA Web App from GitHub...');
     SetProgress(20);
-    RunAndWait('cmd.exe',
-      '/c "' + GitExePath + '" clone "{#MyRepoURL}" "' + InstallDir + '"', '');
+    ResultCode := RunAndWait('cmd.exe',
+      '/c ""' + GitExePath + '" clone "{#MyRepoURL}" "' + InstallDir + '" >"' + CloneLog + '" 2>&1"',
+      '');
   end;
 
   if not FileExists(InstallDir + '\setup.bat') then
   begin
+    CloneLogContent := '';
+    if FileExists(CloneLog) then
+      LoadStringFromFile(CloneLog, CloneLogContent);
+    if Length(CloneLogContent) = 0 then
+      CloneLogContent := '(git produced no output — check network/proxy)';
     MsgBox(
-      'Failed to clone the repository. Please check your internet connection and try again.',
+      'Failed to clone the repository.' + #13#10#13#10 +
+      'Git path: ' + GitExePath + #13#10 +
+      'Exit code: ' + IntToStr(ResultCode) + #13#10 + #13#10 +
+      'Git output:' + #13#10 + Copy(String(CloneLogContent), 1, 2000),
       mbError, MB_OK);
     WizardForm.Close;
     Exit;
