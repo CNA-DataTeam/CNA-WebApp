@@ -18,6 +18,12 @@ set "CODE_DIR=%ROOT_DIR%\CODE - do not open"
 set "VENV_DIR=%ROOT_DIR%\.venv"
 set "REQ_FILE=%CODE_DIR%\requirements.txt"
 
+REM Force uv to copy files instead of hardlinking. Hardlinks across volumes
+REM or through reparse points can trigger Windows error 448 "untrusted
+REM mount point" when uv inspects the venv's python.exe — most commonly
+REM seen on machines with corporate folder redirection of AppData.
+set "UV_LINK_MODE=copy"
+
 REM ============================================================
 REM SELF-HEAL: discard local modifications to regenerated tracked
 REM artifacts. These (the launcher exe and PyInstaller spec) are

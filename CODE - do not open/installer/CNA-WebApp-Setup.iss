@@ -24,11 +24,16 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\CNA-WebApp
 DisableProgramGroupPage=yes
-DisableDirPage=yes
+; Show the directory page so users with corporate folder redirection on
+; AppData (which triggers Windows error 448 "untrusted mount point" when
+; uv tries to inspect the venv's python.exe) can pick an alternate path
+; like {userprofile}\CNA-WebApp. Post-install validation detects this
+; case and tells the user to retry with a different directory.
+DisableDirPage=no
 OutputDir=..\..\installer-output
 OutputBaseFilename=CNA-WebApp-Setup
 SetupIconFile=..\..\cna_icon.ico
-UninstallDisplayIcon={localappdata}\CNA-WebApp\cna_icon.ico
+UninstallDisplayIcon={app}\cna_icon.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -172,7 +177,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath, CloneLog, SetupLog: String;
-  PythonDll, VenvPython, MissingArtifacts, LogTail: String;
+  PythonDll, VenvPython, MissingArtifacts, LogTail, Tip: String;
   CloneLogContent, SetupLogContent: AnsiString;
   ResultCode, WingetCode, LogLen: Integer;
 begin
@@ -330,14 +335,30 @@ begin
     if LogLen > 2500 then
       LogTail := '...' + Copy(LogTail, LogLen - 2496, 2500);
 
+    // Pick a tailored hint based on what's in the log. Two common failure
+    // modes we know about:
+    //   - "untrusted mount point" (Windows error 448): corporate folder
+    //     redirection on AppData. Fix: install to a non-redirected dir.
+    //   - Default: antivirus quarantine of a PyInstaller-built file.
+    if Pos('untrusted mount point', LowerCase(LogTail)) > 0 then
+      Tip := 'The install location is on a Windows "untrusted mount point" ' +
+             '(Windows error 448). This is usually caused by corporate folder ' +
+             'redirection of AppData to a network share, which blocks uv from ' +
+             'inspecting the virtual environment''s python.exe.' + #13#10#13#10 +
+             'Fix: re-run this installer, click Browse on the directory page, ' +
+             'and choose a location outside AppData — for example:' + #13#10 +
+             '  ' + ExpandConstant('{userprofile}') + '\CNA-WebApp'
+    else
+      Tip := 'This usually means antivirus quarantined a file during install ' +
+             '(Windows Defender frequently flags PyInstaller-built executables). ' +
+             'Check your antivirus quarantine and whitelist ' + InstallDir + ', ' +
+             'then re-run setup.bat from that folder.';
+
     MsgBox(
       'Setup finished, but the app is not ready to launch.' + #13#10#13#10 +
       'Missing required files:' + #13#10 + MissingArtifacts + #13#10 +
       'setup.bat exit code: ' + IntToStr(ResultCode) + #13#10#13#10 +
-      'This usually means antivirus quarantined a file during install ' +
-      '(Windows Defender frequently flags PyInstaller-built executables). ' +
-      'Check your antivirus quarantine and whitelist ' + InstallDir + ', ' +
-      'then re-run setup.bat from that folder.' + #13#10#13#10 +
+      Tip + #13#10#13#10 +
       'setup.bat output (tail):' + #13#10 + LogTail,
       mbError, MB_OK);
   end;
