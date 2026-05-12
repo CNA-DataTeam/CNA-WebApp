@@ -110,11 +110,17 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 
 ### 7. Push to GitHub
 
-Push the commit to the remote:
+Push the commit to the remote. The repo uses HTTPS, so credentials must come from a credential helper — Git Bash from Claude Code has no TTY and a plain `git push` will fail with `could not read Username for 'https://github.com'`.
 
+**Always run the push with Git Credential Manager explicitly enabled for this invocation:**
+
+```bash
+git -c credential.helper=manager push
 ```
-git push
-```
+
+This pulls credentials from the Windows Credential Store via `git-credential-manager.exe` (installed with Git for Windows at `C:\Users\<user>\AppData\Local\Programs\Git\mingw64\bin\git-credential-manager.exe`). The user does NOT need to enter credentials interactively — the manager handles it silently as long as they've authenticated before.
+
+If `git-credential-manager.exe` isn't installed on this machine, plain `git push` will hang. In that case, fall back to telling the user to run `!git push` themselves.
 
 If the push is rejected because the remote has newer commits, resolve it:
 
@@ -157,8 +163,8 @@ git add <resolved files>
 # Continue the rebase
 git rebase --continue
 
-# Push
-git push
+# Push (use the credential helper, same as step 7)
+git -c credential.helper=manager push
 ```
 
 If the push is rejected again (another commit landed while you were resolving), repeat from 7a. If this happens more than twice, stop and tell the user.

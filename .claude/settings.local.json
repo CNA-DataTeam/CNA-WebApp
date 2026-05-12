@@ -56,7 +56,10 @@
       "Bash(kill 911:*)",
       "Bash(./.venv/Scripts/python.exe *)",
       "Bash(tasklist //FI \"IMAGENAME eq CNA Web App.exe\")",
-      "Bash(netstat -ano -p tcp)"
+      "Bash(netstat -ano -p tcp)",
+      "Bash(git remote *)",
+      "Bash(git config *)",
+      "Bash(git -c credential.helper=manager push)"
     ]
   }
 }

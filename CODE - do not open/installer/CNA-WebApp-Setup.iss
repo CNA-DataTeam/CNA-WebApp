@@ -66,6 +66,44 @@ begin
 end;
 
 // -------------------------------------------------------
+// Helper: locate git.exe on disk at any known install path.
+// Returns the full path to git.exe, or '' if not found.
+//
+// Why this is necessary: after winget installs Git, the installer's PATH
+// is still the stale parent-process PATH and `git` won't resolve via
+// `where git` even though Git is on disk. We also can't assume Git
+// landed under C:\Program Files\Git — winget defaults to user-scope
+// (%LOCALAPPDATA%\Programs\Git) when the installer is unelevated, which
+// is our default since PrivilegesRequired=lowest.
+// -------------------------------------------------------
+function FindGitExe(): String;
+var
+  Candidate: String;
+begin
+  // 1. System-wide install (machine-scope winget, traditional installer)
+  if FileExists('C:\Program Files\Git\cmd\git.exe') then
+  begin
+    Result := 'C:\Program Files\Git\cmd\git.exe';
+    Exit;
+  end;
+  // 2. 32-bit fallback (rare)
+  if FileExists('C:\Program Files (x86)\Git\cmd\git.exe') then
+  begin
+    Result := 'C:\Program Files (x86)\Git\cmd\git.exe';
+    Exit;
+  end;
+  // 3. User-scope install (winget default when unelevated — most likely
+  //    location after this installer runs the winget install step)
+  Candidate := ExpandConstant('{localappdata}\Programs\Git\cmd\git.exe');
+  if FileExists(Candidate) then
+  begin
+    Result := Candidate;
+    Exit;
+  end;
+  Result := '';
+end;
+
+// -------------------------------------------------------
 // Helper: update status label and progress bar
 // -------------------------------------------------------
 procedure SetProgress(const Percent: Integer);
@@ -133,9 +171,8 @@ end;
 // -------------------------------------------------------
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  InstallDir, ConfigSrc, ConfigDst, SetupBat: String;
-  ResultCode: Integer;
-  GitInstalled: Boolean;
+  InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath: String;
+  ResultCode, WingetCode: Integer;
 begin
   if CurStep <> ssInstall then
     Exit;
@@ -146,35 +183,46 @@ begin
   // ---- Step 1: Git ----
   UpdateStatus('Checking for Git...');
   SetProgress(2);
-  GitInstalled := CommandExists('git');
 
-  if not GitInstalled then
+  // Look on disk first — this finds pre-existing installs at any of the
+  // known locations (system-wide, 32-bit, user-scope). Falls back to PATH
+  // lookup for portable / custom installs.
+  GitExePath := FindGitExe();
+  if (GitExePath = '') and CommandExists('git') then
+    GitExePath := 'git';
+
+  if GitExePath = '' then
   begin
+    if not CommandExists('winget') then
+    begin
+      MsgBox(
+        'Git is not installed, and winget is not available on this machine.' + #13#10#13#10 +
+        'Please install Git manually from https://git-scm.com and re-run this installer.',
+        mbError, MB_OK);
+      WizardForm.Close;
+      Exit;
+    end;
+
     UpdateStatus('Installing Git via winget (this may take a minute)...');
     SetProgress(5);
-    ResultCode := RunAndWait('cmd.exe',
-      '/c winget install --id Git.Git -e --silent --accept-package-agreements --accept-source-agreements',
+    // --scope user matches our unelevated installer (PrivilegesRequired=lowest)
+    // so Git lands at a predictable location: %LOCALAPPDATA%\Programs\Git.
+    WingetCode := RunAndWait('cmd.exe',
+      '/c winget install --id Git.Git -e --silent --scope user --accept-package-agreements --accept-source-agreements',
       '');
 
-    // Refresh PATH from registry so we can find git
-    ResultCode := RunAndWait('cmd.exe', '/c git --version', '');
-    if ResultCode <> 0 then
+    // PATH inherited by the installer is still stale at this point — locate
+    // git.exe directly on disk instead of relying on `where git`.
+    GitExePath := FindGitExe();
+    if GitExePath = '' then
     begin
-      // Try common install path directly
-      if FileExists('C:\Program Files\Git\cmd\git.exe') then
-        GitInstalled := True
-      else
-      begin
-        MsgBox(
-          'Git could not be installed automatically.' + #13#10#13#10 +
-          'Please install Git manually from https://git-scm.com and re-run this installer.',
-          mbError, MB_OK);
-        WizardForm.Close;
-        Exit;
-      end;
-    end
-    else
-      GitInstalled := True;
+      MsgBox(
+        'Git could not be installed automatically (winget exit code: ' + IntToStr(WingetCode) + ').' + #13#10#13#10 +
+        'Please install Git manually from https://git-scm.com and re-run this installer.',
+        mbError, MB_OK);
+      WizardForm.Close;
+      Exit;
+    end;
   end;
 
   // ---- Step 2: Clone repo ----
@@ -185,31 +233,19 @@ begin
     // Discard local modifications to regenerated build artifacts before pull.
     // Without this, `git pull` aborts with "Your local changes would be
     // overwritten" whenever the launcher exe was rebuilt locally.
-    if GitInstalled and CommandExists('git') then
-      RunAndWait('cmd.exe',
-        '/c cd /d "' + InstallDir + '" && ' +
-        'git checkout -- "CNA Web App.exe" 2>nul & ' +
-        'git checkout -- "CODE - do not open\installer\CNA Web App.spec" 2>nul & ' +
-        'git pull --ff-only',
-        InstallDir)
-    else
-      RunAndWait('cmd.exe',
-        '/c cd /d "' + InstallDir + '" && ' +
-        '"C:\Program Files\Git\cmd\git.exe" checkout -- "CNA Web App.exe" 2>nul & ' +
-        '"C:\Program Files\Git\cmd\git.exe" checkout -- "CODE - do not open\installer\CNA Web App.spec" 2>nul & ' +
-        '"C:\Program Files\Git\cmd\git.exe" pull --ff-only',
-        InstallDir);
+    RunAndWait('cmd.exe',
+      '/c cd /d "' + InstallDir + '" && ' +
+      '"' + GitExePath + '" checkout -- "CNA Web App.exe" 2>nul & ' +
+      '"' + GitExePath + '" checkout -- "CODE - do not open\installer\CNA Web App.spec" 2>nul & ' +
+      '"' + GitExePath + '" pull --ff-only',
+      InstallDir);
   end
   else
   begin
     UpdateStatus('Cloning CNA Web App from GitHub...');
     SetProgress(20);
-    if GitInstalled and CommandExists('git') then
-      RunAndWait('cmd.exe',
-        '/c git clone "{#MyRepoURL}" "' + InstallDir + '"', '')
-    else
-      RunAndWait('cmd.exe',
-        '/c "C:\Program Files\Git\cmd\git.exe" clone "{#MyRepoURL}" "' + InstallDir + '"', '');
+    RunAndWait('cmd.exe',
+      '/c "' + GitExePath + '" clone "{#MyRepoURL}" "' + InstallDir + '"', '');
   end;
 
   if not FileExists(InstallDir + '\setup.bat') then
