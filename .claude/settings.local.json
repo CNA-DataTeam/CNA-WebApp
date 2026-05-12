@@ -53,7 +53,10 @@
       "Bash(cp -r \"CODE - do not open/installer/dist/CNA Web App/_internal\" .)",
       "Bash(cmd.exe /c \"RebuildInstaller.bat < nul\")",
       "Bash(tasklist)",
-      "Bash(kill 911:*)"
+      "Bash(kill 911:*)",
+      "Bash(./.venv/Scripts/python.exe *)",
+      "Bash(tasklist //FI \"IMAGENAME eq CNA Web App.exe\")",
+      "Bash(netstat -ano -p tcp)"
     ]
   }
 }

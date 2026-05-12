@@ -50,6 +50,7 @@ import getpass
 import hashlib
 import html
 import inspect
+import json
 import logging
 import re
 import tempfile
@@ -1587,3 +1588,229 @@ def log_page_open_once(page_key: str, logger: logging.LoggerAdapter) -> None:
         return
     st.session_state[state_key] = True
     logger.info("Page opened.")
+
+
+# ---------------------------------------------------------------------------
+# Fiscal Periods
+#
+# Admin-defined fiscal periods (e.g. 12 months / 13 four-week periods / 4
+# quarters) for a given year. Stored as a single parquet at
+# {PERSONNEL_DIR}/fiscal_periods.parquet with one row per (Year, PeriodNumber).
+# Other pages can call get_fiscal_period_for_date(...) to map a date to its
+# configured period without re-implementing storage details.
+# ---------------------------------------------------------------------------
+FISCAL_PERIODS_SCHEMA = pa.schema([
+    ("Year", pa.int32()),
+    ("PeriodNumber", pa.int32()),
+    ("PeriodName", pa.string()),
+    ("StartDate", pa.date32()),
+    ("EndDate", pa.date32()),
+])
+
+
+def get_fiscal_periods_path() -> Path:
+    """Return the parquet path that stores admin-defined fiscal periods."""
+    return Path(config.PERSONNEL_DIR) / "fiscal_periods.parquet"
+
+
+def _coerce_fiscal_periods_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize a raw periods DataFrame to the canonical column types."""
+    if df is None or df.empty:
+        return pd.DataFrame(
+            columns=["Year", "PeriodNumber", "PeriodName", "StartDate", "EndDate"]
+        )
+    out = df.copy()
+    for col in ("Year", "PeriodNumber", "PeriodName", "StartDate", "EndDate"):
+        if col not in out.columns:
+            out[col] = pd.NA
+    out["Year"] = pd.to_numeric(out["Year"], errors="coerce").astype("Int32")
+    out["PeriodNumber"] = pd.to_numeric(out["PeriodNumber"], errors="coerce").astype("Int32")
+    out["PeriodName"] = out["PeriodName"].fillna("").astype(str)
+    out["StartDate"] = pd.to_datetime(out["StartDate"], errors="coerce").dt.date
+    out["EndDate"] = pd.to_datetime(out["EndDate"], errors="coerce").dt.date
+    keep = out[["Year", "PeriodNumber", "PeriodName", "StartDate", "EndDate"]].copy()
+    keep = keep.dropna(subset=["Year", "PeriodNumber", "StartDate", "EndDate"])
+    return keep.sort_values(["Year", "PeriodNumber"]).reset_index(drop=True)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_fiscal_periods() -> pd.DataFrame:
+    """Load all configured fiscal periods (cached)."""
+    path = get_fiscal_periods_path()
+    if not path.exists():
+        return pd.DataFrame(
+            columns=["Year", "PeriodNumber", "PeriodName", "StartDate", "EndDate"]
+        )
+    try:
+        raw = pd.read_parquet(path)
+    except Exception as exc:
+        get_page_logger("Shared Utilities").exception(
+            "Failed to load fiscal periods parquet: %s", exc
+        )
+        return pd.DataFrame(
+            columns=["Year", "PeriodNumber", "PeriodName", "StartDate", "EndDate"]
+        )
+    return _coerce_fiscal_periods_df(raw)
+
+
+def load_fiscal_periods_for_year(year: int) -> pd.DataFrame:
+    """Return only the periods configured for the given year, sorted by period number."""
+    all_periods = load_fiscal_periods()
+    if all_periods.empty:
+        return all_periods
+    year_int = int(year)
+    return (
+        all_periods[all_periods["Year"].astype("Int32") == year_int]
+        .sort_values("PeriodNumber")
+        .reset_index(drop=True)
+    )
+
+
+def get_fiscal_period_for_date(value) -> dict | None:
+    """
+    Return the fiscal period record covering the given date, or None.
+
+    The returned dict has keys: Year, PeriodNumber, PeriodName, StartDate, EndDate.
+    """
+    target = pd.to_datetime(value, errors="coerce")
+    if pd.isna(target):
+        return None
+    target_date = target.date()
+
+    periods = load_fiscal_periods()
+    if periods.empty:
+        return None
+
+    mask = (periods["StartDate"] <= target_date) & (periods["EndDate"] >= target_date)
+    matches = periods[mask]
+    if matches.empty:
+        return None
+
+    row = matches.iloc[0]
+    return {
+        "Year": int(row["Year"]),
+        "PeriodNumber": int(row["PeriodNumber"]),
+        "PeriodName": str(row["PeriodName"] or ""),
+        "StartDate": row["StartDate"],
+        "EndDate": row["EndDate"],
+    }
+
+
+def save_fiscal_periods_for_year(year: int, periods_df: pd.DataFrame) -> Path:
+    """
+    Replace all rows for the given year with the supplied periods and persist.
+
+    periods_df must have columns: PeriodNumber, PeriodName, StartDate, EndDate.
+    Returns the parquet path written.
+    """
+    year_int = int(year)
+    if periods_df is None:
+        new_year_df = pd.DataFrame(
+            columns=["Year", "PeriodNumber", "PeriodName", "StartDate", "EndDate"]
+        )
+    else:
+        new_year_df = periods_df.copy()
+        new_year_df["Year"] = year_int
+        new_year_df = _coerce_fiscal_periods_df(new_year_df)
+
+    existing = load_fiscal_periods()
+    if not existing.empty:
+        other_years = existing[existing["Year"].astype("Int32") != year_int].copy()
+    else:
+        other_years = pd.DataFrame(
+            columns=["Year", "PeriodNumber", "PeriodName", "StartDate", "EndDate"]
+        )
+
+    combined = pd.concat([other_years, new_year_df], ignore_index=True)
+    combined = _coerce_fiscal_periods_df(combined)
+
+    path = get_fiscal_periods_path()
+    atomic_write_parquet(combined, path, schema=FISCAL_PERIODS_SCHEMA)
+    load_fiscal_periods.clear()
+    return path
+
+
+def get_previous_fiscal_period(value) -> dict | None:
+    """
+    Return the fiscal period that ended most recently before the period
+    containing ``value``. ``value`` may be a date or an existing period dict.
+
+    Crosses year boundaries (P1 of 2027 -> last configured period of 2026).
+    Returns None if no earlier period is configured.
+    """
+    if isinstance(value, dict):
+        current = value
+    else:
+        current = get_fiscal_period_for_date(value)
+    if current is None:
+        return None
+
+    all_periods = load_fiscal_periods()
+    if all_periods.empty:
+        return None
+
+    earlier = all_periods[all_periods["EndDate"] < current["StartDate"]]
+    if earlier.empty:
+        return None
+
+    most_recent = earlier.sort_values("EndDate").iloc[-1]
+    return {
+        "Year": int(most_recent["Year"]),
+        "PeriodNumber": int(most_recent["PeriodNumber"]),
+        "PeriodName": str(most_recent["PeriodName"] or ""),
+        "StartDate": most_recent["StartDate"],
+        "EndDate": most_recent["EndDate"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Time Allocation Tool admin settings
+#
+# Small JSON blob at {PERSONNEL_DIR}/time_allocation_settings.json holding
+# admin-managed knobs for the TAT page (currently just the grace-period
+# buffer). Kept here so other pages can read TAT settings without having
+# to know storage details.
+# ---------------------------------------------------------------------------
+def get_time_allocation_settings_path() -> Path:
+    """Return the JSON path that stores admin-managed TAT settings."""
+    return Path(config.PERSONNEL_DIR) / "time_allocation_settings.json"
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_time_allocation_settings() -> dict:
+    """Load TAT admin settings as a dict (cached)."""
+    path = get_time_allocation_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        get_page_logger("Shared Utilities").exception(
+            "Failed to load time allocation settings: %s", exc
+        )
+        return {}
+
+
+def save_time_allocation_settings(settings: dict) -> Path:
+    """Atomically persist TAT admin settings and clear the loader cache."""
+    path = get_time_allocation_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = settings if isinstance(settings, dict) else {}
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    load_time_allocation_settings.clear()
+    return path
+
+
+def get_time_allocation_grace_period_days() -> int:
+    """Return the configured grace-period buffer in days (default 0)."""
+    settings = load_time_allocation_settings()
+    raw = settings.get("grace_period_days", 0)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, value)

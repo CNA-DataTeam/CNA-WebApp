@@ -58,6 +58,13 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             caption="Review all validation results and clear disputed flags.",
             admin_only=True,
         ),
+        PageEntry(
+            path="pages/period-configuration.py",
+            title="Period Configuration",
+            icon="\U0001F5D3️",
+            caption="Define fiscal periods per year for use across the app.",
+            admin_only=True,
+        ),
     ],
     "Task Tracker": [
         PageEntry(
