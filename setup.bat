@@ -210,11 +210,52 @@ if not exist "%BUILD_DIST%\CNA Web App\CNA Web App.exe" (
   goto SKIP_BUILD
 )
 move /Y "%BUILD_DIST%\CNA Web App\CNA Web App.exe" "%ROOT_DIR%\" >nul
+if errorlevel 1 (
+  echo ERROR: Failed to move CNA Web App.exe to install root.
+  echo This usually means antivirus blocked the move. Check quarantine.
+)
 xcopy /E /I /Y /Q "%BUILD_DIST%\CNA Web App\_internal" "%ROOT_DIR%\_internal"
+if errorlevel 1 (
+  echo ERROR: Failed to copy _internal\ to install root.
+  echo This usually means antivirus quarantined a bundled DLL or .pyd file.
+  echo Check Windows Defender / your AV quarantine and whitelist the
+  echo install directory: %ROOT_DIR%
+)
 rmdir /s /q "%BUILD_DIST%" 2>nul
 echo Launcher exe + _internal built successfully.
 
 :SKIP_BUILD
+
+REM ============================================================
+REM VERIFY LAUNCHER ARTIFACTS
+REM
+REM Setup is allowed to be best-effort up to here. Before we declare
+REM success, confirm the two files the launcher actually needs at
+REM runtime exist on disk. python311.dll missing is the classic AV-
+REM quarantine symptom — call it out explicitly so users know where
+REM to look.
+REM ============================================================
+if not exist "%ROOT_DIR%\CNA Web App.exe" (
+  echo.
+  echo ERROR: CNA Web App.exe is missing from %ROOT_DIR%.
+  echo The app cannot start without this file. Run RebuildExe.bat
+  echo manually, or re-run this setup script.
+  if "%SILENT%"=="0" pause
+  exit /b 1
+)
+if not exist "%ROOT_DIR%\_internal\python311.dll" (
+  echo.
+  echo ERROR: _internal\python311.dll is missing.
+  echo The launcher cannot start without this file.
+  echo.
+  echo Most common cause: antivirus quarantined the file during install.
+  echo   1. Open Windows Security ^> Virus ^& threat protection ^> Protection history
+  echo      and restore any quarantined items under %ROOT_DIR%.
+  echo   2. Add %ROOT_DIR% to your antivirus exclusions.
+  echo   3. Re-run setup.bat.
+  if "%SILENT%"=="0" pause
+  exit /b 1
+)
 
 REM ============================================================
 REM CREATE DESKTOP SHORTCUT

@@ -171,9 +171,10 @@ end;
 // -------------------------------------------------------
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath, CloneLog: String;
-  CloneLogContent: AnsiString;
-  ResultCode, WingetCode: Integer;
+  InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath, CloneLog, SetupLog: String;
+  PythonDll, VenvPython, MissingArtifacts, LogTail: String;
+  CloneLogContent, SetupLogContent: AnsiString;
+  ResultCode, WingetCode, LogLen: Integer;
 begin
   if CurStep <> ssInstall then
     Exit;
@@ -294,11 +295,52 @@ begin
        InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   UpdateStatus('Running setup (installing Python, dependencies, creating shortcut)...');
-  Exec('cmd.exe', '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '" /silent',
+  SetupLog := ExpandConstant('{tmp}') + '\cna-setup.log';
+  SaveStringToFile(SetupLog, '', False);
+  Exec('cmd.exe',
+       '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '" /silent > "' + SetupLog + '" 2>&1',
        InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if ResultCode <> 0 then
     Log('setup.bat returned non-zero exit code: ' + IntToStr(ResultCode));
+
+  // Post-condition validation: setup.bat is best-effort and historically
+  // swallows several failure modes (PyInstaller build, move/xcopy, antivirus
+  // quarantine of _internal\python311.dll). Verify the artifacts the launcher
+  // actually needs at runtime before reporting success.
+  PythonDll := InstallDir + '\_internal\python311.dll';
+  VenvPython := InstallDir + '\.venv\Scripts\python.exe';
+  if (not FileExists(PythonDll)) or (not FileExists(VenvPython)) then
+  begin
+    MissingArtifacts := '';
+    if not FileExists(VenvPython) then
+      MissingArtifacts := MissingArtifacts + '  - ' + VenvPython + #13#10;
+    if not FileExists(PythonDll) then
+      MissingArtifacts := MissingArtifacts + '  - ' + PythonDll + #13#10;
+
+    SetupLogContent := '';
+    if FileExists(SetupLog) then
+      LoadStringFromFile(SetupLog, SetupLogContent);
+    if Length(SetupLogContent) = 0 then
+      SetupLogContent := '(setup.bat produced no captured output)';
+
+    // Show the tail of the setup log — errors are usually near the end.
+    LogTail := String(SetupLogContent);
+    LogLen := Length(LogTail);
+    if LogLen > 2500 then
+      LogTail := '...' + Copy(LogTail, LogLen - 2496, 2500);
+
+    MsgBox(
+      'Setup finished, but the app is not ready to launch.' + #13#10#13#10 +
+      'Missing required files:' + #13#10 + MissingArtifacts + #13#10 +
+      'setup.bat exit code: ' + IntToStr(ResultCode) + #13#10#13#10 +
+      'This usually means antivirus quarantined a file during install ' +
+      '(Windows Defender frequently flags PyInstaller-built executables). ' +
+      'Check your antivirus quarantine and whitelist ' + InstallDir + ', ' +
+      'then re-run setup.bat from that folder.' + #13#10#13#10 +
+      'setup.bat output (tail):' + #13#10 + LogTail,
+      mbError, MB_OK);
+  end;
 
   // ---- Step 4: Copy config key ----
   SetProgress(90);
