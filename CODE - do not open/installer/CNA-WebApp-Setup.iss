@@ -347,7 +347,7 @@ begin
              'inspecting the virtual environment''s python.exe.' + #13#10#13#10 +
              'Fix: re-run this installer, click Browse on the directory page, ' +
              'and choose a location outside AppData — for example:' + #13#10 +
-             '  ' + ExpandConstant('{userprofile}') + '\CNA-WebApp'
+             '  ' + GetEnv('USERPROFILE') + '\CNA-WebApp'
     else
       Tip := 'This usually means antivirus quarantined a file during install ' +
              '(Windows Defender frequently flags PyInstaller-built executables). ' +
