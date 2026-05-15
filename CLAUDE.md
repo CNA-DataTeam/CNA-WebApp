@@ -213,8 +213,10 @@ The Repair button is the same script you get from manually double-clicking `repa
 - `CODE - do not open/check_updates.py` runs in background at startup (once per day)
 - If `git fetch` shows the local branch is behind origin, attempts a synchronous `git pull --ff-only`. On success, clears `.update_available`. On failure, writes `.update_available` so the in-app dialog surfaces the error.
 - `app.py` checks for the flag on every page load and shows a blocking "Update Available" dialog
-- The only option is "Update Now" which runs `git pull --ff-only`, clears caches, and restarts
+- Primary action is "Update Now" which runs `git pull --ff-only`, clears caches, and restarts
+- Secondary action is "Repair App" — same as the Settings > Repair App button, included here as an escape hatch when Update Now keeps failing (e.g., persistent merge conflict, broken upstream commit). Spawns `repair.bat` and exits the app.
 - A manual "Check for Updates" button is available in the sidebar under Settings
+- **Post-pull dependency refresh:** After a successful pull, both `check_updates.py` and `app.py:_apply_update()` run `uv pip install --link-mode copy -r requirements.txt` so any commits that add/upgrade Python dependencies land before the app boots. uv is fast on no-op installs (~1-2s) so this runs unconditionally rather than diffing the file. Best-effort and logged — if uv isn't found or the install fails, the user will see the failure in `AppLogs.log` (or the StartApp.bat log) and can recover via Settings > Repair App.
 - **Post-pull launcher rebuild:** After a successful pull, both `check_updates.py` and `app.py:_apply_update()` check whether `CNA Web App.exe` exists at the root. If not (which can happen on a clone made before the exe was gitignored — the pull deletes the previously-tracked exe), they invoke `setup.bat /silent` to rebuild it via PyInstaller before the app continues. This is the safety net that makes the exe-untracking transition self-healing.
 
 ### Installer

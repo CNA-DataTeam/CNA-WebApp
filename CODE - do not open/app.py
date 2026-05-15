@@ -2,6 +2,7 @@ from pathlib import Path
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -52,6 +53,63 @@ _REGENERATED_TRACKED_ARTIFACTS = (
 _LAUNCHER_EXE = ROOT_DIR / "CNA Web App.exe"
 _SETUP_BAT = ROOT_DIR / "setup.bat"
 _REPAIR_BAT = ROOT_DIR / "repair.bat"
+_REQUIREMENTS_FILE = APP_DIR / "requirements.txt"
+_VENV_DIR = ROOT_DIR / ".venv"
+
+
+def _find_uv() -> str | None:
+    """Locate the uv executable. Mirrors setup.bat's search order:
+    PATH first, then the standard per-user install locations.
+    """
+    found = shutil.which("uv")
+    if found:
+        return found
+    for env_var in ("LOCALAPPDATA", "APPDATA"):
+        base = os.environ.get(env_var)
+        if not base:
+            continue
+        candidate = Path(base) / "uv" / "bin" / "uv.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _refresh_dependencies() -> None:
+    """Run `uv pip install -r requirements.txt` after a successful pull.
+
+    Catches commits that add or upgrade Python dependencies — the routine
+    pull updates requirements.txt but doesn't install. uv is fast on no-op
+    installs (~1-2s), so we run unconditionally rather than diffing the
+    file. Best-effort: failures are logged and the user can recover via
+    Settings > Repair App if a dependency lands broken.
+    """
+    if not _REQUIREMENTS_FILE.exists() or not _VENV_DIR.exists():
+        return
+    uv_exe = _find_uv()
+    if uv_exe is None:
+        LOGGER.warning(
+            "uv not on PATH or in standard locations; "
+            "skipping post-pull dependency refresh."
+        )
+        return
+    env = {**os.environ, "VIRTUAL_ENV": str(_VENV_DIR)}
+    try:
+        result = subprocess.run(
+            [uv_exe, "pip", "install", "--link-mode", "copy",
+             "-r", str(_REQUIREMENTS_FILE)],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            timeout=300,
+            env=env,
+        )
+        if result.returncode != 0:
+            LOGGER.warning(
+                "Post-pull dependency refresh failed (rc=%s): %s",
+                result.returncode,
+                result.stderr.decode("utf-8", errors="replace"),
+            )
+    except Exception as exc:
+        LOGGER.warning("Post-pull dependency refresh exception: %s", exc)
 
 
 def _rebuild_launcher_if_missing() -> None:
@@ -106,10 +164,10 @@ def _apply_update() -> tuple[bool, str]:
         message = (pull.stderr or pull.stdout or "git pull --ff-only failed").strip()
         return False, message
 
+    _refresh_dependencies()
     _rebuild_launcher_if_missing()
 
     try:
-        import shutil
         for d in ROOT_DIR.rglob("__pycache__"):
             if d.is_dir():
                 shutil.rmtree(d, ignore_errors=True)
@@ -197,8 +255,20 @@ if UPDATE_FLAG.exists():
                 st.error(f"Update failed:\n\n```\n{err}\n```")
                 st.caption(
                     "The update flag has been kept so you can retry on next launch. "
-                    "If this persists, share the error above."
+                    "If this keeps happening, try **Repair App** below "
+                    "or share the error above."
                 )
+        st.divider()
+        st.caption(
+            "Update keeps failing? **Repair App** does a full reset and rebuild "
+            "(~1-2 min). The app will restart automatically."
+        )
+        if st.button(
+            "Repair App",
+            use_container_width=True,
+            key="_update_dialog_repair",
+        ):
+            _launch_repair()
 
     _update_dialog()
     st.stop()

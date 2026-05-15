@@ -6,16 +6,19 @@ Once per day:
   2. If local branch is behind origin, attempt a clean fast-forward pull
      after discarding local modifications to known-regenerated build
      artifacts (legacy holdover from when the exe/spec were tracked).
-  3. After pull success, if the launcher exe is missing (because the
+  3. After pull success, run `uv pip install -r requirements.txt` so any
+     dependency changes in the new commits land before the app boots.
+  4. After pull success, if the launcher exe is missing (because the
      pull deleted a previously-tracked copy), run setup.bat /silent to
      rebuild it before the app continues.
-  4. On pull success, clear .update_available so the in-app dialog is
+  5. On pull success, clear .update_available so the in-app dialog is
      skipped — the new code is already on disk before Streamlit boots.
-  5. On pull failure, set .update_available so the in-app dialog (with
+  6. On pull failure, set .update_available so the in-app dialog (with
      its surfaced error message) reaches the user on next render.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 from datetime import date
@@ -27,6 +30,8 @@ CHECK_FILE = APP_DIR / ".last_update_check"
 UPDATE_FLAG = APP_DIR / ".update_available"
 LAUNCHER_EXE = ROOT_DIR / "CNA Web App.exe"
 SETUP_BAT = ROOT_DIR / "setup.bat"
+REQUIREMENTS_FILE = APP_DIR / "requirements.txt"
+VENV_DIR = ROOT_DIR / ".venv"
 
 # Build artifacts that may still be tracked in clones from before they were
 # gitignored. Discarding local changes to these before pulling is safe
@@ -64,6 +69,66 @@ def _discard_regenerated_artifacts() -> None:
             _git(["checkout", "--", artifact], timeout=15)
         except Exception:
             pass
+
+
+def _find_uv() -> str | None:
+    """Locate the uv executable. Mirrors setup.bat's search order:
+    PATH first, then the standard per-user install locations.
+    """
+    found = shutil.which("uv")
+    if found:
+        return found
+    for env_var in ("LOCALAPPDATA", "APPDATA"):
+        base = os.environ.get(env_var)
+        if not base:
+            continue
+        candidate = Path(base) / "uv" / "bin" / "uv.exe"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _refresh_dependencies() -> None:
+    """Run `uv pip install -r requirements.txt` after a successful pull.
+
+    Catches commits that add or upgrade Python dependencies — the routine
+    pull updates requirements.txt but doesn't install. uv is fast on no-op
+    installs (~1-2s), so we run unconditionally rather than diffing the
+    file. Best-effort: failures are logged to stderr (which StartApp.bat
+    redirects to the per-launch log) and the user can recover via
+    Settings > Repair App if a dependency lands broken.
+    """
+    if not REQUIREMENTS_FILE.exists() or not VENV_DIR.exists():
+        return
+    uv_exe = _find_uv()
+    if uv_exe is None:
+        print(
+            "[check_updates] uv not on PATH or in standard locations; "
+            "skipping post-pull dependency refresh.",
+            file=sys.stderr,
+        )
+        return
+    env = {**os.environ, "VIRTUAL_ENV": str(VENV_DIR)}
+    try:
+        result = subprocess.run(
+            [uv_exe, "pip", "install", "--link-mode", "copy",
+             "-r", str(REQUIREMENTS_FILE)],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            timeout=300,
+            env=env,
+        )
+        if result.returncode != 0:
+            print(
+                f"[check_updates] dependency refresh failed (rc={result.returncode}):",
+                file=sys.stderr,
+            )
+            print(
+                result.stderr.decode("utf-8", errors="replace"),
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"[check_updates] dependency refresh exception: {exc}", file=sys.stderr)
 
 
 def _rebuild_launcher_if_missing() -> None:
@@ -132,6 +197,7 @@ def run_check() -> None:
         return
 
     if pull.returncode == 0:
+        _refresh_dependencies()
         _rebuild_launcher_if_missing()
         UPDATE_FLAG.unlink(missing_ok=True)
     else:
