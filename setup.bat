@@ -189,18 +189,20 @@ if exist "%CONFIG_ENC%" (
 )
 
 REM ============================================================
-REM BUILD LAUNCHER EXE (if _internal/ is missing)
+REM BUILD LAUNCHER EXE (if exe or _internal/ is missing)
 REM ============================================================
-REM The exe from a git clone is useless without _internal/ (which is
-REM gitignored).  When _internal/ is missing we must build a fresh
-REM matched exe + _internal pair with PyInstaller.
+REM The launcher exe is no longer tracked in git (it's gitignored
+REM alongside _internal/) so every fresh clone — and any install
+REM where the exe was deleted by a previous failed update — needs a
+REM fresh build. We rebuild when either the exe OR _internal/ is
+REM missing, since they must be a matched PyInstaller onedir pair.
 REM ============================================================
 set "EXE_FILE=%ROOT_DIR%\CNA Web App.exe"
 set "INTERNAL_DIR=%ROOT_DIR%\_internal"
 set "BUILD_DIST=%CODE_DIR%\installer\dist"
-if exist "%INTERNAL_DIR%" goto SKIP_BUILD
+if exist "%EXE_FILE%" if exist "%INTERNAL_DIR%" goto SKIP_BUILD
 
-echo _internal folder missing -- building launcher exe...
+echo Launcher exe or _internal missing -- building...
 
 REM Install PyInstaller if not already present (check for exe directly;
 REM do NOT use "python -c import" with >nul -- cmd.exe clobbers errorlevel)

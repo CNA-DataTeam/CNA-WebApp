@@ -1,6 +1,7 @@
 from pathlib import Path
 import base64
 import json
+import os
 import subprocess
 import sys
 
@@ -39,13 +40,38 @@ utils.render_app_logo()
 # -----------------------------------------------------------------
 # Update notification — blocks app usage until user clicks Update Now
 # -----------------------------------------------------------------
-# Build artifacts that are tracked but routinely diverge in the AppData clone
-# (rebuilt by RebuildExe.bat / PyInstaller). Discarding local changes to these
-# before pull is safe because every commit ships a freshly-built copy.
+# Build artifacts that may still be tracked in clones from before they were
+# gitignored. Discarding local changes is safe because setup.bat regenerates
+# them on demand. Once a clone has pulled the commit that untracks them,
+# these checkouts become silent no-ops.
 _REGENERATED_TRACKED_ARTIFACTS = (
     "CNA Web App.exe",
     "CODE - do not open/installer/CNA Web App.spec",
 )
+
+_LAUNCHER_EXE = ROOT_DIR / "CNA Web App.exe"
+_SETUP_BAT = ROOT_DIR / "setup.bat"
+_REPAIR_BAT = ROOT_DIR / "repair.bat"
+
+
+def _rebuild_launcher_if_missing() -> None:
+    """If the pull deleted a previously-tracked exe, run setup.bat to rebuild.
+
+    Best-effort and silent. setup.bat detects the missing exe and triggers
+    PyInstaller. If anything goes wrong, the user will get an explicit
+    "exe is missing" error on next launch from setup.bat's verification step.
+    """
+    if _LAUNCHER_EXE.exists() or not _SETUP_BAT.exists():
+        return
+    try:
+        subprocess.run(
+            ["cmd.exe", "/c", str(_SETUP_BAT), "/silent"],
+            cwd=ROOT_DIR,
+            capture_output=True,
+            timeout=600,
+        )
+    except Exception:
+        pass
 
 
 def _apply_update() -> tuple[bool, str]:
@@ -80,6 +106,8 @@ def _apply_update() -> tuple[bool, str]:
         message = (pull.stderr or pull.stdout or "git pull --ff-only failed").strip()
         return False, message
 
+    _rebuild_launcher_if_missing()
+
     try:
         import shutil
         for d in ROOT_DIR.rglob("__pycache__"):
@@ -90,6 +118,40 @@ def _apply_update() -> tuple[bool, str]:
 
     UPDATE_FLAG.unlink(missing_ok=True)
     return True, ""
+
+
+def _launch_repair() -> None:
+    """Spawn repair.bat in a detached console window and exit the app.
+
+    repair.bat takes over from here: it force-kills the launcher exe so
+    file handles release, resets the working tree to origin/main (or HEAD
+    if offline), runs setup.bat to rebuild missing artifacts, and relaunches
+    the app. All output is teed to repair.log at the project root.
+
+    Wired to the Settings > Repair App button.
+    """
+    if not _REPAIR_BAT.exists():
+        st.error(f"Repair script not found at {_REPAIR_BAT}.")
+        LOGGER.error("Repair button clicked but repair.bat is missing at %s", _REPAIR_BAT)
+        return
+    try:
+        # `start ""` detaches: cmd.exe exits immediately and the new
+        # console window survives our os._exit() below. The empty
+        # title argument is required by `start`'s quoting rules.
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", "", str(_REPAIR_BAT)],
+            cwd=ROOT_DIR,
+            close_fds=True,
+        )
+    except Exception as exc:
+        LOGGER.error("Failed to spawn repair.bat: %s", exc)
+        st.error(f"Could not start repair: {exc}")
+        return
+    # Hard-exit so we don't keep file handles open while repair.bat
+    # rebuilds the launcher. repair.bat also force-kills CNA Web App.exe
+    # as a safety net for the parent launcher process.
+    LOGGER.info("Launching Repair App; exiting Streamlit process.")
+    os._exit(0)
 
 
 def _check_for_updates_manual():
@@ -267,6 +329,37 @@ with st.sidebar:
         if st.button("Clear Cache", use_container_width=True, type="tertiary"):
             st.cache_data.clear()
             st.rerun()
+        if st.button("Repair App", use_container_width=True, type="tertiary"):
+            st.session_state["_show_repair_dialog"] = True
+
+if st.session_state.get("_show_repair_dialog"):
+    @st.dialog("Repair App", width="small")
+    def _repair_dialog():
+        st.markdown(
+            "Resets your installation to the latest version, rebuilds the "
+            "launcher, and restarts the app. Usually takes 1-2 minutes."
+        )
+        st.caption(
+            "**Developers:** any uncommitted local changes will be discarded."
+        )
+        col_yes, col_no = st.columns(2)
+        with col_yes:
+            if st.button(
+                "Repair",
+                type="primary",
+                use_container_width=True,
+                key="_repair_confirm",
+            ):
+                _launch_repair()
+        with col_no:
+            if st.button(
+                "Cancel",
+                use_container_width=True,
+                key="_repair_cancel",
+            ):
+                st.session_state["_show_repair_dialog"] = False
+                st.rerun()
+    _repair_dialog()
 
 LOGGER.info("Navigation initialized | current_page='%s'", navigation.title)
 navigation.run()

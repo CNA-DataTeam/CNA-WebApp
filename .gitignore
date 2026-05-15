@@ -44,8 +44,14 @@ logs/
 # -------------------------------------------------
 # Generated per-machine
 # -------------------------------------------------
-*.lnk
+# The launcher exe + _internal/ are a PyInstaller onedir pair, rebuilt by
+# setup.bat (and by the in-app updater when missing post-pull). They were
+# previously tracked, but local rebuilds collided with `git pull` whenever
+# a commit also touched the exe — see CLAUDE.md section 2 rule 8.
+CNA Web App.exe
 _internal/
+CODE - do not open/installer/CNA Web App.spec
+*.lnk
 installer-output/
 CODE - do not open/installer/build/
 CODE - do not open/installer/dist/
@@ -57,6 +63,7 @@ CODE - do not open/favorites.json
 # Reference material (not part of the app)
 # -------------------------------------------------
 CNA Brand Guidelines/
+tutorial/
 
 # -------------------------------------------------
 # OS junk

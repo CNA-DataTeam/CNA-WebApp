@@ -1,51 +1,25 @@
 ---
 name: commit
-description: "Rebuild exe, encrypt config, rebuild installer, and commit+push to GitHub. Use this for ALL git commits in this project."
+description: "Encrypt config, rebuild installer, and commit+push to GitHub. Use this for ALL git commits in this project."
 ---
 
 # Commit to GitHub
 
-This skill handles the full pre-commit pipeline and push for the CNA-WebApp project. It MUST be used for every commit to ensure the exe, encrypted config, and installer are always up to date.
+This skill handles the full pre-commit pipeline and push for the CNA-WebApp project. It MUST be used for every commit to ensure the encrypted config and installer are always up to date.
 
 ## Important: Batch files do not work from Git Bash
 
 Claude Code runs in Git Bash. Running `.bat` files via `cmd.exe /c` produces no output and may silently fail. **Do NOT run batch files directly.** Instead, run the underlying commands as documented below.
 
+## What's NOT in this workflow anymore
+
+`CNA Web App.exe` and `_internal/` are **gitignored**. They are built locally by `setup.bat` on every fresh install and rebuilt automatically by the in-app updater (`check_updates.py` and `app.py:_apply_update()`) if they go missing after a `git pull`. You do **not** need to run `RebuildExe.bat` before committing, and you must **never** stage `CNA Web App.exe`, `_internal/`, or `CODE - do not open/installer/CNA Web App.spec`.
+
 ## Steps
 
 Run these steps in order. Stop and report to the user if any step fails.
 
-### 1. Rebuild the launcher exe
-
-Run these commands directly from bash (do NOT run `RebuildExe.bat`):
-
-```bash
-# Clean old artifacts
-rm -f "CNA Web App.exe"
-rm -rf "_internal"
-rm -rf "CODE - do not open/installer/dist"
-rm -f "CODE - do not open/installer/CNA Web App.spec"
-
-# Build (use absolute path for --icon to avoid spec-relative resolution)
-ICON="$(pwd)/cna_icon.ico"
-STUB="$(pwd)/CODE - do not open/stub_launcher.py"
-.venv/Scripts/pyinstaller.exe --onedir --noconsole \
-  --icon="$ICON" \
-  --name="CNA Web App" \
-  --distpath="CODE - do not open/installer/dist" \
-  --specpath="CODE - do not open/installer" \
-  --workpath="CODE - do not open/installer/build" \
-  "$STUB"
-
-# Move build output to project root
-mv "CODE - do not open/installer/dist/CNA Web App/CNA Web App.exe" .
-cp -r "CODE - do not open/installer/dist/CNA Web App/_internal" .
-rm -rf "CODE - do not open/installer/dist"
-```
-
-Verify that both `CNA Web App.exe` and `_internal/` exist in the project root. If the build fails, stop and tell the user.
-
-### 2. Encrypt config
+### 1. Encrypt config
 
 ```bash
 .venv/Scripts/python.exe "CODE - do not open/config_manager.py" encrypt
@@ -53,7 +27,7 @@ Verify that both `CNA Web App.exe` and `_internal/` exist in the project root. I
 
 This updates `CODE - do not open/config.enc` with the latest `config.py`. If it fails, stop and tell the user.
 
-### 3. Rebuild the installer
+### 2. Rebuild the installer
 
 Spaces in this project's paths break ISCC argument parsing when called directly from bash. Use a temp bat file:
 
@@ -80,14 +54,13 @@ If ISCC.exe is not found at all, tell the user to install Inno Setup or run `Reb
 
 Note: The installer output (`installer-output/`) is gitignored and is NOT committed. This step ensures the local installer artifact stays current.
 
-### 4. Review changes
+### 3. Review changes
 
 Run `git status` and `git diff` to review all staged and unstaged changes. Summarize what will be committed.
 
-### 5. Stage files
+### 4. Stage files
 
 Stage all relevant changed files, always including:
-- `CNA Web App.exe`
 - `CODE - do not open/config.enc`
 
 Plus any other files that were modified as part of the current work. Use specific file names rather than `git add -A`.
@@ -95,11 +68,14 @@ Plus any other files that were modified as part of the current work. Use specifi
 **NEVER stage these files:**
 - `config.py`
 - `CODE - do not open/config.key`
+- `CNA Web App.exe`
+- `_internal/` (any files inside it)
+- `CODE - do not open/installer/CNA Web App.spec`
 - `.env`
 - Any `.log` files
 - Any files listed in `.gitignore`
 
-### 6. Commit
+### 5. Commit
 
 Write a concise commit message summarizing the changes. Follow the repo's existing commit message style (check `git log --oneline -5`).
 
@@ -108,7 +84,7 @@ End the commit message with:
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ```
 
-### 7. Push to GitHub
+### 6. Push to GitHub
 
 Push the commit to the remote. The repo uses HTTPS, so credentials must come from a credential helper — Git Bash from Claude Code has no TTY and a plain `git push` will fail with `could not read Username for 'https://github.com'`.
 
@@ -124,15 +100,15 @@ If `git-credential-manager.exe` isn't installed on this machine, plain `git push
 
 If the push is rejected because the remote has newer commits, resolve it:
 
-#### 7a. Rebase onto latest remote
+#### 6a. Rebase onto latest remote
 
 ```bash
 git pull --rebase
 ```
 
-If the rebase applies cleanly (no conflicts), push again and move on to step 8.
+If the rebase applies cleanly (no conflicts), push again and move on to step 7.
 
-#### 7b. If there are merge conflicts, assess each one
+#### 6b. If there are merge conflicts, assess each one
 
 For each conflicted file, read the conflict markers and determine whether both sides can be preserved:
 
@@ -143,8 +119,6 @@ For each conflicted file, read the conflict markers and determine whether both s
 
 **Always rebuild after conflict resolution (do not pick a side):**
 - `config.enc` — after resolving all other conflicts, re-run `.venv/Scripts/python.exe "CODE - do not open/config_manager.py" encrypt` and stage the result
-- `CNA Web App.exe` and `_internal/` — after resolving all other conflicts, re-run the exe rebuild (step 1) and stage the result
-- `CNA Web App.spec` — delete the conflicted spec, the exe rebuild will regenerate it
 
 **Stop and ask the user BEFORE resolving:**
 - Two changes modified the same function, method, or logic block in contradictory ways
@@ -152,23 +126,23 @@ For each conflicted file, read the conflict markers and determine whether both s
 - Changes to `config.py` structure where both sides changed the same keys/values
 - Anything where preserving both sides would break functionality or create duplicates
 
-#### 7c. After resolving all conflicts
+#### 6c. After resolving all conflicts
 
 ```bash
 # Stage resolved files
 git add <resolved files>
 
-# If config.enc or the exe were conflicted, rebuild them now (steps 1-2)
+# If config.enc was conflicted, rebuild it now (step 1)
 
 # Continue the rebase
 git rebase --continue
 
-# Push (use the credential helper, same as step 7)
+# Push (use the credential helper, same as step 6)
 git -c credential.helper=manager push
 ```
 
-If the push is rejected again (another commit landed while you were resolving), repeat from 7a. If this happens more than twice, stop and tell the user.
+If the push is rejected again (another commit landed while you were resolving), repeat from 6a. If this happens more than twice, stop and tell the user.
 
-### 8. Confirm
+### 7. Confirm
 
 Tell the user the commit hash, branch, and a brief summary of what was pushed.
