@@ -80,7 +80,7 @@ _TA_COMPACT_CSS = """
 .ta-entry-col-header {
     font-size: 0.78rem;
     font-weight: 600;
-    color: rgba(49, 51, 63, 0.78);
+    color: var(--cna-green);
     padding: 0 0.75rem;
 }
 /* Tighten % caption inside an entry card */
@@ -101,17 +101,26 @@ st.markdown(_TA_COMPACT_CSS, unsafe_allow_html=True)
 
 TIME_ALLOCATION_DIR = config.TIME_ALLOCATION_DIR
 PERSONNEL_DIR = config.PERSONNEL_DIR
+# The canonical channel set, listed in the default display order used when
+# there isn't yet enough saved data to sort the dropdown by usage frequency.
 CHANNEL_OPTIONS = [
-    "Consolidated: Smallwares",
+    "Resupply",
     "Consolidated: Equipment",
-    "Consolidated: Full",
-    "Consolidated: Rollout",
+    "Consolidated: Smallwares",
     "Express: Smallwares",
     "Express: Equipment",
+    "Consolidated: Rollout",
+    "Consolidated: Full",
     "Express: Full",
-    "Resupply",
 ]
-DEFAULT_CHANNEL_INDEX = CHANNEL_OPTIONS.index("Resupply") if "Resupply" in CHANNEL_OPTIONS else 0
+# Below this many total channel selections across all saved entries, the
+# Channel dropdown uses CHANNEL_OPTIONS' defined order; at/above it, by usage
+# frequency.
+CHANNEL_FREQUENCY_SORT_THRESHOLD = 50
+
+# Hour/minute dropdown options for the per-row Time input.
+TIME_HOUR_OPTIONS = list(range(0, 13))
+TIME_MINUTE_OPTIONS = [0, 15, 30, 45]
 
 _TIME_ALLOCATION_BASE_FIELDS: tuple[tuple[str, pa.DataType], ...] = (
     ("Entry Date", pa.date32()),
@@ -119,6 +128,7 @@ _TIME_ALLOCATION_BASE_FIELDS: tuple[tuple[str, pa.DataType], ...] = (
     ("Full Name", pa.string()),
     ("Department", pa.string()),
     ("Account", pa.string()),
+    ("Customer Code", pa.string()),
     ("Time", pa.string()),
     ("Channel", pa.string()),
 )
@@ -236,6 +246,7 @@ def _read_time_allocation_exports_from_files(file_paths: list[Path], base_dir: P
         "Full Name",
         "Department",
         "Account",
+        "Customer Code",
         "Time",
         "Channel",
     ]
@@ -345,6 +356,82 @@ def _account_options_for_row(account_options: list[str], current_value: object) 
     return [current, *options]
 
 
+# _account_options_for_row works for any "blank-first" option list (Reporting
+# Name or Customer Code); kept as a named alias for call-site readability.
+_customer_code_options_for_row = _account_options_for_row
+
+
+def _build_account_lookup(lookup_df: pd.DataFrame) -> dict:
+    """
+    Build the Customer Code <-> Reporting Name lookup structures from the
+    accounts parquet DataFrame (columns: CustomerCode, ReportingName).
+
+    Returns a dict with:
+        reporting_names    - sorted unique Reporting Name values
+        customer_codes     - sorted unique Customer Code values
+        rn_to_first_code   - Reporting Name -> first (alphabetical) Customer Code
+        code_to_rn         - Customer Code -> Reporting Name
+    """
+    rn_to_codes: dict[str, set[str]] = {}
+    code_to_rn: dict[str, str] = {}
+    if lookup_df is not None and not lookup_df.empty:
+        for _, row in lookup_df.iterrows():
+            rn = str(row.get("ReportingName") or "").strip()
+            code = str(row.get("CustomerCode") or "").strip()
+            if rn:
+                rn_to_codes.setdefault(rn, set())
+                if code:
+                    rn_to_codes[rn].add(code)
+            if code and code not in code_to_rn and rn:
+                code_to_rn[code] = rn
+    rn_to_first_code = {
+        rn: sorted(codes)[0] for rn, codes in rn_to_codes.items() if codes
+    }
+    return {
+        "reporting_names": sorted(rn_to_codes.keys()),
+        "customer_codes": sorted(code_to_rn.keys()),
+        "rn_to_first_code": rn_to_first_code,
+        "code_to_rn": code_to_rn,
+    }
+
+
+def _split_duration_to_hm(value: object) -> tuple[int, int]:
+    """Parse an HH:MM(:SS) duration string into (hour, minute) for the row dropdowns."""
+    seconds = max(0, utils.parse_hhmmss(str(value or "")))
+    hour = min(max(seconds // 3600, 0), TIME_HOUR_OPTIONS[-1])
+    remainder_minutes = (seconds % 3600) // 60
+    # Snap to the nearest configured 15-minute interval.
+    minute = min(TIME_MINUTE_OPTIONS, key=lambda m: abs(m - remainder_minutes))
+    return int(hour), int(minute)
+
+
+def _hm_to_duration(hour: object, minute: object) -> str:
+    """Combine hour/minute dropdown values into the canonical HH:MM string."""
+    try:
+        hour_int = max(0, int(hour))
+    except (TypeError, ValueError):
+        hour_int = 0
+    try:
+        minute_int = max(0, int(minute))
+    except (TypeError, ValueError):
+        minute_int = 0
+    return f"{hour_int:02d}:{minute_int:02d}"
+
+
+def _on_reporting_name_change(idx: int, lookup: dict) -> None:
+    """Autofill the row's Customer Code when the Reporting Name selection changes."""
+    reporting_name = str(st.session_state.get(f"ta_detailed_account_{idx}", "")).strip()
+    st.session_state[f"ta_detailed_custcode_{idx}"] = lookup["rn_to_first_code"].get(reporting_name, "")
+
+
+def _on_customer_code_change(idx: int, lookup: dict) -> None:
+    """Autofill the row's Reporting Name when the Customer Code selection changes."""
+    customer_code = str(st.session_state.get(f"ta_detailed_custcode_{idx}", "")).strip()
+    reporting_name = lookup["code_to_rn"].get(customer_code, "")
+    if reporting_name:
+        st.session_state[f"ta_detailed_account_{idx}"] = reporting_name
+
+
 def _parse_date_value(value: object) -> date | None:
     """Safely parse date-like values into a date object."""
     parsed = pd.to_datetime(value, errors="coerce")
@@ -363,71 +450,62 @@ def _get_current_period() -> dict | None:
     return utils.get_fiscal_period_for_date(_today_eastern())
 
 
-def _format_period_label(period: dict) -> str:
-    """Build a short label like 'P3 (2026)' or 'Period 3 (2026)'."""
-    name = str(period.get("PeriodName") or "").strip()
-    year = int(period["Year"])
-    if name:
-        return f"{name} ({year})"
-    return f"Period {int(period['PeriodNumber'])} ({year})"
+def _most_recent_fiscal_year_start() -> date | None:
+    """
+    Return the start date of the most recent fiscal year.
 
+    "Most recent" is the fiscal year containing today, or — when today falls
+    outside every configured period — the latest fiscal year that has started.
+    Returns None if no fiscal periods are configured.
+    """
+    periods = utils.load_fiscal_periods()
+    if periods.empty:
+        return None
 
-def _get_previous_period() -> dict | None:
-    """Return the fiscal period preceding the current one, or None."""
-    return utils.get_previous_fiscal_period(_today_eastern())
-
-
-def _grace_period_days() -> int:
-    """Configured grace-period buffer (days). 0 means disabled."""
-    return utils.get_time_allocation_grace_period_days()
-
-
-def _is_within_grace_window() -> bool:
-    """True when today falls within the first N days of the current period."""
-    grace_days = _grace_period_days()
-    if grace_days <= 0:
-        return False
     today = _today_eastern()
     current = _get_current_period()
-    if current is None:
-        return False
-    grace_end = current["StartDate"] + timedelta(days=grace_days - 1)
-    return current["StartDate"] <= today <= grace_end
+    if current is not None:
+        target_year = int(current["Year"])
+    else:
+        started = periods[periods["StartDate"] <= today]
+        if started.empty:
+            target_year = int(periods["Year"].min())
+        else:
+            target_year = int(started["Year"].max())
+
+    year_periods = periods[periods["Year"].astype("Int64") == target_year]
+    if year_periods.empty:
+        return None
+    return min(year_periods["StartDate"].tolist())
 
 
-def _is_last_period_editable_now() -> bool:
-    """True when the grace window is active AND a previous period is configured."""
-    return _is_within_grace_window() and _get_previous_period() is not None
+def _work_week_bounds(reference: date) -> tuple[date, date]:
+    """Return (Monday, Friday) of the work week containing `reference`."""
+    monday = reference - timedelta(days=reference.weekday())
+    return monday, monday + timedelta(days=4)
+
+
+def _editable_window() -> tuple[date, date]:
+    """
+    The span of days users can add to or edit on the Input tab: last week's
+    Monday through this week's Friday — i.e. the days reachable from the
+    This Week and Last Week calendar views.
+    """
+    today = _today_eastern()
+    this_monday, this_friday = _work_week_bounds(today)
+    return this_monday - timedelta(days=7), this_friday
 
 
 def _is_editable_day(day: date) -> bool:
     """
-    Editing is allowed for days inside the current fiscal period, plus days
-    inside the previous fiscal period during the configured grace window.
-
-    Admins bypass this restriction entirely — the buffer/period rules apply
-    only to non-admin roles on the Input tab.
-
-    Falls back to the calendar-month rule when no fiscal period is configured
-    for today's date so the tool keeps working until an admin sets up periods.
+    Editing is allowed for days inside the editable window (this week and last
+    week). Admins bypass this on the Input tab; the admin Edit Entries table
+    can still change any date.
     """
     if utils.is_current_user_admin():
         return True
-
-    today = _today_eastern()
-    today_period = _get_current_period()
-    if today_period is None:
-        return day.year == today.year and day.month == today.month
-
-    if today_period["StartDate"] <= day <= today_period["EndDate"]:
-        return True
-
-    if _is_last_period_editable_now():
-        prev = _get_previous_period()
-        if prev is not None and prev["StartDate"] <= day <= prev["EndDate"]:
-            return True
-
-    return False
+    window_start, window_end = _editable_window()
+    return window_start <= day <= window_end
 
 
 @st.cache_data(ttl=30)
@@ -461,18 +539,54 @@ def _build_calendar_events(
     return events
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _channel_frequency_counts() -> dict[str, int]:
+    """Count how often each channel appears across all saved time-allocation entries."""
+    exports_df = load_time_allocation_exports(TIME_ALLOCATION_DIR)
+    if exports_df.empty or "Channel" not in exports_df.columns:
+        return {}
+    channels = exports_df["Channel"].dropna().astype(str).str.strip()
+    channels = channels[channels != ""]
+    if channels.empty:
+        return {}
+    return {str(k): int(v) for k, v in channels.value_counts().items()}
+
+
+def _ordered_channel_options() -> list[str]:
+    """
+    Return the canonical channel options ordered for display.
+
+    Under CHANNEL_FREQUENCY_SORT_THRESHOLD total selections across all channels,
+    options are shown in CHANNEL_OPTIONS' defined order. At/above the threshold,
+    they are sorted by usage frequency (most-used first), with alphabetical order
+    as the tiebreak.
+    """
+    counts = _channel_frequency_counts()
+    total = sum(counts.values())
+    if total < CHANNEL_FREQUENCY_SORT_THRESHOLD:
+        return list(CHANNEL_OPTIONS)
+    return sorted(CHANNEL_OPTIONS, key=lambda channel: (-counts.get(channel, 0), channel))
+
+
+def _default_channel() -> str:
+    """Default channel for a new/blank entry row (the most frequently used option)."""
+    ordered = _ordered_channel_options()
+    return ordered[0] if ordered else (CHANNEL_OPTIONS[0] if CHANNEL_OPTIONS else "")
+
+
 def _coerce_channel(value: object) -> str:
     """Return the saved channel verbatim if present so legacy values are preserved."""
     text = str(value or "").strip()
-    return text if text else CHANNEL_OPTIONS[DEFAULT_CHANNEL_INDEX]
+    return text if text else _default_channel()
 
 
 def _channel_options_for_row(current_value: object) -> list[str]:
     """Ensure the row's current channel exists in the selectbox options (preserves legacy values)."""
+    ordered = _ordered_channel_options()
     current = str(current_value or "").strip()
-    if not current or current in CHANNEL_OPTIONS:
-        return list(CHANNEL_OPTIONS)
-    return [current, *CHANNEL_OPTIONS]
+    if not current or current in ordered:
+        return list(ordered)
+    return [current, *ordered]
 
 
 def _default_for_field(entry_field: dict) -> object:
@@ -604,11 +718,14 @@ def _seed_input_state_for_day(selected_day: date, selected_day_df: pd.DataFrame,
             for entry_field in entry_fields:
                 col = f"cf_{entry_field['id']}"
                 custom_values[entry_field["id"]] = _coerce_field_value(entry_field, row.get(col))
+            hour, minute = _split_duration_to_hm(row.get("Time"))
             rows.append(
                 {
                     "account": _coerce_account(row.get("Account"), account_options),
+                    "customer_code": str(row.get("Customer Code") or "").strip(),
                     "channel": _coerce_channel(row.get("Channel")),
-                    "time": str(row.get("Time") or "00:00"),
+                    "hour": hour,
+                    "minute": minute,
                     "custom_values": custom_values,
                 }
             )
@@ -616,8 +733,10 @@ def _seed_input_state_for_day(selected_day: date, selected_day_df: pd.DataFrame,
     if not rows:
         st.session_state["ta_detailed_count"] = 1
         st.session_state["ta_detailed_account_0"] = ""
-        st.session_state["ta_detailed_duration_0"] = "00:00"
-        st.session_state["ta_detailed_channel_0"] = CHANNEL_OPTIONS[DEFAULT_CHANNEL_INDEX]
+        st.session_state["ta_detailed_custcode_0"] = ""
+        st.session_state["ta_detailed_dur_h_0"] = 0
+        st.session_state["ta_detailed_dur_m_0"] = 0
+        st.session_state["ta_detailed_channel_0"] = _default_channel()
         for entry_field in entry_fields:
             st.session_state[f"ta_detailed_cf_{entry_field['id']}_0"] = _default_for_field(entry_field)
         st.session_state["ta_loaded_day_token"] = day_token
@@ -626,7 +745,9 @@ def _seed_input_state_for_day(selected_day: date, selected_day_df: pd.DataFrame,
     st.session_state["ta_detailed_count"] = len(rows)
     for idx, row in enumerate(rows):
         st.session_state[f"ta_detailed_account_{idx}"] = row["account"]
-        st.session_state[f"ta_detailed_duration_{idx}"] = row["time"]
+        st.session_state[f"ta_detailed_custcode_{idx}"] = row["customer_code"]
+        st.session_state[f"ta_detailed_dur_h_{idx}"] = row["hour"]
+        st.session_state[f"ta_detailed_dur_m_{idx}"] = row["minute"]
         st.session_state[f"ta_detailed_channel_{idx}"] = row["channel"]
         row_custom = row.get("custom_values") or {}
         for entry_field in entry_fields:
@@ -647,10 +768,14 @@ def _delete_detailed_row(delete_idx: int) -> None:
 
     for idx in range(delete_idx, count - 1):
         st.session_state[f"ta_detailed_account_{idx}"] = st.session_state.get(f"ta_detailed_account_{idx + 1}", "")
-        st.session_state[f"ta_detailed_duration_{idx}"] = st.session_state.get(f"ta_detailed_duration_{idx + 1}", "00:00")
+        st.session_state[f"ta_detailed_custcode_{idx}"] = st.session_state.get(
+            f"ta_detailed_custcode_{idx + 1}", ""
+        )
+        st.session_state[f"ta_detailed_dur_h_{idx}"] = st.session_state.get(f"ta_detailed_dur_h_{idx + 1}", 0)
+        st.session_state[f"ta_detailed_dur_m_{idx}"] = st.session_state.get(f"ta_detailed_dur_m_{idx + 1}", 0)
         st.session_state[f"ta_detailed_channel_{idx}"] = st.session_state.get(
             f"ta_detailed_channel_{idx + 1}",
-            CHANNEL_OPTIONS[DEFAULT_CHANNEL_INDEX],
+            _default_channel(),
         )
         for entry_field in entry_fields:
             next_key = f"ta_detailed_cf_{entry_field['id']}_{idx + 1}"
@@ -661,7 +786,9 @@ def _delete_detailed_row(delete_idx: int) -> None:
     last_idx = count - 1
     last_keys = [
         f"ta_detailed_account_{last_idx}",
-        f"ta_detailed_duration_{last_idx}",
+        f"ta_detailed_custcode_{last_idx}",
+        f"ta_detailed_dur_h_{last_idx}",
+        f"ta_detailed_dur_m_{last_idx}",
         f"ta_detailed_channel_{last_idx}",
     ]
     for entry_field in entry_fields:
@@ -675,10 +802,9 @@ def _delete_detailed_row(delete_idx: int) -> None:
 
 def _compute_calendar_window(view_mode: str, today: date) -> tuple[date, date]:
     """Return (window_start, window_end) for the chosen calendar view."""
-    if view_mode == "Work Week (M-F)":
-        # Monday of current week through Friday
-        monday = today - timedelta(days=today.weekday())
-        return monday, monday + timedelta(days=4)
+    if view_mode == "Last Week":
+        # Monday through Friday of the previous work week
+        return _work_week_bounds(today - timedelta(days=7))
     if view_mode == "This Period":
         period = utils.get_fiscal_period_for_date(today)
         if period is not None:
@@ -690,14 +816,8 @@ def _compute_calendar_window(view_mode: str, today: date) -> tuple[date, date]:
         else:
             last_of_month = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
         return first_of_month, last_of_month
-    if view_mode == "Last Period":
-        prev = utils.get_previous_fiscal_period(today)
-        if prev is not None:
-            return prev["StartDate"], prev["EndDate"]
-        # Defensive fallback: option should only be exposed when prev exists.
-        return today - timedelta(days=6), today
-    # Default: 7 Days
-    return today - timedelta(days=6), today
+    # Default: This Week — Monday through Friday of the current work week
+    return _work_week_bounds(today)
 
 
 def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd.DataFrame]:
@@ -706,12 +826,10 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
     with header_col:
         st.subheader("Calendar", anchor=False)
     with toggle_col:
-        view_mode_options = ["7 Days", "Work Week (M-F)", "This Period"]
-        if _is_last_period_editable_now():
-            view_mode_options.append("Last Period")
-        stored_view = st.session_state.get("ta_calendar_view", "7 Days")
+        view_mode_options = ["This Week", "This Period", "Last Week"]
+        stored_view = st.session_state.get("ta_calendar_view", "This Week")
         if stored_view not in view_mode_options:
-            stored_view = "7 Days"
+            stored_view = "This Week"
             st.session_state["ta_calendar_view"] = stored_view
         view_mode = st.radio(
             "View",
@@ -757,7 +875,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
     num_days = (window_end - window_start).days + 1
     calendar_initial_date = window_start.isoformat()
     valid_range: dict[str, str] | None = None
-    if view_mode in ("This Period", "Last Period"):
+    if view_mode == "This Period":
         # Pad to whole weeks (Sun–Sat) so dayGrid wraps into rows of 7.
         # Python weekday: Mon=0..Sun=6; FullCalendar default firstDay=Sunday.
         sunday_offset = (window_start.weekday() + 1) % 7
@@ -765,15 +883,14 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         saturday_offset = (5 - window_end.weekday()) % 7
         grid_end = window_end + timedelta(days=saturday_offset)
         weeks_in_view = max(1, ((grid_end - grid_start).days + 1) // 7)
-        view_id = "dayGridPeriod" if view_mode == "This Period" else "dayGridLastPeriod"
-        button_text = "This Period" if view_mode == "This Period" else "Last Period"
-        initial_view = view_id
-        calendar_height = 80 + weeks_in_view * 70
+        initial_view = "dayGridPeriod"
+        # Roomier rows for the multi-week period grid so day cells aren't squished.
+        calendar_height = 90 + weeks_in_view * 120
         views_config = {
-            view_id: {
+            "dayGridPeriod": {
                 "type": "dayGrid",
                 "duration": {"weeks": weeks_in_view},
-                "buttonText": button_text,
+                "buttonText": "This Period",
             }
         }
         calendar_initial_date = grid_start.isoformat()
@@ -782,7 +899,8 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
             "start": window_start.isoformat(),
             "end": (window_end + timedelta(days=1)).isoformat(),
         }
-    elif view_mode == "Work Week (M-F)":
+    else:
+        # This Week / Last Week — a 5-day Mon–Fri work-week grid
         initial_view = "dayGridWorkWeek"
         calendar_height = 180
         views_config = {
@@ -790,16 +908,6 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
                 "type": "dayGrid",
                 "duration": {"days": 5},
                 "buttonText": "5 days",
-            }
-        }
-    else:
-        initial_view = "dayGridSevenDay"
-        calendar_height = 180
-        views_config = {
-            "dayGridSevenDay": {
-                "type": "dayGrid",
-                "duration": {"days": 7},
-                "buttonText": "7 days",
             }
         }
 
@@ -925,6 +1033,7 @@ def render_input_view(
     full_name: str,
     department: str,
     account_options: list[str],
+    account_lookup: dict,
 ) -> None:
     """Render input controls and save parquet entries."""
     if "ta_confirm_open" not in st.session_state:
@@ -945,31 +1054,21 @@ def render_input_view(
     selected_day, selected_day_df = render_input_day_selector(user_login, full_name)
     _seed_input_state_for_day(selected_day, selected_day_df, account_options)
 
-    editing_locked = not _is_editable_day(selected_day)
-    if editing_locked:
-        today_period = _get_current_period()
-        if today_period is not None:
-            msg = (
-                f"Editing is restricted to the current fiscal period — "
-                f"{_format_period_label(today_period)} "
-                f"({today_period['StartDate']:%m/%d/%Y} – {today_period['EndDate']:%m/%d/%Y})."
-            )
-            if _is_last_period_editable_now():
-                prev = _get_previous_period()
-                if prev is not None:
-                    msg += (
-                        f" Grace window is active: also accepting edits to "
-                        f"{_format_period_label(prev)} "
-                        f"({prev['StartDate']:%m/%d/%Y} – {prev['EndDate']:%m/%d/%Y})."
-                    )
-            msg += f" Entries for {selected_day:%m/%d/%Y} are read-only."
-            st.warning(msg)
-        else:
-            st.warning(
-                f"Fiscal periods aren't configured for today, so editing is "
-                f"falling back to the current calendar month. "
-                f"Entries for {selected_day:%B %Y} are read-only."
-            )
+    view_mode = st.session_state.get("ta_calendar_view", "This Week")
+    period_view_locked = view_mode == "This Period"
+    editing_locked = period_view_locked or not _is_editable_day(selected_day)
+    if period_view_locked:
+        st.info(
+            "This Period is a read-only overview. Switch to This Week or "
+            "Last Week to add or change entries."
+        )
+    elif editing_locked:
+        window_start, window_end = _editable_window()
+        st.warning(
+            f"Entries for {selected_day:%m/%d/%Y} are read-only. You can edit "
+            f"days from {window_start:%m/%d/%Y} through {window_end:%m/%d/%Y} "
+            f"(this week and last week)."
+        )
 
     pending_delete_idx = st.session_state.pop("ta_detailed_delete_idx", None)
     if pending_delete_idx is not None and not editing_locked:
@@ -982,34 +1081,35 @@ def render_input_view(
 
     for idx in range(number_of_accounts):
         account_key = f"ta_detailed_account_{idx}"
-        duration_key = f"ta_detailed_duration_{idx}"
+        custcode_key = f"ta_detailed_custcode_{idx}"
+        hour_key = f"ta_detailed_dur_h_{idx}"
+        minute_key = f"ta_detailed_dur_m_{idx}"
         channel_key = f"ta_detailed_channel_{idx}"
         if account_key not in st.session_state:
             st.session_state[account_key] = ""
-        if duration_key not in st.session_state:
-            st.session_state[duration_key] = "00:00"
+        if custcode_key not in st.session_state:
+            st.session_state[custcode_key] = ""
+        if hour_key not in st.session_state:
+            st.session_state[hour_key] = 0
+        if minute_key not in st.session_state:
+            st.session_state[minute_key] = 0
         if channel_key not in st.session_state:
-            st.session_state[channel_key] = CHANNEL_OPTIONS[DEFAULT_CHANNEL_INDEX]
+            st.session_state[channel_key] = _default_channel()
         for entry_field in entry_fields:
             cf_key = f"ta_detailed_cf_{entry_field['id']}_{idx}"
             if cf_key not in st.session_state:
                 st.session_state[cf_key] = _default_for_field(entry_field)
 
-    preview_seconds: list[int] = []
-    for idx in range(number_of_accounts):
-        duration_value = st.session_state.get(f"ta_detailed_duration_{idx}", "00:00")
-        preview_seconds.append(max(0, utils.parse_hhmmss(str(duration_value))))
-    total_preview_seconds = sum(preview_seconds)
     has_saved_rows_for_day = not selected_day_df.empty
 
-    st.caption("Enter one duration per row in HH:MM or HH:MM:SS format.")
+    st.caption("Select a Reporting Name or Customer Code (they fill each other in), then pick the hours and minutes for each row.")
 
     header_labels = [
-        ("Account", 4),
-        ("Time", 2),
-        ("% of Total", 1.5),
+        ("Reporting Name", 3.2),
+        ("Customer Code", 2.3),
+        ("Time", 2.6),
         ("Channel", 2),
-        ("", 1.2),
+        ("", 1),
     ]
     header_cols = st.columns([w for _, w in header_labels])
     for hcol, (label, _) in zip(header_cols, header_labels):
@@ -1017,32 +1117,54 @@ def render_input_view(
             hcol.markdown(f"<div class='ta-entry-col-header'>{label}</div>", unsafe_allow_html=True)
 
     for idx in range(number_of_accounts):
-        row_seconds = preview_seconds[idx]
-        row_percentage = (row_seconds * 100.0 / total_preview_seconds) if total_preview_seconds > 0 else 0.0
-
         with st.container(border=True):
-            c1, c2, c3, c4, c5 = st.columns([4, 2, 1.5, 2, 1.2])
+            c1, c2, c3, c4, c5 = st.columns([3.2, 2.3, 2.6, 2, 1])
             with c1:
                 account_key = f"ta_detailed_account_{idx}"
                 account = st.selectbox(
-                    "Account",
+                    "Reporting Name",
                     options=_account_options_for_row(account_options, st.session_state.get(account_key, "")),
                     key=account_key,
                     disabled=editing_locked,
                     label_visibility="collapsed",
+                    on_change=_on_reporting_name_change,
+                    args=(idx, account_lookup),
                 )
             with c2:
-                duration = st.text_input(
-                    "Time Duration (hh:mm)",
-                    key=f"ta_detailed_duration_{idx}",
+                custcode_key = f"ta_detailed_custcode_{idx}"
+                customer_code = st.selectbox(
+                    "Customer Code",
+                    options=_customer_code_options_for_row(
+                        [""] + account_lookup["customer_codes"],
+                        st.session_state.get(custcode_key, ""),
+                    ),
+                    key=custcode_key,
                     disabled=editing_locked,
                     label_visibility="collapsed",
+                    on_change=_on_customer_code_change,
+                    args=(idx, account_lookup),
                 )
             with c3:
-                st.markdown(
-                    f"<div class='ta-entry-pct'>{row_percentage:.2f}%</div>",
-                    unsafe_allow_html=True,
-                )
+                h_col, m_col = st.columns(2)
+                with h_col:
+                    hour_value = st.selectbox(
+                        "Hours",
+                        options=TIME_HOUR_OPTIONS,
+                        key=f"ta_detailed_dur_h_{idx}",
+                        disabled=editing_locked,
+                        label_visibility="collapsed",
+                        format_func=lambda h: f"{h} hr",
+                    )
+                with m_col:
+                    minute_value = st.selectbox(
+                        "Minutes",
+                        options=TIME_MINUTE_OPTIONS,
+                        key=f"ta_detailed_dur_m_{idx}",
+                        disabled=editing_locked,
+                        label_visibility="collapsed",
+                        format_func=lambda m: f"{m:02d} min",
+                    )
+                duration = _hm_to_duration(hour_value, minute_value)
             with c4:
                 channel = st.selectbox(
                     "Channel",
@@ -1084,6 +1206,7 @@ def render_input_view(
         rows.append(
             {
                 "account": account,
+                "customer_code": customer_code,
                 "duration": duration,
                 "channel": channel,
                 "custom_values": custom_values,
@@ -1115,10 +1238,10 @@ def render_input_view(
         parsed_seconds = []
         for idx, row in enumerate(rows, start=1):
             if not _empty_to_none(row["account"]):
-                errors.append(f"Account {idx} is required.")
+                errors.append(f"Reporting Name for row {idx} is required.")
             seconds = utils.parse_hhmmss(str(row["duration"]))
             if seconds <= 0:
-                errors.append(f"Time Duration for row {idx} must be a valid time greater than 00:00.")
+                errors.append(f"Time for row {idx} must be greater than 0 hr 00 min.")
             parsed_seconds.append(max(0, seconds))
             row_custom = row.get("custom_values") or {}
             for entry_field in entry_fields:
@@ -1255,22 +1378,12 @@ def save_records(
 ) -> bool:
     """Build and persist time-allocation records to a parquet file."""
     if not _is_editable_day(entry_date):
-        today_period = _get_current_period()
-        if today_period is not None:
-            label = _format_period_label(today_period)
-            if _is_last_period_editable_now():
-                prev = _get_previous_period()
-                if prev is not None:
-                    label += f" (grace window also allows {_format_period_label(prev)})"
-            st.error(
-                f"Editing is restricted to the current fiscal period {label}. "
-                f"Cannot save changes for {entry_date:%m/%d/%Y}."
-            )
-        else:
-            st.error(
-                f"Editing is restricted to the current month. "
-                f"Cannot save changes for {entry_date:%m/%d/%Y}."
-            )
+        window_start, window_end = _editable_window()
+        st.error(
+            f"Editing is limited to this week and last week "
+            f"({window_start:%m/%d/%Y}–{window_end:%m/%d/%Y}). "
+            f"Cannot save changes for {entry_date:%m/%d/%Y}."
+        )
         return False
 
     entry_fields = _load_entry_fields()
@@ -1282,6 +1395,7 @@ def save_records(
             "Full Name": _empty_to_none(full_name),
             "Department": _empty_to_none(department),
             "Account": _empty_to_none(row.get("account")),
+            "Customer Code": _empty_to_none(row.get("customer_code")),
             "Time": utils.format_hhmmss(seconds),
             "Channel": _empty_to_none(row.get("channel")),
         }
@@ -1325,22 +1439,12 @@ def save_records(
 def delete_records_for_day(user_login: str, full_name: str, entry_date: date) -> bool:
     """Delete all saved rows for one user/day and refresh the editor state."""
     if not _is_editable_day(entry_date):
-        today_period = _get_current_period()
-        if today_period is not None:
-            label = _format_period_label(today_period)
-            if _is_last_period_editable_now():
-                prev = _get_previous_period()
-                if prev is not None:
-                    label += f" (grace window also allows {_format_period_label(prev)})"
-            st.error(
-                f"Editing is restricted to the current fiscal period {label}. "
-                f"Cannot delete entries for {entry_date:%m/%d/%Y}."
-            )
-        else:
-            st.error(
-                f"Editing is restricted to the current month. "
-                f"Cannot delete entries for {entry_date:%m/%d/%Y}."
-            )
+        window_start, window_end = _editable_window()
+        st.error(
+            f"Editing is limited to this week and last week "
+            f"({window_start:%m/%d/%Y}–{window_end:%m/%d/%Y}). "
+            f"Cannot delete entries for {entry_date:%m/%d/%Y}."
+        )
         return False
 
     try:
@@ -1400,7 +1504,8 @@ def confirm_time_allocation_submit_dialog(user_login: str, full_name: str, depar
     preview_rows: list[dict[str, object]] = []
     for row, seconds in zip(rows, parsed_seconds):
         preview: dict[str, object] = {
-            "Account": _empty_to_none(row.get("account")) or "",
+            "Reporting Name": _empty_to_none(row.get("account")) or "",
+            "Customer Code": _empty_to_none(row.get("customer_code")) or "",
             "Time": utils.format_hhmmss(seconds),
             "Channel": _empty_to_none(row.get("channel")) or "",
         }
@@ -1510,8 +1615,18 @@ def render_exports_view() -> None:
 
     entry_dt = pd.to_datetime(exports_df["Entry Date"], errors="coerce")
     valid_dates = entry_dt.dropna()
-    min_date = valid_dates.min().date() if not valid_dates.empty else utils.to_eastern(utils.now_utc()).date()
+    today = _today_eastern()
+    min_date = valid_dates.min().date() if not valid_dates.empty else today
     max_date = valid_dates.max().date() if not valid_dates.empty else min_date
+
+    # Default the window to the most recent fiscal year through today.
+    fiscal_year_start = _most_recent_fiscal_year_start()
+    default_from = fiscal_year_start if fiscal_year_start is not None else min_date
+    default_to = today
+    widget_min = min(min_date, default_from)
+    widget_max = max(max_date, default_to)
+    default_from = max(widget_min, min(default_from, widget_max))
+    default_to = max(widget_min, min(default_to, widget_max))
 
     year_options = sorted(
         {int(y) for y in pd.to_numeric(exports_df["Fiscal Year"], errors="coerce").dropna().tolist()}
@@ -1520,9 +1635,13 @@ def render_exports_view() -> None:
 
     f1, f2, f3, f4 = st.columns(4)
     with f1:
-        date_from = st.date_input("From", value=min_date, min_value=min_date, max_value=max_date, key="ta_export_from")
+        date_from = st.date_input(
+            "From", value=default_from, min_value=widget_min, max_value=widget_max, key="ta_export_from"
+        )
     with f2:
-        date_to = st.date_input("To", value=max_date, min_value=min_date, max_value=max_date, key="ta_export_to")
+        date_to = st.date_input(
+            "To", value=default_to, min_value=widget_min, max_value=widget_max, key="ta_export_to"
+        )
     with f3:
         selected_year = st.selectbox(
             "Fiscal Year",
@@ -1599,6 +1718,7 @@ def render_exports_view() -> None:
         "Full Name",
         "Department",
         "Account",
+        "Customer Code",
         "Time",
         "Channel",
         "Source File",
@@ -1635,12 +1755,15 @@ def _count_admin_editor_changes(
             continue
         old_account = str(o.get("Account") or "").strip()
         new_account = str(e.get("Account") or "").strip()
+        old_code = str(o.get("Customer Code") or "").strip()
+        new_code = str(e.get("Customer Code") or "").strip()
         old_channel = str(o.get("Channel") or "").strip()
         new_channel = str(e.get("Channel") or "").strip()
         old_seconds = utils.parse_hhmmss(str(o.get("Time") or ""))
         new_seconds = utils.parse_hhmmss(str(e.get("Time") or ""))
         if (
             old_account != new_account
+            or old_code != new_code
             or old_channel != new_channel
             or old_seconds != new_seconds
         ):
@@ -1675,16 +1798,19 @@ def _apply_admin_editor_changes(original: pd.DataFrame, edited: pd.DataFrame) ->
             continue
 
         new_account = str(e.get("Account") or "").strip()
+        new_code = str(e.get("Customer Code") or "").strip()
         new_channel = str(e.get("Channel") or "").strip()
         new_time_raw = str(e.get("Time") or "").strip()
         new_seconds = utils.parse_hhmmss(new_time_raw)
 
         old_account = str(o.get("Account") or "").strip()
+        old_code = str(o.get("Customer Code") or "").strip()
         old_channel = str(o.get("Channel") or "").strip()
         old_seconds = utils.parse_hhmmss(str(o.get("Time") or ""))
 
         if (
             new_account == old_account
+            and new_code == old_code
             and new_channel == old_channel
             and new_seconds == old_seconds
         ):
@@ -1702,6 +1828,7 @@ def _apply_admin_editor_changes(original: pd.DataFrame, edited: pd.DataFrame) ->
 
         file_changes.setdefault(source_file, {})[source_pos] = {
             "Account": new_account,
+            "Customer Code": new_code or None,
             "Time": utils.format_hhmmss(new_seconds),
             "Channel": new_channel,
         }
@@ -1722,6 +1849,10 @@ def _apply_admin_editor_changes(original: pd.DataFrame, edited: pd.DataFrame) ->
             st.error(f"Failed to read {source_file}: {exc}")
             failed_files += 1
             continue
+
+        # Normalize so every current schema column (e.g. a newly added
+        # 'Customer Code') exists before we write into it by position.
+        file_df = _ensure_time_allocation_columns(file_df)
 
         drop_positions: list[int] = []
         for pos, change in changes.items():
@@ -1779,12 +1910,53 @@ def _apply_admin_editor_changes(original: pd.DataFrame, edited: pd.DataFrame) ->
     st.rerun()
 
 
-def render_admin_data_editor_view() -> None:
-    """Admin-only editable table for any (user, day) entries, unrestricted by fiscal period."""
+def _autofill_admin_editor_codes(editor_key: str, edited: pd.DataFrame, account_lookup: dict) -> bool:
+    """
+    Mirror the Input tab's autofill inside the admin data editor.
+
+    When a row's Account (Reporting Name) is edited, fill its Customer Code with
+    the first matching code; when Customer Code is edited, fill its Account with
+    the matching Reporting Name. Mutates the data_editor's pending-edit state and
+    returns True when a rerun is needed to surface the autofilled value.
+    """
+    state = st.session_state.get(editor_key)
+    if not isinstance(state, dict):
+        return False
+    edited_rows = state.get("edited_rows") or {}
+    changed = False
+    for row_idx, changes in list(edited_rows.items()):
+        try:
+            i = int(row_idx)
+        except (TypeError, ValueError):
+            continue
+        if i < 0 or i >= len(edited):
+            continue
+        account_edited = "Account" in changes
+        code_edited = "Customer Code" in changes
+        if account_edited and not code_edited:
+            reporting_name = str(edited.iloc[i].get("Account") or "").strip()
+            want_code = account_lookup["rn_to_first_code"].get(reporting_name, "")
+            current_code = str(edited.iloc[i].get("Customer Code") or "").strip()
+            if want_code and want_code != current_code:
+                changes["Customer Code"] = want_code
+                changed = True
+        elif code_edited and not account_edited:
+            customer_code = str(edited.iloc[i].get("Customer Code") or "").strip()
+            want_name = account_lookup["code_to_rn"].get(customer_code, "")
+            current_name = str(edited.iloc[i].get("Account") or "").strip()
+            if want_name and want_name != current_name:
+                changes["Account"] = want_name
+                changed = True
+    return changed
+
+
+def render_admin_data_editor_view(account_lookup: dict) -> None:
+    """Admin-only editable table for any (user, day) entries, unrestricted by the Input tab's editing window."""
     st.subheader("Edit Entries", anchor=False)
     st.caption(
-        "Edit Account, Time, or Channel inline, or tick Delete to remove rows. "
-        "Admins can edit any date regardless of the grace-period buffer. "
+        "Edit Account, Customer Code, Time, or Channel inline, or tick Delete to remove rows. "
+        "Editing Account or Customer Code autofills its paired value. "
+        "Admins can edit any date here, regardless of the Input tab's editing window. "
         "Hidden rows within the same source file (filtered out by Department) are preserved on save."
     )
 
@@ -1816,7 +1988,15 @@ def render_admin_data_editor_view() -> None:
     valid_dates = entry_dt.dropna()
     data_min = valid_dates.min().date() if not valid_dates.empty else today
     data_max = valid_dates.max().date() if not valid_dates.empty else today
-    default_from = max(data_min, data_max - timedelta(days=30))
+
+    # Default the window to the most recent fiscal year through today.
+    fiscal_year_start = _most_recent_fiscal_year_start()
+    default_from = fiscal_year_start if fiscal_year_start is not None else data_min
+    default_to = today
+    widget_min = min(data_min, default_from)
+    widget_max = max(data_max, default_to)
+    default_from = max(widget_min, min(default_from, widget_max))
+    default_to = max(widget_min, min(default_to, widget_max))
 
     year_options = sorted(
         {int(y) for y in pd.to_numeric(exports_df["Fiscal Year"], errors="coerce").dropna().tolist()}
@@ -1828,16 +2008,16 @@ def render_admin_data_editor_view() -> None:
         date_from = st.date_input(
             "From",
             value=default_from,
-            min_value=data_min,
-            max_value=data_max,
+            min_value=widget_min,
+            max_value=widget_max,
             key="ta_admin_editor_from",
         )
     with f2:
         date_to = st.date_input(
             "To",
-            value=data_max,
-            min_value=data_min,
-            max_value=data_max,
+            value=default_to,
+            min_value=widget_min,
+            max_value=widget_max,
             key="ta_admin_editor_to",
         )
     with f3:
@@ -1915,6 +2095,7 @@ def render_admin_data_editor_view() -> None:
 
     filtered = filtered.reset_index(drop=True)
     filtered["Account"] = filtered["Account"].fillna("").astype(str)
+    filtered["Customer Code"] = filtered["Customer Code"].fillna("").astype(str)
     filtered["Time"] = filtered["Time"].fillna("").astype(str)
     filtered["Channel"] = filtered["Channel"].fillna("").astype(str)
 
@@ -1925,21 +2106,29 @@ def render_admin_data_editor_view() -> None:
         "Full Name",
         "Department",
         "Account",
+        "Customer Code",
         "Time",
         "Channel",
     ]
     editor_seed = filtered[visible_columns].copy()
     editor_seed["Delete"] = False
 
-    base_accounts = utils.load_accounts(str(PERSONNEL_DIR))
+    base_accounts = account_lookup["reporting_names"]
     existing_accounts = [
         a for a in filtered["Account"].dropna().astype(str).str.strip().unique().tolist() if a
     ]
     account_choices = list(base_accounts) + [a for a in existing_accounts if a not in base_accounts]
+    base_codes = account_lookup["customer_codes"]
+    existing_codes = [
+        c for c in filtered["Customer Code"].dropna().astype(str).str.strip().unique().tolist() if c
+    ]
+    code_choices = [""] + list(base_codes) + [c for c in existing_codes if c not in base_codes]
     existing_channels = [
         c for c in filtered["Channel"].dropna().astype(str).str.strip().unique().tolist() if c
     ]
-    channel_choices = list(CHANNEL_OPTIONS) + [c for c in existing_channels if c not in CHANNEL_OPTIONS]
+    channel_choices = list(_ordered_channel_options()) + [
+        c for c in existing_channels if c not in CHANNEL_OPTIONS
+    ]
 
     column_config = {
         "Entry Date": st.column_config.DateColumn("Entry Date", format="MM/DD/YYYY", disabled=True),
@@ -1947,7 +2136,8 @@ def render_admin_data_editor_view() -> None:
         "Fiscal Period": st.column_config.TextColumn("Fiscal Period", disabled=True),
         "Full Name": st.column_config.TextColumn("Full Name", disabled=True),
         "Department": st.column_config.TextColumn("Department", disabled=True),
-        "Account": st.column_config.SelectboxColumn("Account", options=account_choices, required=True),
+        "Account": st.column_config.SelectboxColumn("Reporting Name", options=account_choices, required=True),
+        "Customer Code": st.column_config.SelectboxColumn("Customer Code", options=code_choices, required=False),
         "Time": st.column_config.TextColumn("Time", help="HH:MM or HH:MM:SS"),
         "Channel": st.column_config.SelectboxColumn("Channel", options=channel_choices, required=True),
         "Delete": st.column_config.CheckboxColumn("Delete", default=False),
@@ -1966,6 +2156,10 @@ def render_admin_data_editor_view() -> None:
         width="stretch",
         key=editor_key,
     )
+
+    # Mirror the Input tab's Reporting Name <-> Customer Code autofill.
+    if _autofill_admin_editor_codes(editor_key, edited, account_lookup):
+        st.rerun()
 
     edit_count, delete_count = _count_admin_editor_changes(editor_seed, edited)
 
@@ -1987,7 +2181,7 @@ ENTRY_FIELD_TYPES = ["text", "number", "list", "date"]
 
 
 def _load_entry_fields() -> list[dict]:
-    """Return the saved entry-field definitions from TAT settings."""
+    """Return the saved entry-field definitions from Time Allocation Tool settings."""
     settings = utils.load_time_allocation_settings()
     raw = settings.get("entry_fields") or []
     out: list[dict] = []
@@ -2015,7 +2209,7 @@ def _load_entry_fields() -> list[dict]:
 
 
 def _save_entry_fields(fields: list[dict]) -> None:
-    """Persist the entry-field definitions to TAT settings."""
+    """Persist the entry-field definitions to Time Allocation Tool settings."""
     settings = utils.load_time_allocation_settings()
     settings["entry_fields"] = fields
     utils.save_time_allocation_settings(settings)
@@ -2395,75 +2589,16 @@ def render_entry_fields_editor_view() -> None:
         confirm_entry_field_delete_dialog()
 
 
-def render_admin_settings_view() -> None:
-    """Admin-only TAT settings (currently just the grace-period buffer)."""
+def render_admin_settings_view(account_lookup: dict) -> None:
+    """Admin-only Time Allocation Tool settings: entry-field definitions and the Edit Entries table."""
     if not utils.is_current_user_admin():
         st.info("Sorry, you don't have access to this section.")
         return
 
-    status = st.session_state.pop("ta_admin_status", None)
-    if isinstance(status, dict):
-        message = str(status.get("message") or "").strip()
-        level = str(status.get("level") or "").lower()
-        if message:
-            if level == "success":
-                st.success(message)
-            elif level == "error":
-                st.error(message)
-            else:
-                st.info(message)
-
-    st.subheader("Time Allocation Settings", anchor=False)
-    st.caption(
-        "These settings apply to all users of the Time Allocation Tool."
-    )
-
-    saved_value = utils.get_time_allocation_grace_period_days()
-
-    new_value = st.number_input(
-        "Grace Period Buffer (days)",
-        min_value=0,
-        max_value=14,
-        value=int(saved_value),
-        step=1,
-        key="ta_admin_grace_days",
-        help=(
-            "Number of days at the start of each fiscal period during which "
-            "users can still edit entries from the previous period. "
-            "Set to 0 to disable grace-period editing."
-        ),
-    )
-
-    save_disabled = int(new_value) == int(saved_value)
-    if st.button(
-        "Save Settings",
-        type="primary",
-        disabled=save_disabled,
-        key="ta_admin_save_settings_btn",
-    ):
-        try:
-            settings = utils.load_time_allocation_settings()
-            settings["grace_period_days"] = int(new_value)
-            utils.save_time_allocation_settings(settings)
-            LOGGER.info(
-                "Updated TAT settings | grace_period_days=%s by user='%s'",
-                int(new_value),
-                utils.get_os_user(),
-            )
-            st.session_state["ta_admin_status"] = {
-                "level": "success",
-                "message": f"Saved: grace period buffer set to {int(new_value)} day(s).",
-            }
-            st.rerun()
-        except Exception as exc:
-            LOGGER.exception("Failed to save TAT settings: %s", exc)
-            st.error(f"Failed to save settings: {exc}")
-
-    st.divider()
     render_entry_fields_editor_view()
 
     st.divider()
-    render_admin_data_editor_view()
+    render_admin_data_editor_view(account_lookup)
 
 
 # Header
@@ -2473,19 +2608,19 @@ user_login = utils.get_os_user()
 full_name = utils.get_full_name_for_user(None, user_login)
 department = utils.get_user_department(user_login, full_name=full_name) or ""
 is_admin_user = utils.is_current_user_admin()
-account_options = [""] + utils.load_accounts(str(PERSONNEL_DIR))
+
+account_lookup = _build_account_lookup(utils.load_account_lookup(str(PERSONNEL_DIR)))
+account_options = [""] + account_lookup["reporting_names"]
 
 if is_admin_user:
     input_tab, exports_tab, settings_tab = st.tabs(
         ["Input", "Exports", "Admin Settings"], width="stretch"
     )
     with input_tab:
-        render_input_view(user_login, full_name, department, account_options)
+        render_input_view(user_login, full_name, department, account_options, account_lookup)
     with exports_tab:
         render_exports_view()
     with settings_tab:
-        render_admin_settings_view()
+        render_admin_settings_view(account_lookup)
 else:
-    render_input_view(user_login, full_name, department, account_options)
-
-st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")
+    render_input_view(user_login, full_name, department, account_options, account_lookup)

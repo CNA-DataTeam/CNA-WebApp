@@ -573,5 +573,3 @@ else:
         _render_general_tab()
     with consumables_tab:
         _render_consumables_tab()
-
-st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")

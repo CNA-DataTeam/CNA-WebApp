@@ -1,4 +1,4 @@
-# CNA Web App — Source Code
+# CNA Console — Source Code
 
 ## Overview
 Internal Streamlit application for Clark National Accounts. Features include:

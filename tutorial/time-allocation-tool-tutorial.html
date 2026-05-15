@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Time Allocation Tool — Quick Start</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&family=Work+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap');
+
+  #cna-brand, #cna-brand *, #cna-brand *::before, #cna-brand *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #effafa; }
+
+  #cna-brand {
+    --navy:#002e65; --teal:#06828d; --green:#00b19a; --turquoise:#08b4c5;
+    --sky:#d0ecee; --sky-lite:#effafa; --white:#fff;
+    --rule:#b9dde1; --navy-soft:#334f82; --ink-muted:#6b7f9a;
+    --heading:"Poppins","Helvetica Neue","Arial",sans-serif;
+    --body:"Work Sans","Helvetica Neue","Arial",sans-serif;
+    --mono:"JetBrains Mono","Consolas",monospace;
+    font-family: var(--body);
+    color: var(--navy);
+    max-width: 880px;
+    margin: 28px auto;
+    background: var(--white);
+    border: 1px solid var(--rule);
+    box-shadow: 0 18px 50px rgba(0,46,101,0.12);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Header */
+  #cna-brand .head {
+    position: relative;
+    padding: 26px 34px 24px;
+    background:
+      radial-gradient(circle at 90% 15%, rgba(0,177,154,0.28) 0%, transparent 55%),
+      linear-gradient(135deg, var(--navy) 0%, #003c7e 58%, var(--teal) 100%);
+    border-bottom: 4px solid var(--green);
+    color: var(--white);
+    overflow: hidden;
+  }
+  #cna-brand .head .chips { position: absolute; top: 20px; right: 30px; display: flex; }
+  #cna-brand .head .chip { width: 14px; height: 40px; border: 1px solid rgba(255,255,255,0.18); border-left-width: 0; }
+  #cna-brand .head .chip:first-child { border-left-width: 1px; }
+  #cna-brand .head .chip.c1 { background: var(--navy); }
+  #cna-brand .head .chip.c2 { background: var(--teal); }
+  #cna-brand .head .chip.c3 { background: var(--green); }
+  #cna-brand .head .chip.c4 { background: var(--turquoise); }
+  #cna-brand .head .chip.c5 { background: var(--sky); }
+  #cna-brand .head .eyebrow {
+    font-weight: 600; font-size: 10px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--green); margin-bottom: 8px;
+  }
+  #cna-brand .head h1 {
+    font-family: var(--heading); font-weight: 800; font-size: 30px; line-height: 1.05;
+    letter-spacing: -0.02em; margin: 0; color: var(--white);
+  }
+  #cna-brand .head h1 .accent { color: var(--green); }
+  #cna-brand .head .sub {
+    font-size: 13.5px; color: rgba(255,255,255,0.82); margin: 7px 0 0; max-width: 520px;
+  }
+
+  /* Steps */
+  #cna-brand .body { padding: 26px 34px 14px; }
+  #cna-brand .steps { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+  #cna-brand .step {
+    display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 16px;
+    padding: 14px 18px; background: var(--sky-lite);
+    border: 1px solid var(--rule); border-left: 3px solid var(--teal);
+  }
+  #cna-brand .step .n {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--navy); color: var(--white);
+    font-family: var(--heading); font-weight: 700; font-size: 19px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #cna-brand .step:nth-child(5) { border-left-color: var(--green); }
+  #cna-brand .step:nth-child(5) .n { background: var(--green); }
+  #cna-brand .step .t { font-family: var(--heading); font-weight: 600; font-size: 16px; color: var(--navy); }
+  #cna-brand .step .d { font-size: 13.5px; color: var(--navy-soft); margin-top: 2px; }
+
+  #cna-brand .ui {
+    font-family: var(--mono); font-size: 0.85em; font-weight: 500;
+    padding: 1px 6px; background: var(--white); border: 1px solid var(--rule);
+    border-radius: 3px; color: var(--teal); white-space: nowrap;
+  }
+
+  /* Remember strip */
+  #cna-brand .remember {
+    margin: 18px 34px 0; padding: 14px 20px;
+    background: var(--white); border: 1px solid var(--rule); border-left: 3px solid var(--navy);
+  }
+  #cna-brand .remember .lbl {
+    font-weight: 600; font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--navy); margin-bottom: 6px;
+  }
+  #cna-brand .remember ul { margin: 0; padding-left: 18px; }
+  #cna-brand .remember li { font-size: 13.5px; color: var(--navy-soft); margin-bottom: 4px; }
+  #cna-brand .remember li:last-child { margin-bottom: 0; }
+  #cna-brand .remember li strong { color: var(--navy); }
+  #cna-brand .remember li::marker { color: var(--green); }
+
+  /* Footer */
+  #cna-brand .foot {
+    margin-top: 22px; padding: 14px 34px;
+    background: var(--navy); color: var(--sky);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.06em;
+    display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+    border-top: 4px solid var(--green);
+  }
+  #cna-brand .foot .wordmark { font-family: var(--heading); font-weight: 600; font-size: 12px; color: var(--white); }
+  #cna-brand .foot .wordmark-accent { color: var(--green); }
+
+  @media (max-width: 620px) {
+    #cna-brand { margin: 0; border: none; }
+    #cna-brand .head, #cna-brand .body { padding-left: 20px; padding-right: 20px; }
+    #cna-brand .head .chips { display: none; }
+    #cna-brand .remember { margin-left: 20px; margin-right: 20px; }
+    #cna-brand .foot { padding-left: 20px; padding-right: 20px; }
+  }
+</style>
+</head>
+<body>
+<div id="cna-brand">
+
+  <header class="head">
+    <div class="chips" aria-hidden="true">
+      <span class="chip c1"></span><span class="chip c2"></span><span class="chip c3"></span><span class="chip c4"></span><span class="chip c5"></span>
+    </div>
+    <div class="eyebrow">CNA Console · Quick Start</div>
+    <h1>Time Allocation Tool — <span class="accent">logging your time</span></h1>
+    <p class="sub">Five steps. Your name and department fill in automatically — you just enter accounts, time, and channel.</p>
+  </header>
+
+  <div class="body">
+    <ol class="steps">
+      <li class="step">
+        <span class="n">1</span>
+        <div>
+          <div class="t">Open CNA Console</div>
+          <div class="d">In the CNA Console sidebar, click <span class="ui">Time Allocation Tool</span>.</div>
+        </div>
+      </li>
+      <li class="step">
+        <span class="n">2</span>
+        <div>
+          <div class="t">Pick a day</div>
+          <div class="d">Click the day on the calendar that you want to enter time for.</div>
+        </div>
+      </li>
+      <li class="step">
+        <span class="n">3</span>
+        <div>
+          <div class="t">Choose an account</div>
+          <div class="d">Pick an <strong>account name</strong> <em>or</em> <strong>customer code</strong> — the other fills in for you.</div>
+        </div>
+      </li>
+      <li class="step">
+        <span class="n">4</span>
+        <div>
+          <div class="t">Set time &amp; channel</div>
+          <div class="d">Choose <strong>Hours</strong> and <strong>Minutes</strong>, then pick a <strong>Channel</strong>. One account per row — use <span class="ui">Add Row</span> for more.</div>
+        </div>
+      </li>
+      <li class="step">
+        <span class="n">5</span>
+        <div>
+          <div class="t">Save</div>
+          <div class="d">Click <span class="ui">Save Allocation</span>, check the preview, then <span class="ui">Confirm</span>.</div>
+        </div>
+      </li>
+    </ol>
+  </div>
+
+  <div class="remember">
+    <div class="lbl">Keep in mind</div>
+    <ul>
+      <li><strong>Unsaved entries will be lost</strong> — do not forget to save your time entries.</li>
+      <li>To fix a day, click it again, edit the rows, and save once more.</li>
+      <li>You can edit your entries for any day in the current period — previous period entries may only be edited within a short grace window after each period ends.</li>
+    </ul>
+  </div>
+
+  <footer class="foot">
+    <span class="wordmark">Clark National <span class="wordmark-accent">Accounts</span></span>
+    <span>Time Allocation Tool · Quick Start</span>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -24,6 +24,18 @@ REM mount point" when uv inspects the venv's python.exe — most commonly
 REM seen on machines with corporate folder redirection of AppData.
 set "UV_LINK_MODE=copy"
 
+REM Redirect uv's managed-Python and cache directories into the install
+REM tree. By default uv keeps these under %LOCALAPPDATA%\uv — but on
+REM machines where the whole user profile is a mounted container (FSLogix)
+REM or AppData is junctioned to a network share, that location sits behind
+REM an "untrusted mount point" and uv throws Windows error 448 when it
+REM later traverses into the managed interpreter or cache. Pinning them to
+REM ROOT_DIR keeps them wherever the app is installed — so when the
+REM installer relaunches into an off-profile path (C:\Users\Public\...),
+REM uv's directories follow it out of the untrusted mount.
+set "UV_PYTHON_INSTALL_DIR=%ROOT_DIR%\.uv\python"
+set "UV_CACHE_DIR=%ROOT_DIR%\.uv\cache"
+
 REM ============================================================
 REM SELF-HEAL: discard local modifications to regenerated tracked
 REM artifacts. These (the launcher exe and PyInstaller spec) are
@@ -266,18 +278,18 @@ if not exist "%ROOT_DIR%\_internal\python311.dll" (
 REM ============================================================
 REM CREATE DESKTOP SHORTCUT
 REM ============================================================
-set "SHORTCUT_PATH=%ROOT_DIR%\CNA Web App.lnk"
+set "SHORTCUT_PATH=%ROOT_DIR%\CNA Console.lnk"
 set "ICON_FILE=%ROOT_DIR%\cna_icon.ico"
 
 if exist "%EXE_FILE%" (
-  echo Creating shortcut to CNA Web App.exe...
+  echo Creating CNA Console shortcut...
   powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='%EXE_FILE%'; $s.WorkingDirectory='%ROOT_DIR%'; if(Test-Path '%ICON_FILE%'){$s.IconLocation='%ICON_FILE%,0'}; $s.WindowStyle=1; $s.Save()" >nul 2>&1
 ) else (
   echo Creating shortcut to StartApp.vbs fallback...
   powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT_PATH%'); $s.TargetPath='wscript.exe'; $s.Arguments='\"%ROOT_DIR%\StartApp.vbs\"'; $s.WorkingDirectory='%ROOT_DIR%'; if(Test-Path '%ICON_FILE%'){$s.IconLocation='%ICON_FILE%,0'}; $s.WindowStyle=1; $s.Save()" >nul 2>&1
 )
 if exist "%SHORTCUT_PATH%" (
-  echo Shortcut created: CNA Web App.lnk
+  echo Shortcut created: CNA Console.lnk
   echo Pin it to your taskbar by double-clicking it, then right-clicking its taskbar icon.
 ) else (
   echo WARNING: Could not create shortcut. You can still run StartApp.bat directly.

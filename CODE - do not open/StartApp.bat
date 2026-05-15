@@ -68,6 +68,29 @@ if not exist "%VENV_DIR%\Scripts\python.exe" (
 )
 
 REM ============================================================
+REM SHORTCUT MIGRATION — rename legacy "CNA Web App" shortcuts
+REM to "CNA Console" for existing installs. Idempotent: only acts
+REM when the old .lnk is still present, no-ops thereafter.
+REM ============================================================
+set "STARTMENU_DIR=%APPDATA%\Microsoft\Windows\Start Menu\Programs"
+if exist "%STARTMENU_DIR%\CNA Web App.lnk" (
+  call :LOG "Migrating Start Menu shortcut to CNA Console..."
+  if exist "%STARTMENU_DIR%\CNA Console.lnk" (
+    del /f /q "%STARTMENU_DIR%\CNA Web App.lnk" >nul 2>&1
+  ) else (
+    ren "%STARTMENU_DIR%\CNA Web App.lnk" "CNA Console.lnk" >nul 2>&1
+  )
+)
+if exist "%ROOT_DIR%\CNA Web App.lnk" (
+  call :LOG "Migrating local shortcut to CNA Console..."
+  if exist "%ROOT_DIR%\CNA Console.lnk" (
+    del /f /q "%ROOT_DIR%\CNA Web App.lnk" >nul 2>&1
+  ) else (
+    ren "%ROOT_DIR%\CNA Web App.lnk" "CNA Console.lnk" >nul 2>&1
+  )
+)
+
+REM ============================================================
 REM DECRYPT CONFIG (FAIL-OPEN — keeps existing config.py if decrypt fails)
 REM ============================================================
 set "LOCAL_CONFIG=%ROOT_DIR%\config.py"

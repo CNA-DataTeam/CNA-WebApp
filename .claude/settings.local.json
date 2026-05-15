@@ -59,7 +59,27 @@
       "Bash(netstat -ano -p tcp)",
       "Bash(git remote *)",
       "Bash(git config *)",
-      "Bash(git -c credential.helper=manager push)"
+      "Bash(git -c credential.helper=manager push)",
+      "Bash(python -m py_compile \"CODE - do not open/pages/time-allocation-tool.py\" \"CODE - do not open/utils.py\" \"CODE - do not open/startup.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/startup.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/pages/time-allocation-tool.py\")",
+      "Bash(python -c ' *)",
+      "Bash(git check-ignore *)",
+      "Bash(ls -la \".claude/skills/cna-brand-formatting/reference/\")",
+      "Bash(ls -la \".streamlit/\")",
+      "Bash(.venv/Scripts/python.exe -c \"import streamlit; print\\('streamlit', streamlit.__version__\\)\")",
+      "Bash(ls -la \"CODE - do not open/utils.py\" \"CODE - do not open/page_registry.py\" \"CODE - do not open/app.py\")",
+      "Bash(.venv/Scripts/streamlit.exe version *)",
+      "Bash(grep -rn \"render_page_header\" pages/ app.py)",
+      "Bash(grep -rn \"header-row\\\\|header-subtitle\\\\|header-title\" pages/ app.py)",
+      "Bash(python -m py_compile \"CODE - do not open/utils.py\" \"CODE - do not open/pages/time-allocation-tool.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/page_registry.py\" \"CODE - do not open/utils.py\" \"CODE - do not open/pages/time-allocation-tool.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/page_registry.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/utils.py\" \"CODE - do not open/pages/time-allocation-tool.py\" \"CODE - do not open/page_registry.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/launch_app.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/utils.py\" \"CODE - do not open/pages/task-tracker.py\")",
+      "Bash(python -m py_compile \"CODE - do not open/utils.py\" \"CODE - do not open/app.py\" \"CODE - do not open/launch_app.py\" \"CODE - do not open/stub_launcher.py\" \"CODE - do not open/config_manager.py\")",
+      "Skill(commit)"
     ]
   }
 }

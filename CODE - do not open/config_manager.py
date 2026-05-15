@@ -1,5 +1,5 @@
 """
-Config encryption manager for CNA Web App.
+Config encryption manager for CNA Console.
 
 Encrypts config.py for safe storage in the git repo using Fernet
 symmetric encryption. The encryption key is shared via network drive.

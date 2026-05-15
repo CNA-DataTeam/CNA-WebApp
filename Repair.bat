@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM Repair.bat — One-shot rescue for a stuck CNA Web App install
+REM Repair.bat — One-shot rescue for a stuck CNA Console install
 REM ============================================================
 REM Use this when the in-app updater fails to apply updates because
 REM build artifacts in this clone diverge from origin (typically
@@ -17,14 +17,14 @@ REM .venv, or any other local-only / gitignored files.
 REM ============================================================
 
 setlocal EnableDelayedExpansion
-title CNA Web App - Repair
+title CNA Console - Repair
 
 set "ROOT_DIR=%~dp0"
 if "%ROOT_DIR:~-1%"=="\" set "ROOT_DIR=%ROOT_DIR:~0,-1%"
 
 echo.
 echo ============================================================
-echo CNA Web App - Repair
+echo CNA Console - Repair
 echo ============================================================
 echo Working directory:
 echo   %ROOT_DIR%

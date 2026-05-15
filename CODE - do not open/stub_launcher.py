@@ -27,7 +27,7 @@ def main():
         ctypes.windll.user32.MessageBoxW(
             None,
             f"Could not find StartApp.bat at:\n{bat}\n\nPlease reinstall the app.",
-            "CNA Web App - Error",
+            "CNA Console - Error",
             0x10,
         )
         sys.exit(1)
@@ -62,7 +62,7 @@ def main():
         ctypes.windll.user32.MessageBoxW(
             None,
             f"Failed to launch the app:\n\n{exc}\n\nPlease try running StartApp.bat directly.",
-            "CNA Web App - Error",
+            "CNA Console - Error",
             0x10,
         )
         sys.exit(1)

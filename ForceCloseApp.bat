@@ -1,7 +1,7 @@
 @echo off
 title Force Close App
 
-echo Stopping CNA Web App processes...
+echo Stopping CNA Console processes...
 
 REM ---- Kill the launcher .exe ----
 taskkill /F /IM "CNA Web App.exe" >nul 2>&1

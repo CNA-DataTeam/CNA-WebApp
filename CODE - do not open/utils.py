@@ -198,28 +198,173 @@ def format_time_ago(dt: datetime) -> str:
 
 @st.cache_data
 def get_global_css() -> str:
-    """Return global CSS styling for the app (cached)."""
+    """Return global CSS styling for the app (cached).
+
+    Built around the CNA brand system (see CNA Brand Guidelines 2025):
+    - Primary colors: CNA Green #00B19A, CNA Teal #06828D
+    - Secondary: CNA Navy #002E65, CNA Turquoise #08B4C5,
+      CNA Sky #D0ECEE, CNA Sky Lite #EFFAFA
+    - Typography: Poppins (Bold/SemiBold) for headings/titles,
+      Work Sans (Regular/Medium/SemiBold + Italic) for body and lead-ins
+    The :root custom properties below are the single source of truth for
+    brand color tokens used across the app's CSS and inline page styles.
+    """
     return """
     <style>
-    /* Import custom fonts */
-    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@600&family=Work+Sans:wght@400;500;600&display=swap');
+    /* Import brand fonts — Poppins (headings), Work Sans (body/lead-ins),
+       JetBrains Mono (data: KPI values, timers, codes) */
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@500;600;700;800&family=Work+Sans:ital,wght@0,400;0,500;0,600;1,400;1,500&family=JetBrains+Mono:wght@400;500&display=swap');
+
+    /* ===================================================================
+       CNA brand design tokens — single source of truth for brand styling.
+       Mirrors the CNA Brand Guidelines microsite design system.
+       =================================================================== */
+    :root {
+        --cna-green: #00B19A;
+        --cna-green-dark: #00917F;
+        --cna-teal: #06828D;
+        --cna-teal-dark: #056B74;
+        --cna-navy: #002E65;
+        --cna-navy-soft: #334F82;   /* body copy on light surfaces */
+        --cna-turquoise: #08B4C5;
+        --cna-sky: #D0ECEE;
+        --cna-sky-lite: #EFFAFA;
+        --cna-white: #FFFFFF;
+        --cna-ink: #1F2A44;
+        --cna-muted: #6B7F9A;
+        --cna-rule: #B9DDE1;        /* universal hairline border */
+        --cna-rule-soft: #E1F1F3;
+        --cna-border: #B9DDE1;
+        --cna-surface: #EFFAFA;
+        --cna-danger: #D64550;
+        --cna-danger-dark: #B23640;
+        --cna-heading: 'Poppins', 'Helvetica Neue', Arial, sans-serif;
+        --cna-body: 'Work Sans', 'Helvetica Neue', Arial, sans-serif;
+        --cna-mono: 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+        --cna-card-shadow: 0 14px 30px rgba(0, 46, 101, 0.10);
+        --cna-page-pad: 3rem;   /* main content side padding (page gutter) */
+    }
+
     /* Base font settings */
     html, body, [class*="css"] {
-        font-family: 'Work Sans', sans-serif;
+        font-family: var(--cna-body);
+        color: var(--cna-navy-soft);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
     }
-    h1, h2, h3 {
-        font-family: 'Poppins', sans-serif;
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li {
+        color: var(--cna-navy-soft);
+    }
+    [data-testid="stMarkdownContainer"] li::marker { color: var(--cna-green); }
+    h1, h2, h3, h4, h5, h6 {
+        font-family: var(--cna-heading);
+        color: var(--cna-navy);
+        letter-spacing: -0.02em;
+    }
+    h1 { font-weight: 800; }
+    h2 { font-weight: 700; letter-spacing: -0.01em; }
+    h3, h4, h5, h6 { font-weight: 600; letter-spacing: -0.01em; }
+    strong, b { color: var(--cna-navy); }
+
+    /* Input widget labels — the "header" above each input box, in brand green */
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stWidgetLabel"] label {
+        color: var(--cna-green) !important;
+    }
+
+    /* Eyebrow — the brand's signature label device (uppercase, letter-spaced,
+       teal/green). Use .cna-eyebrow on a small div above a heading. */
+    .cna-eyebrow {
+        font-family: var(--cna-body);
         font-weight: 600;
+        font-size: 0.69rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--cna-teal);
+        margin-bottom: 0.35rem;
     }
+    .cna-eyebrow .dot {
+        display: inline-block;
+        width: 6px; height: 6px;
+        background: var(--cna-green);
+        border-radius: 50%;
+        margin-right: 9px;
+        vertical-align: middle;
+    }
+    /* Legacy alias kept for any existing callers */
+    .section-leadin {
+        font-family: var(--cna-body);
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        font-size: 0.8rem;
+        color: var(--cna-teal);
+        margin-bottom: 0.15rem;
+    }
+
+    /* Branded links */
+    a, a:visited { color: var(--cna-teal); text-underline-offset: 3px; }
+    a:hover { color: var(--cna-green); }
+
+    /* Branded dividers — soft rule line */
+    hr, [data-testid="stDivider"] hr {
+        border: none !important;
+        border-top: 1px solid var(--cna-rule) !important;
+        background: transparent !important;
+    }
+
     /* Hide default Streamlit footer */
     footer {visibility: hidden;}
     /* Hide default Streamlit hamburger menu (3 vertical dots) */
     [data-testid="stMainMenu"] {
         display: none !important;
     }
-    /* Adjust main container padding */
+    /* Collapse Streamlit's default top header band so page content runs to
+       the very top of the page. The header element is kept (zero height,
+       transparent, overflow visible) so the toolbar's sidebar-expand
+       control still works when the sidebar is collapsed. */
+    [data-testid="stHeader"] {
+        background: transparent !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: visible !important;
+        box-shadow: none !important;
+        border-bottom: none !important;
+    }
+    [data-testid="stDecoration"] {
+        display: none !important;
+    }
+    [data-testid="stToolbar"] {
+        top: 0 !important;
+        right: 0 !important;
+    }
+    /* Keep the sidebar-expand control legible wherever it floats */
+    [data-testid="stExpandSidebarButton"] {
+        z-index: 1000 !important;
+    }
+    /* Collapse element containers that only hold an injected <style> block.
+       Each st.markdown(<style>) call still creates a flow element with a
+       vertical-block gap; left visible, they push the first real content
+       down from the top of the page. A <style> still applies its CSS even
+       when its container is display:none.
+       Note: Streamlit nests extra width/latex wrappers between the element
+       container and the markdown container, so this must match the style
+       block as a descendant (not a fixed direct-child chain) or it silently
+       stops collapsing — which is what reopens the top-of-page gap. */
+    [data-testid="stElementContainer"]:has([data-testid="stMarkdownContainer"] > style) {
+        display: none !important;
+    }
+    /* Main content padding. Side padding is the page gutter that content
+       sits inside. Top padding is 0 so page content runs to the top;
+       bottom padding gives every page a bit of breathing room from the
+       bottom of the window. */
     .block-container {
-        padding-top: 1rem;
+        padding-top: 0 !important;
+        padding-left: var(--cna-page-pad);
+        padding-right: var(--cna-page-pad);
+        padding-bottom: 3rem;
     }
     /* Hide Deploy button (last header button in toolbar) */
     [data-testid="stToolbar"] button[data-testid="stBaseButton-header"]:last-of-type {
@@ -263,7 +408,7 @@ def get_global_css() -> str:
         left: 0 !important;
         right: 0 !important;
         height: 1px !important;
-        background: #e6e6e6 !important;
+        background: var(--cna-sky) !important;
     }
     [data-testid="stSidebar"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] > div:first-child::before {
         display: none !important;
@@ -331,7 +476,7 @@ def get_global_css() -> str:
         gap: 0 !important;
     }
     [data-testid="stPopoverBody"] .stElementContainer {
-        border-bottom: 1px solid #e6e6e6 !important;
+        border-bottom: 1px solid var(--cna-sky) !important;
     }
     [data-testid="stPopoverBody"] .stElementContainer:last-child {
         border-bottom: none !important;
@@ -345,58 +490,198 @@ def get_global_css() -> str:
         font-size: 0.85rem !important;
         text-align: left !important;
     }
-    /* Header styling */
+    /* Sidebar page-link hover — soft sky highlight */
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a:hover {
+        background-color: var(--cna-sky-lite) !important;
+        border-radius: 6px !important;
+    }
+    /* Active sidebar page link — brand teal accent */
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a[aria-current="page"] {
+        background-color: var(--cna-sky) !important;
+        border-radius: 6px !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a[aria-current="page"] p {
+        color: var(--cna-teal-dark) !important;
+        font-weight: 600 !important;
+    }
+
+    /* ===================================================================
+       Page header — eyebrow + large left-aligned title + kicker intro
+       =================================================================== */
+    /* Give the page header breathing room from the top of the page. */
+    .cna-pageheader {
+        margin: 22px 0 4px 0;
+    }
+    .cna-pageheader .header-title {
+        margin: 0 !important;
+        padding: 0 !important;
+        text-align: left;
+        color: var(--cna-navy);
+        font-family: var(--cna-heading);
+        font-weight: 800;
+        font-size: clamp(1.9rem, 3.4vw, 2.7rem);
+        line-height: 1.05;
+        letter-spacing: -0.02em;
+    }
+    .cna-pageheader .header-kicker {
+        text-align: left;
+        font-family: var(--cna-body);
+        font-weight: 400;
+        font-size: 1.02rem;
+        line-height: 1.55;
+        color: var(--cna-navy-soft);
+        margin: 10px 0 0 0;
+        max-width: 760px;
+    }
+    /* Brand accent bar under the page title */
+    .header-accent {
+        width: 56px;
+        height: 4px;
+        margin: 14px 0 0 0;
+        background: linear-gradient(90deg, var(--cna-green), var(--cna-teal));
+    }
+    /* Legacy header markup support (centered) */
     .header-row {
         display: flex;
         align-items: center;
-        justify-content: center;
         gap: 14px;
         margin-top: 10px;
         margin-bottom: 6px;
     }
-    .header-title {
-        margin: 0 !important;
-        text-align: center;
-    }
     .header-subtitle {
-        text-align: center;
         font-style: italic;
-        margin-top: -0.35rem;
-        margin-bottom: 0.5rem;
-        color: #4d4d4d;
+        font-weight: 400;
+        color: var(--cna-teal);
     }
-    /* App navigation card styling */
-    .app-card {
-        border: 1px solid #E6E6E6;
-        border-radius: 12px;
-        padding: 18px 20px;
-        background-color: #FFFFFF;
-        transition: box-shadow 0.15s ease-in-out;
+
+    /* ===================================================================
+       Card system — sharp corners, hairline rule border, accent top edge
+       =================================================================== */
+    .cna-card, .app-card {
+        border: 1px solid var(--cna-rule);
+        border-radius: 0;
+        padding: 20px 22px;
+        background-color: var(--cna-white);
+        transition: box-shadow 0.2s ease, border-color 0.2s ease,
+                    transform 0.2s ease;
     }
-    .app-card:hover {
-        box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    .cna-card--accent, .app-card {
+        border-top: 3px solid var(--cna-green);
+    }
+    .cna-card:hover, .app-card:hover {
+        box-shadow: var(--cna-card-shadow);
+        transform: translateY(-2px);
+    }
+    .cna-card--accent:hover, .app-card:hover {
+        border-top-color: var(--cna-teal);
     }
     .app-title {
-        font-size: 18px;
+        font-family: var(--cna-heading);
+        font-size: 1.05rem;
         font-weight: 600;
+        color: var(--cna-navy);
         margin-bottom: 6px;
     }
     .app-desc {
-        color: #6b6b6b;
-        font-size: 14px;
+        color: var(--cna-muted);
+        font-size: 0.875rem;
         margin-bottom: 14px;
+    }
+    /* Callout / note box — sky-lite fill with a 3px left accent */
+    .cna-note {
+        background: var(--cna-sky-lite);
+        border: 1px solid var(--cna-rule);
+        border-left: 3px solid var(--cna-teal);
+        border-radius: 0;
+        padding: 16px 20px;
+        font-size: 0.9rem;
+        color: var(--cna-navy-soft);
+        margin: 12px 0;
+    }
+    .cna-note.is-green { border-left-color: var(--cna-green); }
+    .cna-note strong { color: var(--cna-navy); }
+
+    /* Sharp corners for card-like containers (inputs/buttons keep theme
+       radius). Targets bordered st.container blocks and expanders. */
+    [data-testid="stVerticalBlockBorderWrapper"],
+    [data-testid="stExpander"] details,
+    [data-testid="stExpander"] summary,
+    .stDataFrame, [data-testid="stTable"],
+    [data-testid="stMetric"],
+    [data-testid="stNotification"],
+    [data-testid="stAlert"] {
+        border-radius: 0 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border-color: var(--cna-rule) !important;
+    }
+    /* st.metric — give it the card treatment with a mono value */
+    [data-testid="stMetric"] {
+        background: var(--cna-white);
+        border: 1px solid var(--cna-rule);
+        border-top: 3px solid var(--cna-green);
+        padding: 16px 18px;
+    }
+    [data-testid="stMetricValue"] {
+        font-family: var(--cna-mono);
+        color: var(--cna-navy);
+    }
+    [data-testid="stMetricLabel"] {
+        font-family: var(--cna-body);
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        font-size: 0.72rem !important;
+        color: var(--cna-teal) !important;
+    }
+    /* Tabs — squared active indicator in brand green */
+    [data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+        background-color: var(--cna-green) !important;
+    }
+    /* Primary (green) buttons — white label, branded hover polish */
+    [data-testid="stBaseButton-primary"],
+    [data-testid="stBaseButton-primary"] * {
+        color: var(--cna-white) !important;
+    }
+    [data-testid="stBaseButton-primary"] {
+        transition: background-color 0.15s ease-in-out,
+                    box-shadow 0.15s ease-in-out;
+    }
+    [data-testid="stBaseButton-primary"]:hover {
+        background-color: var(--cna-green-dark) !important;
+        border-color: var(--cna-green-dark) !important;
+        box-shadow: 0 4px 12px rgba(0, 177, 154, 0.28);
+    }
+    /* Timer display + label (task tracker) — mono value per data convention */
+    .timer-display {
+        font-family: var(--cna-mono);
+        font-size: 42px;
+        font-weight: 500;
+        color: var(--cna-navy);
+        line-height: 1.1;
+        letter-spacing: -0.01em;
+    }
+    .timer-label {
+        font-family: var(--cna-body);
+        font-size: 0.78rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        color: var(--cna-teal);
+        margin-top: 4px;
     }
     /* Timer blinking colon */
     @keyframes blink { 50% { opacity: 0; } }
     .blink-colon {
         animation: blink 1s steps(1, start) infinite;
+        color: var(--cna-green);
     }
     /* Live activity pulse dot */
     .live-activity-pulse {
         display: inline-block;
         width: 12px;
         height: 12px;
-        background-color: #C30000;
+        background-color: var(--cna-danger);
         border-radius: 100%;
         margin-right: 2px;
         animation: pulse 1.5s ease-in-out infinite;
@@ -405,14 +690,14 @@ def get_global_css() -> str:
         0%, 100% { opacity: 1; transform: scale(1); }
         50% { opacity: 0.5; transform: scale(1.2); }
     }
-    /* Reset button style */
+    /* Reset button style — destructive action stays red per UX convention */
     .reset-button div > button {
-        background-color: #C30000 !important;
+        background-color: var(--cna-danger) !important;
         color: white !important;
         border: none !important;
     }
     .reset-button div > button:hover {
-        background-color: #A00000 !important;
+        background-color: var(--cna-danger-dark) !important;
     }
     .reset-button div > button:focus {
         box-shadow: none !important;
@@ -423,22 +708,39 @@ def get_global_css() -> str:
     }
     /* Dataframe header style */
     .stDataFrame thead th {
-        font-weight: 800 !important;
+        font-weight: 700 !important;
+        color: var(--cna-navy) !important;
     }
-    /* KPI card styling (analytics page) */
+    /* KPI card styling (analytics pages) — sharp card, accent edge, mono value */
     .kpi-card {
-        background-color: #F7F7F7;
-        padding: 18px;
-        border-radius: 12px;
+        background-color: var(--cna-white);
+        border: 1px solid var(--cna-rule);
+        border-top: 3px solid var(--cna-green);
+        padding: 20px 18px;
+        border-radius: 0;
         text-align: center;
+        transition: box-shadow 0.2s ease, transform 0.2s ease,
+                    border-top-color 0.2s ease;
+    }
+    .kpi-card:hover {
+        box-shadow: var(--cna-card-shadow);
+        transform: translateY(-2px);
+        border-top-color: var(--cna-teal);
     }
     .kpi-value {
-        font-size: 28px;
-        font-weight: 600;
+        font-family: var(--cna-mono);
+        font-size: 30px;
+        font-weight: 500;
+        color: var(--cna-navy);
+        letter-spacing: -0.01em;
     }
     .kpi-label {
-        color: #6b6b6b;
-        font-size: 14px;
+        color: var(--cna-teal);
+        font-size: 0.72rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        margin-top: 4px;
     }
     </style>
     """
@@ -606,17 +908,64 @@ def get_registry_page_quote(page_title: str) -> str:
     return _registry_quote_map().get(str(page_title).strip(), "")
 
 
-def render_page_header(page_title: str, show_divider: bool = True) -> None:
-    """Render the standard page title header."""
+@lru_cache(maxsize=1)
+def _registry_section_map() -> dict[str, str]:
+    """Build a normalized page-title -> section-name map from page_registry."""
+    try:
+        import page_registry
+    except Exception:
+        return {}
+    mapping: dict[str, str] = {}
+    section_pages = getattr(page_registry, "SECTION_PAGES", {})
+    if not isinstance(section_pages, dict):
+        section_pages = {}
+    for section_name, entries in section_pages.items():
+        for entry in entries:
+            title = str(getattr(entry, "title", "")).strip()
+            if title:
+                mapping[title] = str(section_name).strip()
+    return mapping
+
+
+def get_registry_page_section(page_title: str) -> str:
+    """Resolve the section a page belongs to from page_registry."""
+    return _registry_section_map().get(str(page_title).strip(), "")
+
+
+def render_page_header(
+    page_title: str,
+    show_divider: bool = True,
+    eyebrow: str | None = None,
+) -> None:
+    """Render the standard page header.
+
+    Layout follows the CNA brand microsite: a small uppercase eyebrow label,
+    a large left-aligned Poppins title, a brand accent bar, and a kicker
+    intro line. The eyebrow defaults to the page's section name from
+    page_registry (falling back to "CNA Console"); the kicker uses the
+    page's registry quote.
+    """
     safe_title = html.escape(str(page_title).strip() or "Page")
-    safe_quote = html.escape(get_registry_page_quote(page_title))
-    subtitle_html = f'<div class="header-subtitle">{safe_quote}</div>' if safe_quote else ""
+    if eyebrow is None:
+        eyebrow = get_registry_page_section(page_title) or "CNA Console"
+    safe_eyebrow = html.escape(str(eyebrow).strip())
+    safe_kicker = html.escape(get_registry_page_quote(page_title))
+    eyebrow_html = (
+        f'<div class="cna-eyebrow"><span class="dot"></span>{safe_eyebrow}</div>'
+        if safe_eyebrow
+        else ""
+    )
+    kicker_html = (
+        f'<div class="header-kicker">{safe_kicker}</div>' if safe_kicker else ""
+    )
     st.markdown(
         f"""
-        <div class="header-row">
+        <div class="cna-pageheader">
+            {eyebrow_html}
             <h1 class="header-title">{safe_title}</h1>
+            <div class="header-accent"></div>
+            {kicker_html}
         </div>
-        {subtitle_html}
         """,
         unsafe_allow_html=True,
     )
@@ -1541,6 +1890,47 @@ def load_accounts(accounts_dir: str) -> list[str]:
         get_page_logger("Shared Utilities").exception("Failed to load accounts parquet: %s", exc)
         return []
 
+
+@st.cache_data(ttl=3600)
+def load_account_lookup(accounts_dir: str) -> pd.DataFrame:
+    """
+    Load the Customer Code / Reporting Name lookup from the latest accounts parquet.
+
+    Returns a DataFrame with columns ``CustomerCode`` and ``ReportingName``.
+    Falls back to ``Company Group USE`` for the reporting name when an older
+    accounts parquet (written before the Reporting Name column existed) is read.
+    """
+    empty = pd.DataFrame(columns=["CustomerCode", "ReportingName"])
+    parquet_files = list(Path(accounts_dir).glob("accounts_*.parquet"))
+    if not parquet_files:
+        get_page_logger("Shared Utilities").info("No accounts parquet files found under '%s'.", accounts_dir)
+        return empty
+    try:
+        parquet_files.sort(reverse=True)
+        df = pd.read_parquet(parquet_files[0])
+    except Exception as exc:
+        get_page_logger("Shared Utilities").exception("Failed to load account lookup parquet: %s", exc)
+        return empty
+
+    out = pd.DataFrame()
+    if "CustomerCode" in df.columns:
+        out["CustomerCode"] = df["CustomerCode"].astype(str).str.strip()
+    else:
+        out["CustomerCode"] = ""
+    if "Reporting Name" in df.columns:
+        out["ReportingName"] = df["Reporting Name"].astype(str).str.strip()
+    elif "Company Group USE" in df.columns:
+        out["ReportingName"] = df["Company Group USE"].astype(str).str.strip()
+    else:
+        out["ReportingName"] = ""
+
+    # Drop placeholder/blank values left over from the Excel-to-parquet step.
+    for col in ("CustomerCode", "ReportingName"):
+        out[col] = out[col].where(~out[col].str.lower().isin(["nan", "none", ""]), "")
+    out = out[(out["CustomerCode"] != "") | (out["ReportingName"] != "")]
+    return out.drop_duplicates().reset_index(drop=True)
+
+
 class UserContext:
     """Contextual information about the current user (for permission handling)."""
     def __init__(self):
@@ -1767,18 +2157,18 @@ def get_previous_fiscal_period(value) -> dict | None:
 # Time Allocation Tool admin settings
 #
 # Small JSON blob at {PERSONNEL_DIR}/time_allocation_settings.json holding
-# admin-managed knobs for the TAT page (currently just the grace-period
-# buffer). Kept here so other pages can read TAT settings without having
-# to know storage details.
+# admin-managed knobs for the Time Allocation Tool page (currently the custom
+# entry-field definitions). Kept here so other pages can read Time Allocation
+# Tool settings without having to know storage details.
 # ---------------------------------------------------------------------------
 def get_time_allocation_settings_path() -> Path:
-    """Return the JSON path that stores admin-managed TAT settings."""
+    """Return the JSON path that stores admin-managed Time Allocation Tool settings."""
     return Path(config.PERSONNEL_DIR) / "time_allocation_settings.json"
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def load_time_allocation_settings() -> dict:
-    """Load TAT admin settings as a dict (cached)."""
+    """Load Time Allocation Tool admin settings as a dict (cached)."""
     path = get_time_allocation_settings_path()
     if not path.exists():
         return {}
@@ -1794,7 +2184,7 @@ def load_time_allocation_settings() -> dict:
 
 
 def save_time_allocation_settings(settings: dict) -> Path:
-    """Atomically persist TAT admin settings and clear the loader cache."""
+    """Atomically persist Time Allocation Tool admin settings and clear the loader cache."""
     path = get_time_allocation_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = settings if isinstance(settings, dict) else {}
@@ -1803,14 +2193,3 @@ def save_time_allocation_settings(settings: dict) -> Path:
     tmp.replace(path)
     load_time_allocation_settings.clear()
     return path
-
-
-def get_time_allocation_grace_period_days() -> int:
-    """Return the configured grace-period buffer in days (default 0)."""
-    settings = load_time_allocation_settings()
-    raw = settings.get("grace_period_days", 0)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, value)

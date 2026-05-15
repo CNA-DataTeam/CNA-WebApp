@@ -394,5 +394,3 @@ with action_col_reload:
 
 if st.session_state.pc_confirm_open:
     confirm_save_dialog()
-
-st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")

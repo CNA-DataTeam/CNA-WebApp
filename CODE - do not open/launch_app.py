@@ -1,5 +1,5 @@
 """
-PyWebView launcher for CNA Web App.
+PyWebView launcher for CNA Console.
 
 Opens Streamlit in a native OS window with a white title bar, built-in
 loading screen, and custom icon. Kills the Streamlit server when the
@@ -45,7 +45,7 @@ LOADING_HTML = """\
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CNA Web App</title>
+  <title>CNA Console</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;700&family=Work+Sans:wght@400;500&display=swap" rel="stylesheet">
   <style>
@@ -104,7 +104,7 @@ LOADING_HTML = """\
 </head>
 <body>
   <div class="container">
-    <div class="app-title">CNA Web App</div>
+    <div class="app-title">CNA Console</div>
     <div class="app-subtitle">Clark National Accounts</div>
     <div class="spinner"></div>
     <div class="status" id="status">Starting up...</div>
@@ -195,7 +195,7 @@ def set_window_icon_and_style():
 
         hwnd = None
         for _ in range(10):
-            hwnd = user32.FindWindowW(None, "CNA Web App")
+            hwnd = user32.FindWindowW(None, "CNA Console")
             if hwnd:
                 break
             time.sleep(0.3)
@@ -214,9 +214,9 @@ def set_window_icon_and_style():
             0x0020 | 0x0002 | 0x0001 | 0x0004,  # FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER
         )
 
-        # Set title bar color via DWM (#eeeeee → BGR 0x00EEEEEE)
+        # Set title bar color via DWM to match the app background (#FFFFFF).
         DWMWA_CAPTION_COLOR = 35
-        color = ctypes.c_int(0x00EEEEEE)  # COLORREF in BGR
+        color = ctypes.c_int(0x00FFFFFF)  # COLORREF in BGR (white)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd, DWMWA_CAPTION_COLOR,
             ctypes.byref(color), ctypes.sizeof(color),
@@ -288,7 +288,7 @@ def main():
     if already_running:
         # Server is already up — open directly
         window = webview.create_window(
-            "CNA Web App",
+            "CNA Console",
             APP_URL,
             width=1280,
             height=900,
@@ -297,7 +297,7 @@ def main():
     else:
         # Show loading screen immediately, do setup + start server in background
         window = webview.create_window(
-            "CNA Web App",
+            "CNA Console",
             html=LOADING_HTML,
             width=1280,
             height=900,

@@ -1,0 +1,73 @@
+# Drop this into the app's .streamlit/config.toml as the [theme] block.
+# Merge — keep any non-theme sections the app already has. If the app's
+# Streamlit version rejects unknown keys, drop the unsupported granular keys
+# but always keep: base, primaryColor, backgroundColor,
+# secondaryBackgroundColor, textColor, borderColor.
+
+[theme]
+# ---------------------------------------------------------------------------
+# CNA brand theme — see CNA Brand Guidelines 2025.
+# Primary: CNA Green #00B19A / CNA Teal #06828D
+# Secondary: CNA Navy #002E65 / CNA Turquoise #08B4C5 / CNA Sky #D0ECEE /
+#            CNA Sky Lite #EFFAFA
+# Fonts (Poppins headings, Work Sans body) are applied via utils.get_global_css.
+# ---------------------------------------------------------------------------
+base = "light"
+primaryColor = "#00B19A"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#EFFAFA"
+textColor = "#1F2A44"
+font = "sans serif"
+
+redColor = "#D64550"
+orangeColor = "#FF8A1F"
+yellowColor = "#E0B800"
+blueColor = "#08B4C5"
+greenColor = "#00B19A"
+violetColor = "#803DF5"
+grayColor = "#8A99A8"
+
+redBackgroundColor = "#FBEBEC"
+orangeBackgroundColor = "#FFF3E8"
+yellowBackgroundColor = "#FFF9DF"
+blueBackgroundColor = "#E4F6F8"
+greenBackgroundColor = "#E3F6F3"
+violetBackgroundColor = "#F2EBFF"
+grayBackgroundColor = "#EFFAFA"
+
+redTextColor = "#A8323C"
+orangeTextColor = "#E2660C"
+yellowTextColor = "#926C05"
+blueTextColor = "#06828D"
+greenTextColor = "#056B74"
+violetTextColor = "#583F84"
+grayTextColor = "#5B6B7A"
+
+linkColor = "#06828D"
+linkUnderline = true
+codeTextColor = "#06828D"
+codeBackgroundColor = "#EFFAFA"
+
+baseFontSize = 17
+baseFontWeight = 400
+headingFont = "sans serif"
+headingFontSizes = ["2.75rem", "2.25rem", "1.75rem", "1.5rem", "1.25rem", "1rem"]
+headingFontWeights = [700, 600, 600, 600, 600, 600]
+codeFont = "monospace"
+codeFontSize = "0.95rem"
+codeFontWeight = 400
+
+# Sharp-card aesthetic: inputs/buttons keep a small radius (set here);
+# cards/containers/accent bars are squared off via utils.get_global_css.
+baseRadius = "small"
+buttonRadius = "small"
+borderColor = "#B9DDE1"
+dataframeBorderColor = "#B9DDE1"
+dataframeHeaderBackgroundColor = "#D0ECEE"
+showWidgetBorder = true
+showSidebarBorder = true
+
+# CNA-branded chart palettes.
+chartCategoricalColors = ["#00B19A", "#06828D", "#08B4C5", "#002E65", "#5BC8BC", "#3F8E97", "#6FC9D4", "#4A6A93", "#A8DEDC", "#9BB0C8"]
+chartSequentialColors = ["#EFFAFA", "#D0ECEE", "#A9DDDF", "#7FCBCE", "#54B8BC", "#08B4C5", "#06828D", "#0A6E78", "#08515C", "#002E65"]
+chartDivergingColors = ["#002E65", "#0A6E78", "#06828D", "#3F8E97", "#A9DDDF", "#B8E6DF", "#5BC8BC", "#1FBFAA", "#00B19A", "#00917F"]

@@ -17,3 +17,4 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 - [Installer fresh install flow](project_installer_flow.md) — how _internal/ gets built on fresh installs
 - [Pre-commit steps are non-negotiable](feedback_precommit_mandatory.md) — never skip or soften pre-commit steps
 - [cmd.exe errorlevel + redirect bug](feedback_cmd_errorlevel_redirect.md) — >nul 2>&1 clobbers errorlevel; use file checks instead
+- [Accounts parquet daily regen lag](project_accounts_parquet_daily_regen.md) — new accounts columns appear only after the daily parquet rebuilds

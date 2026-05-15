@@ -133,6 +133,28 @@ def todays_file_exists(output_dir: Path, prefix: str) -> bool:
     """Check if today's parquet file with prefix already exists in output_dir."""
     return (output_dir / get_todays_filename(prefix)).exists()
 
+# Columns the app expects in every accounts parquet. When today's file is missing
+# any of these (e.g. an older build wrote it before a column was added), startup
+# regenerates it instead of reusing the stale file.
+ACCOUNTS_REQUIRED_COLUMNS = ("Company Group USE", "CustomerCode", "Reporting Name")
+
+def accounts_file_is_current(output_dir: Path) -> bool:
+    """True when today's accounts parquet exists and has all expected columns."""
+    path = output_dir / get_todays_filename("accounts")
+    if not path.exists():
+        return False
+    try:
+        import pyarrow.parquet as pq
+        schema_names = set(pq.read_schema(path).names)
+    except Exception as exc:
+        LOGGER.warning("Could not read accounts parquet schema for '%s': %s — will regenerate.", path, exc)
+        return False
+    missing = [c for c in ACCOUNTS_REQUIRED_COLUMNS if c not in schema_names]
+    if missing:
+        LOGGER.info("Accounts parquet is missing columns %s; will regenerate it.", missing)
+        return False
+    return True
+
 def delete_old_parquet_files(output_dir: Path, prefix: str) -> None:
     """Delete all parquet files matching prefix in the output directory."""
     for file in output_dir.glob(f"{prefix}_*.parquet"):
@@ -145,10 +167,19 @@ def delete_old_parquet_files(output_dir: Path, prefix: str) -> None:
 def load_accounts_excel(path: Path) -> pd.DataFrame:
     """Load accounts data from Excel and return relevant columns."""
     df = pd.read_excel(path, sheet_name="CNA Personnel", engine="openpyxl")
-    result = df[["Company Group USE", "CustomerCode"]].copy()
+    columns = ["Company Group USE", "CustomerCode"]
+    has_reporting_name = "Reporting Name" in df.columns
+    if has_reporting_name:
+        columns.append("Reporting Name")
+    result = df[columns].copy()
     result["Company Group USE"] = result["Company Group USE"].astype(str).str.strip()
     result["CustomerCode"] = result["CustomerCode"].astype(str).str.strip()
-    # Remove rows where both columns are NaN (after conversion to string)
+    if has_reporting_name:
+        result["Reporting Name"] = result["Reporting Name"].astype(str).str.strip()
+    else:
+        LOGGER.warning("'Reporting Name' column not found in accounts Excel; falling back to Company Group USE.")
+        result["Reporting Name"] = result["Company Group USE"]
+    # Remove rows where both key columns are NaN (after conversion to string)
     result = result[(result["Company Group USE"] != "nan") | (result["CustomerCode"] != "nan")]
     return result
 
@@ -270,7 +301,7 @@ def main() -> None:
     LOGGER.info("Users source Excel: %s", tracker_xlsx)
     LOGGER.info("Accounts Excel: %s", accounts_xlsx)
     # Handle accounts data
-    if todays_file_exists(output_dir, "accounts"):
+    if todays_file_exists(output_dir, "accounts") and accounts_file_is_current(output_dir):
         LOGGER.info("Today's accounts file already exists: %s", get_todays_filename("accounts"))
     else:
         LOGGER.info("Preparing accounts data...")

@@ -15,6 +15,12 @@ __pycache__/
 venv/
 
 # -------------------------------------------------
+# uv managed-Python + cache (redirected here by setup.bat
+# to keep them off-profile — see setup.bat UV_* vars)
+# -------------------------------------------------
+.uv/
+
+# -------------------------------------------------
 # Streamlit secrets
 # -------------------------------------------------
 .streamlit/secrets.toml
@@ -46,6 +52,11 @@ CODE - do not open/installer/dist/
 CODE - do not open/.last_update_check
 CODE - do not open/.update_available
 CODE - do not open/favorites.json
+
+# -------------------------------------------------
+# Reference material (not part of the app)
+# -------------------------------------------------
+CNA Brand Guidelines/
 
 # -------------------------------------------------
 # OS junk

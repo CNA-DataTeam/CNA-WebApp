@@ -85,6 +85,21 @@ if _AUTOREFRESH_IMPORT_ERROR is not None and "_task_tracker_autorefresh_warned" 
 
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 
+# Task tracker keeps its input-box headers (User, Task, Covering For, etc.) in
+# the standard dark text color rather than the app-wide green widget labels.
+st.markdown(
+    """
+    <style>
+    [data-testid="stWidgetLabel"],
+    [data-testid="stWidgetLabel"] p,
+    [data-testid="stWidgetLabel"] label {
+        color: var(--cna-ink) !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ============================================================
 # DIRECTORY CONSTANTS
 # ============================================================
@@ -975,7 +990,8 @@ if st.session_state.task_tracker_version == "logistics":
         colon_class = "blink-colon" if st.session_state.state == "running" else ""
         st.markdown(
             f'<div style="text-align:center;margin-bottom:20px;">'
-            f'<div style="font-size:36px;font-weight:600;">{hh}<span class="{colon_class}">:</span>{mm}</div>'
+            f'<div style="font-family:var(--cna-mono);font-size:36px;font-weight:500;">'
+            f'{hh}<span class="{colon_class}">:</span>{mm}</div>'
             f'<div style="font-size:15px;color:#6b6b6b;">Elapsed Time</div></div>',
             unsafe_allow_html=True,
         )
@@ -1097,7 +1113,6 @@ if st.session_state.task_tracker_version == "logistics":
         LOGGER.info("No LS tasks completed today to display.")
         st.info("No tasks completed today.")
 
-    st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")
     if st.session_state.state == "running":
         st_autorefresh(interval=10000, key="timer")
 
@@ -1165,7 +1180,8 @@ else:
         colon_class = "blink-colon" if st.session_state.da_state == "running" else ""
         st.markdown(
             f'<div style="text-align:center;margin-bottom:20px;">'
-            f'<div style="font-size:36px;font-weight:600;">{hh}<span class="{colon_class}">:</span>{mm}</div>'
+            f'<div style="font-family:var(--cna-mono);font-size:36px;font-weight:500;">'
+            f'{hh}<span class="{colon_class}">:</span>{mm}</div>'
             f'<div style="font-size:15px;color:#6b6b6b;">Elapsed Time</div></div>',
             unsafe_allow_html=True,
         )
@@ -1514,6 +1530,5 @@ else:
     else:
         st.info("No tasks found for this view.")
 
-    st.caption(f"\n\n\nApp version: {config.APP_VERSION}", text_alignment="center")
     if st.session_state.da_state == "running":
         st_autorefresh(interval=10000, key="da_timer")

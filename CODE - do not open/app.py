@@ -120,7 +120,7 @@ def _check_for_updates_manual():
 if UPDATE_FLAG.exists():
     @st.dialog("Update Available", width="small")
     def _update_dialog():
-        st.markdown("A new version of CNA Web App is available.")
+        st.markdown("A new version of CNA Console is available.")
         st.markdown("Please update to continue.")
         if st.button("Update Now", type="primary", use_container_width=True):
             with st.spinner("Updating..."):

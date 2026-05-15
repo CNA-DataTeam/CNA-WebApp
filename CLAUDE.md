@@ -168,7 +168,7 @@ Workflow for ANY git commit or push (whether or not config.py or launcher files 
 - Copies `config.key` from the network share if not present locally
 - Decrypts `config.enc` → `config.py`
 - Builds `CNA Web App.exe` via PyInstaller if missing (requires `pyinstaller` in venv)
-- Creates a `CNA Web App.lnk` shortcut pointing to the `.exe` (falls back to `StartApp.vbs` if `.exe` is unavailable)
+- Creates a `CNA Console.lnk` shortcut pointing to the `.exe` (falls back to `StartApp.vbs` if `.exe` is unavailable)
 
 ### App launch
 `CNA Web App.exe` → `CODE - do not open/StartApp.bat` → `CODE - do not open/launch_app.py`:
@@ -677,9 +677,23 @@ Main behavior:
   - current login
   - full name
   - department
-- Loads account list from personnel data
-- Shows a 7-day clickable calendar using `streamlit-calendar`
-- Lets user enter row-based allocations in the current implementation's detailed mode
+- Loads the Reporting Name / Customer Code lookup from the daily accounts parquet
+  via `utils.load_account_lookup(...)` (built from the `Reporting Name` and
+  `CustomerCode` columns the startup job extracts from `CNA Personnel`)
+- Shows a clickable calendar (`streamlit-calendar`) with three views: This Week
+  (default, Mon–Fri of the current week), Last Week (Mon–Fri of the previous
+  week), and This Period (the whole fiscal period)
+- Editing window: entries can be added/edited only for days in This Week or
+  Last Week (`_editable_window()` / `_is_editable_day()`); the This Period view
+  is a read-only overview. Admins bypass this on the Input tab; the admin
+  Edit Entries table can change any date. There is no grace-period buffer.
+- Each input row pairs a Reporting Name dropdown with a Customer Code dropdown
+  that autofill each other (multiple codes per name -> first code alphabetically)
+- Time per row is entered with Hour (0-12) and Minute (00/15/30/45) dropdowns
+- Channel dropdown order: `CHANNEL_OPTIONS`' fixed defined order until 50+ total
+  saved channel selections, then sorted by usage frequency; new rows default to
+  the first option (Resupply by default, or the most-used once the frequency
+  sort kicks in)
 - Confirms before saving
 - Writes one parquet file per save
 - Replaces prior rows for the same user and date across existing export files
@@ -689,7 +703,8 @@ Data schema:
 - `User`
 - `Full Name`
 - `Department`
-- `Account`
+- `Account` (Reporting Name)
+- `Customer Code`
 - `Time`
 - `Channel`
 
@@ -698,11 +713,15 @@ Channels:
 - `Resupply`
 
 Admin exports tab:
-- date range filter
+- date range filter (defaults: From = start of the most recent fiscal year, To = today)
 - user filter
 - department filter
 - table display
 - CSV download
+
+Admin Settings tab has the custom entry-field editor and an editable
+"Edit Entries" data editor (same date defaults as exports); editing Reporting
+Name or Customer Code there autofills the pair.
 
 ### FedEx Address Validator (`pages/fedex-address-validator.py`)
 

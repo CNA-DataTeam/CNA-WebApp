@@ -43,19 +43,65 @@ if "_home_sections_logged" not in st.session_state:
 # ============================================================
 st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 
-# ============================================================
-# HEADER
-# ============================================================
-utils.render_page_header(PAGE_TITLE)
+# Home-page-only treatment: turn the bordered nav containers into accent
+# cards, and restore ~22px of top breathing room. The global CSS zeroes
+# .block-container padding-top and the home page has no .cna-pageheader, so
+# without this rule the first element sits flush against the top of the page.
+st.markdown(
+    """
+    <style>
+    [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"] {
+        border-top: 3px solid var(--cna-green) !important;
+        background: var(--cna-white) !important;
+        position: relative !important;
+        cursor: pointer !important;
+        transition: box-shadow 0.2s ease, transform 0.2s ease,
+                    border-top-color 0.2s ease !important;
+    }
+    [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]:hover {
+        box-shadow: var(--cna-card-shadow) !important;
+        transform: translateY(-2px) !important;
+        border-top-color: var(--cna-teal) !important;
+    }
+    [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]
+        [data-testid="stPageLink"] p {
+        font-family: var(--cna-heading) !important;
+        font-weight: 600 !important;
+        font-size: 1.05rem !important;
+        color: var(--cna-navy) !important;
+    }
+    /* Stretched-link: make the whole bordered card clickable, not just the
+       page-link text. The page link's <a> stays in normal flow (so its label
+       renders in place); its transparent ::after overlay expands to cover the
+       entire card, so a click anywhere on the card triggers navigation. */
+    [data-testid="stMain"] [data-testid="stVerticalBlockBorderWrapper"]
+        [data-testid="stPageLink"] a::after {
+        content: "" !important;
+        position: absolute !important;
+        inset: 0 !important;
+        z-index: 1 !important;
+    }
+    [data-testid="stMain"] .block-container {
+        padding-top: 22px !important;
+    }
+    .cna-section-head {
+        margin: 8px 0 4px 0;
+    }
+    .cna-section-head h2 {
+        margin: 0 !important;
+        font-size: clamp(1.4rem, 2.4vw, 1.9rem);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ============================================================
 # APPLICATION CARDS (REAL NAVIGATION)
 # ============================================================
 def render_nav_card(column, page_path: str, label: str, icon: str, caption: str) -> None:
     with column:
-        _spacer_col, content_col = st.columns([0.08, 0.92], vertical_alignment="top")
-        with content_col:
-            st.space(size="small")
+        with st.container(border=True):
             st.page_link(
                 page_path,
                 label=label,
@@ -66,7 +112,15 @@ def render_nav_card(column, page_path: str, label: str, icon: str, caption: str)
 
 visible_sections = page_registry.get_visible_sections(IS_ADMIN_USER)
 for section_idx, (section_name, entries) in enumerate(visible_sections):
-    st.subheader(section_name, anchor=False)
+    st.markdown(
+        f"""
+        <div class="cna-section-head">
+            <div class="cna-eyebrow"><span class="dot"></span>Section {section_idx + 1:02d}</div>
+            <h2>{section_name}</h2>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     for row_start in range(0, len(entries), 2):
         col1, col2 = st.columns(2)
         left_entry = entries[row_start]

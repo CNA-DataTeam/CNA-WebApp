@@ -1,5 +1,5 @@
 ; ============================================================
-; CNA Web App Installer — Inno Setup Script
+; CNA Console Installer — Inno Setup Script
 ; ============================================================
 ; Compile this with Inno Setup 6+ to produce the installer exe.
 ; Download Inno Setup: https://jrsoftware.org/isinfo.php
@@ -11,7 +11,7 @@
 ;   4. Copies config.key from the network share
 ; ============================================================
 
-#define MyAppName "CNA Web App"
+#define MyAppName "CNA Console"
 #define MyAppVersion "1.0"
 #define MyAppPublisher "Clark National Accounts"
 #define MyRepoURL "https://github.com/CNA-DataTeam/CNA-WebApp.git"
@@ -24,11 +24,15 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\CNA-WebApp
 DisableProgramGroupPage=yes
-; Show the directory page so users with corporate folder redirection on
-; AppData (which triggers Windows error 448 "untrusted mount point" when
-; uv tries to inspect the venv's python.exe) can pick an alternate path
-; like {userprofile}\CNA-WebApp. Post-install validation detects this
-; case and tells the user to retry with a different directory.
+; Keep the directory page enabled. The default ({localappdata}) works for
+; most users. On machines where the user profile is a mounted container
+; (FSLogix) or AppData is junctioned to a network share, every path under
+; the profile sits behind a Windows "untrusted mount point" and uv fails
+; with error 448 while building the venv. A pre-check at the start of
+; installation (see CurStepChanged) detects a reparse point anywhere in
+; the install path's ancestry and offers to relaunch Setup into
+; C:\Users\Public\CNA-WebApp, which is off-profile. Post-install
+; validation still catches the 448 case as a backstop.
 DisableDirPage=no
 OutputDir=..\..\installer-output
 OutputBaseFilename=CNA-WebApp-Setup
@@ -44,6 +48,16 @@ DefaultGroupName={#MyAppName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Code]
+
+// -------------------------------------------------------
+// Win32 API imports — used by the untrusted-mount-point
+// pre-check and to terminate this instance for a relaunch.
+// -------------------------------------------------------
+function GetFileAttributesW(lpFileName: String): Cardinal;
+  external 'GetFileAttributesW@kernel32.dll stdcall';
+procedure TerminateInstaller(uExitCode: Cardinal);
+  external 'ExitProcess@kernel32.dll stdcall';
+
 var
   StatusLabel: TNewStaticText;
 
@@ -162,13 +176,53 @@ begin
       begin
         // Directory exists but isn't our repo — warn user
         Result := (MsgBox(
-          'The selected folder already exists and does not appear to contain the CNA Web App. ' +
+          'The selected folder already exists and does not appear to contain CNA Console. ' +
           'Files may be overwritten.' + #13#10#13#10 +
           'Continue anyway?',
           mbConfirmation, MB_YESNO) = IDYES);
       end;
     end;
   end;
+end;
+
+// -------------------------------------------------------
+// Helper: is this exact path a reparse point (junction,
+// symlink, mounted container)? Returns False for paths
+// that don't exist.
+// -------------------------------------------------------
+function IsReparsePoint(const Path: String): Boolean;
+var
+  Attrs: Cardinal;
+begin
+  Attrs := GetFileAttributesW(Path);
+  // $FFFFFFFF = INVALID_FILE_ATTRIBUTES, $400 = FILE_ATTRIBUTE_REPARSE_POINT
+  Result := (Attrs <> $FFFFFFFF) and ((Attrs and $400) <> 0);
+end;
+
+// -------------------------------------------------------
+// Helper: does the install path — or ANY of its ancestor
+// directories — sit on a reparse point? This is what makes
+// uv fail with Windows error 448 ("untrusted mount point"):
+// a process can't traverse a junction / mounted container it
+// doesn't trust. The usual culprit is a corporate roaming
+// profile or FSLogix container at C:\Users\<user>, which
+// poisons every path beneath it regardless of install dir.
+// -------------------------------------------------------
+function InstallPathHasReparsePoint(const StartPath: String): Boolean;
+var
+  Cur, Prev: String;
+begin
+  Result := False;
+  Cur := StartPath;
+  repeat
+    if IsReparsePoint(Cur) then
+    begin
+      Result := True;
+      Exit;
+    end;
+    Prev := Cur;
+    Cur := ExtractFileDir(Cur);
+  until (Cur = Prev) or (Length(Cur) < 3);
 end;
 
 // -------------------------------------------------------
@@ -180,11 +234,49 @@ var
   PythonDll, VenvPython, MissingArtifacts, LogTail, Tip: String;
   CloneLogContent, SetupLogContent: AnsiString;
   ResultCode, WingetCode, LogLen: Integer;
+  Btns: TArrayOfString;
 begin
   if CurStep <> ssInstall then
     Exit;
 
   InstallDir := ExpandConstant('{app}');
+
+  // ---- Step 0: untrusted-mount-point pre-check ----
+  // Before doing ANY work, make sure the install path can actually be
+  // traversed. If a reparse point sits anywhere in its ancestry (roaming
+  // profile / FSLogix container / AppData junctioned to a network share),
+  // uv will later fail with Windows error 448 while building the venv.
+  // Catch it now and offer to relaunch into an off-profile location.
+  if InstallPathHasReparsePoint(InstallDir) then
+  begin
+    SetArrayLength(Btns, 2);
+    Btns[0] := 'OK';
+    Btns[1] := 'Exit';
+    if TaskDialogMsgBox(
+         'This install location can''t be used',
+         'The folder you selected:' + #13#10 +
+         '    ' + InstallDir + #13#10#13#10 +
+         'sits behind a Windows "untrusted mount point". Your Windows user ' +
+         'profile is most likely stored on a network share or a mounted ' +
+         'container — common with corporate roaming profiles or FSLogix. ' +
+         'Installing here will fail when Setup builds the Python environment ' +
+         '(Windows error 448).' + #13#10#13#10 +
+         'Setup can install to an off-profile location that avoids this:' + #13#10 +
+         '    C:\Users\Public\CNA-WebApp' + #13#10#13#10 +
+         'Click OK to restart Setup at that location now, or Exit to quit.',
+         mbError, MB_OKCANCEL, Btns, 0) = IDOK then
+    begin
+      // Relaunch this same installer pointed at the off-profile path. The
+      // fresh instance re-runs this very check, which will pass for Public.
+      Exec(ExpandConstant('{srcexe}'),
+           '/SILENT /DIR="C:\Users\Public\CNA-WebApp"',
+           '', SW_SHOW, ewNoWait, ResultCode);
+    end;
+    // Either way this instance is done — it must not install to the bad
+    // path. On OK, the relaunched instance has already taken over.
+    TerminateInstaller(0);
+  end;
+
   SetProgress(0);
 
   // ---- Step 1: Git ----
@@ -261,7 +353,7 @@ begin
   end
   else
   begin
-    UpdateStatus('Cloning CNA Web App from GitHub...');
+    UpdateStatus('Cloning CNA Console from GitHub...');
     SetProgress(20);
     ResultCode := RunAndWait('cmd.exe',
       '/c ""' + GitExePath + '" clone "{#MyRepoURL}" "' + InstallDir + '" >"' + CloneLog + '" 2>&1"',
@@ -341,13 +433,13 @@ begin
     //     redirection on AppData. Fix: install to a non-redirected dir.
     //   - Default: antivirus quarantine of a PyInstaller-built file.
     if Pos('untrusted mount point', LowerCase(LogTail)) > 0 then
-      Tip := 'The install location is on a Windows "untrusted mount point" ' +
-             '(Windows error 448). This is usually caused by corporate folder ' +
-             'redirection of AppData to a network share, which blocks uv from ' +
-             'inspecting the virtual environment''s python.exe.' + #13#10#13#10 +
-             'Fix: re-run this installer, click Browse on the directory page, ' +
-             'and choose a location outside AppData — for example:' + #13#10 +
-             '  ' + GetEnv('USERPROFILE') + '\CNA-WebApp'
+      Tip := 'The install location is behind a Windows "untrusted mount point" ' +
+             '(Windows error 448). This happens when the user profile is a ' +
+             'mounted container (FSLogix) or AppData is redirected to a network ' +
+             'share — uv cannot traverse into the virtual environment.' + #13#10#13#10 +
+             'Fix: re-run this installer and install to a location outside your ' +
+             'user profile instead — for example:' + #13#10 +
+             '  C:\Users\Public\CNA-WebApp'
     else
       Tip := 'This usually means antivirus quarantined a file during install ' +
              '(Windows Defender frequently flags PyInstaller-built executables). ' +
@@ -393,7 +485,7 @@ begin
 end;
 
 [Icons]
-Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\CNA Web App.exe"; WorkingDir: "{app}"; IconFilename: "{app}\cna_icon.ico"; Comment: "Launch CNA Web App"
+Name: "{userprograms}\{#MyAppName}"; Filename: "{app}\CNA Web App.exe"; WorkingDir: "{app}"; IconFilename: "{app}\cna_icon.ico"; Comment: "Launch CNA Console"
 
 [Run]
-Filename: "{app}\CNA Web App.exe"; WorkingDir: "{app}"; Description: "Launch CNA Web App"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\CNA Web App.exe"; WorkingDir: "{app}"; Description: "Launch CNA Console"; Flags: nowait postinstall skipifsilent

@@ -25,7 +25,7 @@ HOME_PAGE = PageEntry(
     title="Home",
     icon="\U0001F3E0",
     caption="Landing page.",
-    quote='"There\'s no place like home screen."',
+    quote="Quick links to every tool in the suite.",
 )
 
 
@@ -43,6 +43,7 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             icon="\U0001F6E0\uFE0F",
             caption="Admin page to maintain tasks metadata and review users.parquet.",
             admin_only=True,
+            quote="Maintain task definitions, targets, and task logs.",
         ),
         PageEntry(
             path="pages/admin-logs.py",
@@ -50,6 +51,7 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             icon="\U0001F4DC",
             caption="Filter and review application logs by user and page.",
             admin_only=True,
+            quote="Review application logs by user and page.",
         ),
         PageEntry(
             path="pages/fedex-address-validation-management.py",
@@ -57,6 +59,7 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             icon="\U0001F4CB",
             caption="Review all validation results and clear disputed flags.",
             admin_only=True,
+            quote="Review address-validation results and clear disputed flags.",
         ),
         PageEntry(
             path="pages/period-configuration.py",
@@ -64,6 +67,7 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             icon="\U0001F5D3️",
             caption="Define fiscal periods per year for use across the app.",
             admin_only=True,
+            quote="Define the fiscal periods used across the app.",
         ),
     ],
     "Task Tracker": [
@@ -72,14 +76,14 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             title="Task Tracker",
             icon="\U0001F552",
             caption="Log daily operational tasks, track elapsed time, manage cadence, and view live activity.",
-            quote='"Big Brother is watching you"',
+            quote="Time your daily tasks and see live team activity.",
         ),
         PageEntry(
             path="pages/task-tracker-analytics.py",
             title="Task Analytics",
             icon="\U0001F4CA",
             caption="Review team performance and task completion trends with filters for user and date.",
-            quote='"Show me the metrics!"',
+            quote="Historical performance and trends for completed tasks.",
         ),
     ],
     "Work in Progress": [
@@ -88,28 +92,28 @@ SECTION_PAGES: dict[str, list[PageEntry]] = {
             title="Packaging Estimator",
             icon="\U0001F4E6",
             caption="Estimate package counts and grouped dimensions from item lists.",
-            quote='"We\'re gonna need a bigger box."',
+            quote="Match items to shipping and package estimates.",
         ),
         PageEntry(
             path="pages/time-allocation-tool.py",
-            title="Time Allocation Tool (TAT)",
+            title="Time Allocation Tool",
             icon="\u23F1\uFE0F",
             caption="Capture account-level time allocations by percentage or detailed duration.",
-            quote='"Putting labor where it belongs."',
+            quote="Log how your time splits across accounts each day.",
         ),
         PageEntry(
             path="pages/fedex-address-validator.py",
             title="FedEx Address Validator",
             icon="\u2705",
             caption="Validate addresses and export standardized results for review.",
-            quote='"Don\'t let em overcharge us!"',
+            quote="Spot address-validation results worth disputing with FedEx.",
         ),
         PageEntry(
             path="pages/stocking-agreement-generator.py",
             title="Stocking Agreement Generator",
             icon="\U0001F4DD",
             caption="Fill agreement templates and export polished Word or PDF documents.",
-            quote='"Contracts without the copy-and-paste pain."',
+            quote="Generate Word and PDF agreements from templates.",
         ),
     ],
 }
