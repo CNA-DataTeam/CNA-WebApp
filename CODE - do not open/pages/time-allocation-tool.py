@@ -1028,6 +1028,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
     return selected_day, selected_day_df
 
 
+@st.fragment
 def render_input_view(
     user_login: str,
     full_name: str,
@@ -1600,6 +1601,7 @@ def _attach_fiscal_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+@st.fragment
 def render_exports_view() -> None:
     """Render admin export view with filters and CSV download."""
     if not utils.is_current_user_admin():
@@ -1950,6 +1952,7 @@ def _autofill_admin_editor_codes(editor_key: str, edited: pd.DataFrame, account_
     return changed
 
 
+@st.fragment
 def render_admin_data_editor_view(account_lookup: dict) -> None:
     """Admin-only editable table for any (user, day) entries, unrestricted by the Input tab's editing window."""
     st.subheader("Edit Entries", anchor=False)
@@ -2476,6 +2479,7 @@ def confirm_entry_field_delete_dialog() -> None:
             st.rerun()
 
 
+@st.fragment
 def render_entry_fields_editor_view() -> None:
     """Admin-only editor for the manual-entry field definitions users fill in per entry."""
     if "taef_delete_confirm_open" not in st.session_state:

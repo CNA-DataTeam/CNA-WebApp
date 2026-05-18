@@ -15,8 +15,11 @@ import pandas as pd
 import streamlit as st
 
 import config
-import stocking_agreement_service
 import utils
+
+# stocking_agreement_service pulls in python-docx, docxtpl, pythoncom, and
+# win32com — pywin32's COM machinery is the slow part. Defer the import to
+# the codepaths that need it so the page itself loads fast.
 
 
 LOGGER = utils.get_page_logger("Stocking Agreement Generator")
@@ -397,6 +400,7 @@ def _render_general_tab() -> None:
 
     with st.spinner("Generating agreement files..."):
         try:
+            import stocking_agreement_service
             st.session_state[GENERAL_OUTPUT_KEY] = stocking_agreement_service.render_agreement_documents(
                 template_key="general_resupply",
                 context=context,
@@ -540,6 +544,7 @@ def _render_consumables_tab() -> None:
 
     with st.spinner("Generating agreement files..."):
         try:
+            import stocking_agreement_service
             st.session_state[CONSUMABLES_OUTPUT_KEY] = stocking_agreement_service.render_agreement_documents(
                 template_key="consumables",
                 context=context,
@@ -563,6 +568,7 @@ def _render_consumables_tab() -> None:
 utils.render_page_header(PAGE_TITLE)
 
 try:
+    import stocking_agreement_service
     stocking_agreement_service.ensure_templates_ready()
 except Exception as exc:
     LOGGER.exception("Template preparation failed: %s", exc)

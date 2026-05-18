@@ -747,8 +747,13 @@ def get_global_css() -> str:
 
 
 @lru_cache(maxsize=4)
+@lru_cache(maxsize=4)
 def get_app_logo_path(logo_path: str | Path | None = None) -> str | None:
-    """Return the configured app logo path when the asset exists."""
+    """Return the configured app logo path when the asset exists.
+
+    Cached so the per-rerun call doesn't stat the (possibly UNC) logo file
+    on every widget interaction.
+    """
     try:
         source_path = Path(logo_path if logo_path is not None else config.LOGO_PATH)
         if not source_path.exists():
@@ -759,12 +764,23 @@ def get_app_logo_path(logo_path: str | Path | None = None) -> str | None:
 
 
 def render_app_logo(logo_path: str | Path | None = None) -> None:
-    """Render the shared app logo in Streamlit chrome when supported."""
+    """Render the shared app logo in Streamlit chrome when supported.
+
+    st.logo writes to app chrome (top of sidebar + main top-left) and persists
+    across reruns and page navigations, so we only need to call it once per
+    Streamlit session. Gating on session_state avoids the per-click overhead
+    of building the proto and pushing it through the delta queue.
+    """
+    if not hasattr(st, "logo"):
+        return
+    if st.session_state.get("_cna_logo_emitted"):
+        return
     image_path = get_app_logo_path(logo_path)
-    if image_path is None or not hasattr(st, "logo"):
+    if image_path is None:
         return
     try:
         st.logo(image_path)
+        st.session_state["_cna_logo_emitted"] = True
     except Exception:
         return
 
@@ -850,8 +866,13 @@ def _registry_title_map() -> dict[str, str]:
     return mapping
 
 
+@lru_cache(maxsize=1)
 def get_app_icon():
-    """Return path to the app icon for st.set_page_config, or None if missing."""
+    """Return path to the app icon for st.set_page_config, or None if missing.
+
+    Cached so the file stat doesn't run on every rerun (st.set_page_config
+    re-runs at the top of every page render).
+    """
     icon_path = Path(__file__).resolve().parent.parent / "icon.png"
     return str(icon_path) if icon_path.exists() else None
 

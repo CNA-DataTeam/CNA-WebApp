@@ -228,6 +228,7 @@ def main_charts(filtered_df: pd.DataFrame) -> None:
         st.altair_chart(task_chart, use_container_width=True)
 
 
+@st.fragment
 def main() -> None:
     st.markdown(utils.get_global_css(), unsafe_allow_html=True)
     LOGGER.info("Render UI (Logistics Support).")
@@ -490,6 +491,7 @@ def da_main_charts(filtered_df: pd.DataFrame) -> None:
     st.dataframe(detail_df, hide_index=True, use_container_width=True)
 
 
+@st.fragment
 def da_main() -> None:
     st.markdown(utils.get_global_css(), unsafe_allow_html=True)
     LOGGER.info("Render UI (Data & Analytics).")

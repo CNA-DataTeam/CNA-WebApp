@@ -29,10 +29,12 @@ import base64
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from openpyxl import load_workbook
 
 import config
 import utils
+
+# openpyxl is only needed when the user actually builds the attachment;
+# defer the import to keep page loads snappy.
 
 LOGGER = utils.get_page_logger("FedEx Address Validator")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "FedEx Address Validator")
@@ -243,6 +245,7 @@ def create_excel_download(rows: pd.DataFrame) -> Tuple[str, bytes]:
     base_buffer.seek(0)
 
     # Apply currency formatting to Amount Billed and Credit Requested columns.
+    from openpyxl import load_workbook
     wb = load_workbook(base_buffer)
     ws = wb.active
     currency_cols = [4, 5]  # 1-based indexes in final sheet

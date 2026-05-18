@@ -511,6 +511,7 @@ def confirm_update_dialog() -> None:
             st.rerun()
 
 
+@st.fragment
 def render_tasks_section() -> None:
     try:
         if _tasks_state_needs_reload():
@@ -683,6 +684,7 @@ def render_tasks_section() -> None:
         confirm_update_dialog()
 
 
+@st.fragment
 def render_task_targets_section() -> None:
     try:
         if _tasks_state_needs_reload():
@@ -985,6 +987,7 @@ def render_task_targets_section() -> None:
                 st.rerun()
 
 
+@st.fragment
 def render_users_section() -> None:
     try:
         users_df = _load_users_parquet(USERS_PARQUET_PATH)
@@ -1271,6 +1274,7 @@ def confirm_task_log_delete_dialog() -> None:
             st.rerun()
 
 
+@st.fragment
 def render_task_log_section() -> None:
     try:
         df = _load_task_log_entries(config.COMPLETED_TASKS_DIR)
