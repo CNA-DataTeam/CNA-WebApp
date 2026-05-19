@@ -1,991 +1,181 @@
 # CLAUDE.md
 
-This file is automatically loaded by Claude Code at the start of every conversation. It documents how the project works so changes can be made safely and consistently.
+This file is automatically loaded by Claude Code at the start of every conversation. It documents the load-bearing rules and conventions of this project so changes can be made safely.
 
-## Shared Project Memory
+Most descriptive "what does this page do" content has been moved out — read the page file when you need the workflow. Per-page gotchas and hard-won lessons live in `.claude/memory/` (see below).
 
-This project maintains shared memory in `.claude/memory/` that persists across conversations and developers. The index is `.claude/memory/MEMORY.md`.
+## What this is
 
-**Reading memory:** At the start of a conversation, if the user's question might benefit from past context, read `.claude/memory/MEMORY.md` and any relevant memory files it references.
+An internal Windows-only Streamlit suite for Logistics Support. Pages include a task timer / live activity tracker, historical analytics, admin maintenance, a packaging estimator, a time allocation tool, a FedEx address-validation dispute workflow, and a stocking agreement generator.
 
-**Writing memory:** When you learn something non-obvious through experience — a pitfall, a workaround, a user preference, a project decision — add it as a new memory file and update the index. Do not duplicate information already in this CLAUDE.md. Memory is for hard-won lessons, not documented rules.
+Designed around cached parquet datasets, shared UNC network storage, and lightweight Streamlit pages with shared styling.
 
-**Updating memory:** If a memory is stale or wrong based on the current state of the code, update or remove it. Memory files are committed to git, so everyone benefits.
+The app assumes Windows. Batch files, Outlook automation, and Word-to-PDF conversion are Windows-specific. Many pages will appear broken if the configured UNC paths or synced SharePoint data are unavailable.
 
-## 1. Project Summary
+## Shared project memory
 
-This repository is a Windows-first internal Streamlit suite for Logistics Support work.
+This project uses `.claude/memory/` for hard-won lessons that aren't documented rules — per-page gotchas, pitfalls, workarounds, user preferences. The index is `.claude/memory/MEMORY.md`.
 
-At a high level it provides:
-- A home page and centralized sidebar navigation
-- A task timer / live activity tracker
-- Historical task analytics
-- Admin maintenance for task definitions, targets, users, and task log edits
-- A packaging estimator that matches uploaded items to item-info data and then calls a shipping calculator API
-- A time allocation tool with daily replacement behavior and admin exports
-- A FedEx address validation dispute workflow
-- A stocking agreement generator that fills Word templates and optionally converts them to PDF
-- Admin log review
+- **Read** `MEMORY.md` at the start of any conversation that might benefit from past context.
+- **Write** a memory when you learn something non-obvious through experience. Format is documented in `MEMORY.md`.
+- **Don't duplicate** what's in this file — CLAUDE.md is for load-bearing rules; memory is for things learned through experience.
+- Memory files are committed to git so everyone benefits.
 
-The app is designed around cached parquet datasets, shared UNC network storage, and lightweight Streamlit pages with common styling.
+## Ground rules
 
-## 2. Important Ground Rules
+1. **`CODE - do not open/` is the real application source directory.** Launcher scripts and imports depend on the name. Do not rename or move it.
 
-Before changing code, keep these project-specific rules in mind:
+2. **`StartApp.bat` and `setup.bat` depend on the current layout.** If you move `app.py`, `startup.py`, or `requirements.txt`, update the batch files too.
 
-1. `CODE - do not open/` is the real application source directory.
-   The name is misleading, but launcher scripts and imports depend on it. Do not rename or move it casually.
+3. **Shared storage conventions matter.** Pages read/write parquet/CSV on UNC paths from `config.py`. Don't change schemas, filenames, or partition layouts without updating every consumer.
 
-2. `StartApp.bat` and `setup.bat` assume the current layout.
-   If you move files like `app.py`, `startup.py`, or `requirements.txt`, you must update the batch files too.
+4. **`tasks.parquet` is admin-managed.** `startup.py` deliberately refreshes accounts and users only; the Management page owns task definitions.
 
-3. Shared storage conventions matter.
-   A lot of pages read and write parquet or CSV files on internal UNC paths from `config.py`. Do not change schemas, filenames, or partition layouts unless you update every consumer.
+5. **Clear caches after writes.** Most loaders use `@st.cache_data`. When you write to persisted files, clear the relevant cached loaders.
 
-4. `tasks.parquet` is admin-managed.
-   `startup.py` deliberately refreshes accounts and users only. It does not rebuild `tasks.parquet`; the Management page owns task definitions.
+6. **Reuse shared helpers.** Common patterns live in `utils.py`, `app_logging.py`, `page_registry.py`, and `config.py` — grep these before writing new helpers.
 
-5. After writes, caches usually need clearing.
-   The code relies heavily on `@st.cache_data`. When you modify persisted files, clear the relevant cached loaders or rerun the app flow.
+7. **Admin gating must be enforced in both places.** Admin-only pages hide from the registry AND check access inside the page. The current source of truth for admin status is `users.parquet`; `utils.is_user_admin(...)` tolerates alias variations — keep that tolerance unless you lock the upstream schema.
 
-6. Reuse shared helpers instead of page-local reinvention.
-   Common patterns already live in `utils.py`, `app_logging.py`, `page_registry.py`, and `config.py`.
-
-7. Keep admin gating in place.
-   Admin-only pages both hide from non-admin users in navigation and also enforce access in the page itself.
-
-8. **MANDATORY: Before ANY git commit or push, run the config encrypt command and rebuild the installer.**
-   These steps must ALWAYS be run in this order before any git operation:
+8. **MANDATORY pre-commit/pre-push steps.** ALWAYS run these in order before any git commit or push, even if the user doesn't mention them:
    1. Encrypt config: `.venv\Scripts\python.exe "CODE - do not open\config_manager.py" encrypt`
-   2. Rebuild the installer: `RebuildInstaller.bat`
-   Then stage and commit `config.enc` alongside your other changes (the installer output is gitignored).
-   This applies even if the user does not mention encryption — assume both are always needed unless the user explicitly says to skip them. Many users of this project are not aware of these technical requirements, so it is YOUR responsibility to always run these steps before any git operation. Never commit `config.py` directly — the repo is public.
-   See section 4 for full details on the config encryption system.
+   2. Rebuild installer: `RebuildInstaller.bat`
+   3. Stage `config.enc` alongside other changes.
 
-   **Note:** `CNA Web App.exe` and `_internal/` are gitignored. They're built by PyInstaller during `setup.bat` on every fresh install, and rebuilt automatically by the in-app updater if they go missing post-pull. Do NOT commit them, and do NOT run `RebuildExe.bat` as part of the commit workflow — that was the old process and is no longer needed.
+   The repo is public — NEVER commit `config.py` directly. `CNA Web App.exe` and `_internal/` are gitignored (built by `setup.bat` and rebuilt by the in-app updater if missing); don't commit them and don't run `RebuildExe.bat` as part of commits. See "Config encryption" below for the file layout.
 
-9. **Keep the commit skill in sync with pre-commit and commit steps.**
-   The file `.claude/skills/commit/SKILL.md` defines the commit workflow that the AI follows when using the `/commit` command. Any time a pre-commit step, commit step, or related process is added, removed, or changed in this document or in the batch files, the commit skill MUST be updated to match. The skill is the executable version of these instructions — if they diverge, commits will be wrong.
+9. **Keep the commit skill in sync.** `.claude/skills/commit/SKILL.md` is the executable version of the commit workflow. Any change to pre-commit steps, commit steps, or related process here MUST be reflected there, or commits will be wrong.
 
-10. **Running batch files and Windows executables from Claude Code (Git Bash).**
-    Claude Code runs in Git Bash, not cmd.exe. This causes two recurring problems:
-    - **Batch files run via `cmd.exe /c` produce no visible output** and may appear to hang. Do NOT try `cmd.exe /c SomeFile.bat` — instead, run the underlying commands directly from bash (e.g. call `.venv/Scripts/pyinstaller.exe ...` instead of running `RebuildExe.bat`).
-    - **Spaces in paths break argument parsing** when calling Windows-native executables (like ISCC.exe) from bash. The shell splits arguments on spaces even inside quotes. The fix is to write a small temp `.bat` file that accepts the root directory as `%~1` and handles quoting internally, then call it via `cmd //c`.
-    See the commit skill (`.claude/skills/commit/SKILL.md`) for the exact commands that work.
+10. **Running batch files from Claude Code (Git Bash).** Two recurring problems:
+    - `cmd.exe /c SomeFile.bat` produces no visible output and may hang. Call the underlying commands directly from bash (e.g. `.venv/Scripts/pyinstaller.exe ...` instead of `RebuildExe.bat`).
+    - Spaces in paths break argument parsing for Windows-native exes (like ISCC.exe). Wrap the call in a small temp `.bat` that handles quoting via `%~1`, then run it via `cmd //c`.
 
-11. **Resolve merge conflicts when pushing — don't just give up.**
-    Multiple developers use this repo with Claude Code. When `git push` is rejected because the remote has newer commits:
-    1. Run `git pull --rebase` to replay local commits on top of the latest remote.
-    2. If the rebase applies cleanly, push again.
-    3. If there are merge conflicts, resolve them yourself when the intent of both changes is clear and both can be preserved. Common safe merges:
-       - **Additive changes to different files** — keep both.
-       - **Additive changes to the same file in different sections** — keep both.
-       - **CLAUDE.md or MEMORY.md index additions** — keep all entries from both sides.
-       - **`config.enc`** — always re-run the encrypt command after resolving other conflicts and use the freshly encrypted result.
-    4. If the conflicting changes are **logically incompatible** (e.g. two people changed the same function in contradictory ways, renamed the same thing differently, or deleted something the other modified), **stop and tell the user** what the conflict is before resolving. Do not guess which side should win when both changes alter the same behavior.
-    5. After resolving, run `git rebase --continue`, then push.
-    See the commit skill for the step-by-step implementation.
+    See the commit skill for the working commands.
 
-## 3. Repository Layout
+11. **Resolve push conflicts — don't give up.** When `git push` is rejected:
+    1. `git pull --rebase`, then push if clean.
+    2. If conflicts are clearly additive (different files; different sections of same file; CLAUDE.md/MEMORY.md additions), resolve and continue.
+    3. For `config.enc`, always re-encrypt after resolving other conflicts and use the fresh output.
+    4. If conflicting changes are logically incompatible (same function with contradictory edits, renames, deletes-vs-modifies), STOP and tell the user before resolving.
 
-Root:
-- `CNA Web App.exe`
-  Standalone launcher with embedded icon. Runs `StartApp.bat` hidden. Built with PyInstaller from `stub_launcher.py`. This is the primary entry point — shortcuts and the installer point here. **Gitignored** — built locally by `setup.bat` on first install and rebuilt automatically by the in-app updater if it goes missing post-pull.
-- `_internal/`
-  PyInstaller onedir runtime payload that pairs with `CNA Web App.exe`. Gitignored; built alongside the exe.
-- `config.py`
-  Central runtime config, UNC paths, packaging config, log path helpers. Gitignored — generated by decrypting `config.enc`.
-- `RebuildExe.bat`
-  Installs PyInstaller if needed and rebuilds `CNA Web App.exe` + `_internal/`. Optional manual tool — no longer part of the commit workflow (setup.bat and the in-app updater handle rebuilds automatically).
-- `RebuildInstaller.bat`
-  Compiles the Inno Setup installer (`CNA-WebApp-Setup.exe`) into `installer-output/` using ISCC.exe. Falls back to TEMP output if antivirus blocks the primary path. Run before every git commit/push (best-effort — does not block if Inno Setup is not installed).
-- `repair.bat`
-  Effectively reinstalls in place. Force-kills the running launcher, resets the git tree to `origin/main` (or `HEAD` if offline), clears `__pycache__`/stale update markers, re-runs `setup.bat /silent` to rebuild launcher + venv + config as needed, and relaunches. Output is teed to `repair.log`. Triggered by the in-app **Settings > Repair App** button or runnable manually by double-clicking.
-- `setup.bat`
-  Creates `.venv`, installs dependencies, copies config key from network share, decrypts config, builds `.exe` + `_internal/` if either is missing, creates shortcut.
-- `StartApp.vbs`
-  Legacy hidden launcher wrapper. Fallback if `.exe` is unavailable.
-- `.venv/`
-  Local Python environment created by `setup.bat`.
-- `CODE - do not open/`
-  Actual app source.
+    See the commit skill for the step-by-step.
 
-Main source folder (`CODE - do not open/`):
-- `config.enc`
-  Fernet-encrypted version of `config.py`. This is the file committed to git.
-- `config.key`
-  Symmetric encryption key. Gitignored — copied from the network share during setup.
-- `config_manager.py`
-  Encrypt/decrypt tool for config.py.
-- `check_updates.py`
-  Background git update checker (once per day).
-- `stub_launcher.py`
-  Source for the PyInstaller `.exe`. Locates and runs `StartApp.bat` hidden.
-- `launch_app.py`
-  PyWebView launcher — starts Streamlit, shows loading screen, opens native window with custom icon.
-- `app.py`
-  Streamlit app shell and navigation bootstrap.
-- `startup.py`
-  Prepares daily cached personnel datasets.
-- `page_registry.py`
-  Single source of truth for pages, sections, icons, captions, quotes, and admin visibility.
-- `utils.py`
-  Shared helpers for styling, identity, logging access, parquet I/O, live activity, completed tasks, users, accounts, targets, and admin detection.
-- `app_logging.py`
-  Per-user shared log file setup.
-- `stocking_agreement_service.py`
-  Template preparation, docxtpl rendering, pricing-table population, Word-to-PDF conversion.
-- `pages/`
-  Streamlit pages.
-- `templates/stocking_agreements/`
-  Canonical Word templates used by the agreement generator.
-- `scripts/`
-  Support scripts.
-- `docs/`
-  Older internal documentation set.
+## Config encryption
 
-## 4. Launch And Runtime Flow
+`config.py` is sensitive (UNC paths, connection strings). It's encrypted in the repo as `config.enc` using Fernet (`cryptography` package).
 
-### Config encryption system
-`config.py` contains sensitive connection strings and UNC paths. It is encrypted in the repo as `config.enc` using Fernet symmetric encryption (`cryptography` package).
-
-Key files:
-- `config.enc` — encrypted config, committed to git
-- `config.key` — decryption key, gitignored, lives on the network share at `\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.key`
+- `config.enc` — committed
+- `config.key` — gitignored; lives on the network share at `\\therestaurantstore.com\920\Data\Logistics\Logistics App\config.key`
 - `CODE - do not open/config_manager.py` — encrypt/decrypt tool
 
-Workflow for ANY git commit or push (whether or not config.py was changed):
-1. Encrypt config: `.venv\Scripts\python.exe "CODE - do not open\config_manager.py" encrypt`
-2. Rebuild the installer: `RebuildInstaller.bat`
-3. Stage `config.enc` alongside your other changes (installer output and the launcher exe are gitignored)
-4. Commit and push
+See ground rule #8 for the mandatory pre-commit flow.
 
-**CRITICAL: Always run the encrypt command and installer rebuild before any git commit or push. These are mandatory steps even if the user does not ask for them. The repo is public — never commit `config.py` directly. The launcher exe is no longer committed — it's built locally by setup.bat and rebuilt automatically by the in-app updater if missing.**
+## Repair and update flows
 
-### Setup
-`setup.bat`:
-- Finds or installs `uv` (Astral's Python package manager)
-- Installs Python 3.11 via `uv python install 3.11` if not already present
-- Creates `.venv` with `uv venv --python 3.11` if missing
-- Installs dependencies from `CODE - do not open/requirements.txt` using `uv pip install --link-mode copy` (copy mode required for OneDrive compatibility)
-- Copies `config.key` from the network share if not present locally
-- Decrypts `config.enc` → `config.py`
-- Builds `CNA Web App.exe` via PyInstaller if missing (requires `pyinstaller` in venv)
-- Creates a `CNA Console.lnk` shortcut pointing to the `.exe` (falls back to `StartApp.vbs` if `.exe` is unavailable)
+**Repair** (Settings > Repair App button, or double-click `repair.bat`):
+- Force-kills the app, runs `git reset --hard origin/main` (or `HEAD` if offline), clears `__pycache__` and stale update markers, re-runs `setup.bat /silent` (which rebuilds venv / launcher / `_internal/` / config as needed), relaunches.
+- Output is teed to `repair.log`. Spawned detached via `app.py:_launch_repair()` which calls `os._exit(0)` so file handles release immediately.
+- Covers many failure modes deliberately as one button — don't split into surgical sub-options.
 
-### App launch
-`CNA Web App.exe` → `CODE - do not open/StartApp.bat` → `CODE - do not open/launch_app.py`:
-- `CNA Web App.exe` is a PyInstaller-built standalone with embedded icon. It runs `StartApp.bat` hidden (no terminal window). Because the icon is embedded in the `.exe`, Windows shows the correct icon in the taskbar, even when pinned.
-- `StartApp.bat` handles config decryption, background update check, and startup.py
-- `launch_app.py` (pywebview) handles everything else:
-  - Starts Streamlit server in background
-  - Shows a built-in loading screen while Streamlit boots
-  - Opens a native OS window (using system WebView2) with custom `cna_icon.ico` as the taskbar/window icon
-  - When the window is closed, kills the Streamlit server automatically
-- If the app is already running on port 8501, opens a new window directly to it
+**Update** (background check once per day via `check_updates.py`, or manual via Settings):
+- `git fetch` → if behind, `git pull --ff-only`. On failure, writes `.update_available` so the in-app dialog surfaces the error.
+- After successful pull, runs `uv pip install --link-mode copy -r requirements.txt` unconditionally (uv no-ops fast) so dependency changes land before reboot.
+- Also re-runs `setup.bat /silent` if `CNA Web App.exe` is missing post-pull (self-healing for the exe-untracking transition).
+- In-app "Update Available" dialog has "Update Now" (apply + restart) and "Repair App" (escape hatch when updates keep failing).
 
-### Repair system
-The **Settings > Repair App** button in the sidebar gives users a one-click recovery for broken installs. It deliberately covers many failure modes with a single action rather than offering surgical sub-options:
+## Navigation
 
-Covered failure modes:
-- Local git changes blocking pull (modify-vs-pull conflicts)
-- Missing or AV-quarantined `CNA Web App.exe` / `_internal/` / `python311.dll`
-- Corrupted venv or missing pip packages
-- Stale `config.py` out of sync with `config.enc`
-- Missing `config.key` on local disk
-- Corrupted `__pycache__` / stale `.update_available` / `.last_update_check` markers
-- User stuck on a commit that was later fixed upstream
+`page_registry.py` is the single source of truth for pages, sections, icons, captions, quotes, and admin visibility. Add/rename/reorder pages there. The home page cards and sidebar both read from it. Sections use `st.expander()` with the active section auto-expanded.
 
-Flow:
-1. User clicks **Settings > Repair App** in the sidebar.
-2. Confirmation dialog appears with a friendly description plus a "Developers: any uncommitted local changes will be discarded" note.
-3. On confirm, `app.py:_launch_repair()` spawns `repair.bat` in a detached console window and calls `os._exit(0)` so its file handles release immediately.
-4. `repair.bat` force-kills `CNA Web App.exe` (safety net for the parent launcher), waits for full exit, then:
-   - `git fetch --prune` → `git reset --hard origin/main` (or `git reset --hard HEAD` if offline)
-   - Removes all `__pycache__` directories and stale update markers
-   - Runs `setup.bat /silent` which rebuilds the venv / launcher / `_internal` / config as needed (per the SKIP_BUILD logic)
-   - Relaunches `CNA Web App.exe` and exits
-5. All console output is teed to `repair.log` at the project root so failed repairs are debuggable.
+Hidden pages (registered in `app.py` for URL routing only, not shown in sidebar):
+- `pages/da-task-tracker.py` — provides `/da-task-tracker` URL so the D&A version of the task tracker persists on refresh. It's a thin wrapper that sets `_da_page_active` in session state and exec's `task-tracker.py` with `encoding="utf-8"`.
 
-The Repair button is the same script you get from manually double-clicking `repair.bat` in Explorer — useful for support cases where the app won't start at all.
+## Standard page pattern
 
-### Update system
-- `CODE - do not open/check_updates.py` runs in background at startup (once per day)
-- If `git fetch` shows the local branch is behind origin, attempts a synchronous `git pull --ff-only`. On success, clears `.update_available`. On failure, writes `.update_available` so the in-app dialog surfaces the error.
-- `app.py` checks for the flag on every page load and shows a blocking "Update Available" dialog
-- Primary action is "Update Now" which runs `git pull --ff-only`, clears caches, and restarts
-- Secondary action is "Repair App" — same as the Settings > Repair App button, included here as an escape hatch when Update Now keeps failing (e.g., persistent merge conflict, broken upstream commit). Spawns `repair.bat` and exits the app.
-- A manual "Check for Updates" button is available in the sidebar under Settings
-- **Post-pull dependency refresh:** After a successful pull, both `check_updates.py` and `app.py:_apply_update()` run `uv pip install --link-mode copy -r requirements.txt` so any commits that add/upgrade Python dependencies land before the app boots. uv is fast on no-op installs (~1-2s) so this runs unconditionally rather than diffing the file. Best-effort and logged — if uv isn't found or the install fails, the user will see the failure in `AppLogs.log` (or the StartApp.bat log) and can recover via Settings > Repair App.
-- **Post-pull launcher rebuild:** After a successful pull, both `check_updates.py` and `app.py:_apply_update()` check whether `CNA Web App.exe` exists at the root. If not (which can happen on a clone made before the exe was gitignored — the pull deletes the previously-tracked exe), they invoke `setup.bat /silent` to rebuild it via PyInstaller before the app continues. This is the safety net that makes the exe-untracking transition self-healing.
+Every page should call:
+- `st.set_page_config(..., page_icon=utils.get_app_icon())`
+- `utils.render_app_logo()`
+- `st.markdown(utils.get_global_css(), unsafe_allow_html=True)`
+- `utils.render_page_header(PAGE_TITLE)` — title comes from `utils.get_registry_page_title(...)`
+- `utils.log_page_open_once(...)` — logger from `utils.get_page_logger(...)`
 
-### Installer
-`CODE - do not open/installer/CNA-WebApp-Setup.iss`:
-- Inno Setup script that compiles to a standalone `.exe` installer
-- Installs Git via winget if missing, clones the repo, runs `setup.bat`, copies `config.key` from network share
-- Project files install to `%LOCALAPPDATA%\CNA-WebApp`; Start Menu shortcut is created automatically
+UI font stack is Poppins (headings) + Work Sans (body), imported via the shared CSS. Don't duplicate page-local CSS unless truly one-off. Brand assets: `config.LOGO_PATH`, `utils.get_app_icon()` (returns `icon.png` for favicon), `cna_icon.ico` (Windows shortcut icon).
 
-### Force close
-`ForceCloseApp.bat`:
-- Finds the process listening on port 8501 via `netstat`
-- Kills it with `taskkill`
-- Normally not needed since `StartApp.bat` auto-stops the server when Edge closes
+## Data layout (load-bearing partition paths)
 
-### Startup job
-`CODE - do not open/startup.py`:
-- Locates the locally synced Task-Tracker / SharePoint root
-- Reads:
-  - `TasksAndTargets.xlsx` for the `Users` sheet
-  - `CNA Personnel - Temporary.xlsx` for account mappings
-- Writes:
-  - `accounts_<YYYY-MM-DD>.parquet`
-  - `users.parquet`
-- Intentionally does not regenerate `tasks.parquet`
+Storage roots are in `config.py`. The partition layouts other code depends on:
 
-## 5. Navigation Model
+- Completed tasks: `COMPLETED_TASKS_DIR / user=<user_key>/year=<YYYY>/month=<MM>/day=<DD>/*.parquet`
+- Live activity: `LIVE_ACTIVITY_DIR / user=<user_key>.parquet` (one small file per active user)
+- Archived paused: `ARCHIVED_TASKS_DIR / user=<user_key>/archive_<timestamp>_<id>.parquet`
+- Time allocation: `TIME_ALLOCATION_DIR / time_allocation_<YYYYMMDD>_<HHMMSS>_<id>.parquet` — **saving a day replaces all prior rows for the same user+date across existing export files before writing the new file**
+- FedEx results: `config.ADDRESS_VALIDATION_RESULTS_FILE` (the validator page uses `.csv`; the admin results page prefers `.parquet` with `.csv` fallback)
 
-`app.py` uses:
-- `page_registry.get_home_page()`
-- `page_registry.get_visible_sections(is_admin_user)`
-- `st.navigation(..., position="hidden")`
-- a custom sidebar built from `st.page_link`
+Schemas live in code, not here. Grep `utils.PARQUET_SCHEMA` for completed-task columns; `task-tracker.py` also defines `DA_PARQUET_SCHEMA` (adds `Department`).
 
-This means:
-- Adding, renaming, or reordering pages should go through `page_registry.py`
-- The home page cards and sidebar both depend on the same registry
-- Admin-only visibility is controlled there, but page-level access checks still matter
+LS and DA task tracker use separate directory constants (`LS_COMPLETED_TASKS_DIR` / `DA_COMPLETED_TASKS_DIR`, etc.) — see [LS vs DA differences](.claude/memory/gotchas_task_tracker_ls_vs_da.md) for the practical implications.
 
-Sidebar sections use `st.expander()` for collapsible dropdowns, with the active section auto-expanded.
+## Logging
 
-Current sections in `page_registry.py`:
-- `Admin Tools`
-- `Task Tracker`
-- `Work in Progress`
+`app_logging.py` creates one `AppLogs.log` per user under `config.LOGS_ROOT_DIR` (user folder from `config.get_log_dir_for_user()`). Use `utils.get_page_logger(...)` or `utils.get_program_logger(...)` rather than rolling your own. The admin Logging page parses these and maps user folders to full name/department via `users.parquet`.
 
-Current registered pages:
-- `pages/home.py`
-- `pages/tasks-management.py`
-- `pages/admin-logs.py`
-- `pages/fedex-address-validation-management.py`
-- `pages/task-tracker.py` (combined Logistics Support and Data & Analytics with version toggle)
-- `pages/da-task-tracker.py` (thin wrapper providing `/da-task-tracker` URL for D&A version)
-- `pages/task-tracker-analytics.py` (combined analytics with version toggle)
-- `pages/packaging-estimator.py`
-- `pages/time-allocation-tool.py`
-- `pages/fedex-address-validator.py`
-- `pages/stocking-agreement-generator.py`
+Message format: `timestamp | level | [context] message`.
 
-Hidden pages (registered in `app.py` for URL routing, not shown in sidebar):
-- `pages/da-task-tracker.py` — provides `/da-task-tracker` URL so the D&A version persists on page refresh
+## Performance conventions
 
-## 6. Shared Styling, Fonts, And UI Conventions
+Preserve these patterns when adding features:
+- `@st.cache_data` on file reads, lookups, analytics loads, Excel parsing
+- `pyarrow.dataset` for partitioned parquet reads (not per-file loops)
+- Atomic parquet writes via `utils.atomic_write_parquet(...)`
+- Selective column reads where possible
+- Avoid repeated network file reads in the main rerun path
 
-Global UI styling comes from `utils.get_global_css()`.
+## Pages index
 
-Current UI font stack:
-- Headings: `Poppins`
-- Body text: `Work Sans`
-- Both are imported from Google Fonts in the shared CSS
+Registered in `page_registry.py`; source files in `CODE - do not open/pages/`. Read the page file when you need the workflow detail.
 
-Shared UI conventions:
-- Every page usually calls:
-  - `st.set_page_config(..., page_icon=utils.get_app_icon())` — custom icon on all pages
-  - `utils.render_app_logo()`
-  - `st.markdown(utils.get_global_css(), unsafe_allow_html=True)`
-  - `utils.render_page_header(PAGE_TITLE)`
-  - `utils.log_page_open_once(...)`
-- Page titles resolve from `page_registry.py` using `utils.get_registry_page_title(...)`
-- Page quotes also come from `page_registry.py` and are rendered under the title
-- The Streamlit footer is hidden
-- Sidebar page-link text is slightly resized
-- Task tracker uses a blinking timer colon and a pulsing live-activity dot
-- Analytics KPI cards use a shared gray card style
+| Page | Purpose | Admin |
+|---|---|---|
+| `home.py` | Landing page; renders cards from the registry | no |
+| `tasks-management.py` | Task definitions, monthly targets, task log edit/delete, user list. Writes to live production parquet/CSV — verify every consumer if you change column names. | **yes** |
+| `admin-logs.py` | Per-user log viewer with filters | **yes** |
+| `fedex-address-validation-management.py` | Review/clear disputed flags on validation results | **yes** |
+| `task-tracker.py` | Combined LS + DA task timer; version toggle at top. UTC internally, Eastern for display. Excludes paused time. | no |
+| `da-task-tracker.py` | Wrapper providing `/da-task-tracker` URL for the DA version (see Navigation) | no |
+| `task-tracker-analytics.py` | Historical completed-task analytics with version toggle | no |
+| `packaging-estimator.py` | Item matching + shipping calculator API estimate | no |
+| `time-allocation-tool.py` | Per-day account/channel time entries; admin exports | no |
+| `fedex-address-validator.py` | Generate FedEx residential-fee dispute Excel + email | no |
+| `stocking-agreement-generator.py` | Renders DOCX (and optional PDF) from Word templates | no |
 
-Brand assets:
-- Logo path comes from `config.LOGO_PATH`
-- `utils.render_app_logo()` uses `st.logo(...)` when available
-- `utils.get_app_icon()` returns the path to `icon.png` (root) for use as favicon/page icon
-- `cna_icon.ico` (root) is used for the Windows shortcut icon
+**Per-page gotchas live in `.claude/memory/`** — check there before modifying a page's behavior. Notable ones: FedEx validator's "Mark as Disputed" scope, packaging estimator's config-key mismatch, time allocation's editing window, task tracker LS vs DA differences.
 
-Word template font details:
-- `stocking_agreement_service.py` uses `DEFAULT_FONT_NAME = "Sofia Pro"`
-- Default fallback size is `7 pt`
-- That font logic applies to generated Word content, not the Streamlit UI
+## Stocking agreement templates
 
-## 7. Logging Model
+- Canonical templates: `CODE - do not open/templates/stocking_agreements/{general_resupply,consumables}_template.docx`
+- `stocking_agreement_service.py` references specific table indexes (e.g. `doc.tables[3]`). **Template structure changes can break rendering even if placeholders still exist** — re-test both tabs after any edit.
+- `MIN_TEMPLATE_PRICING_ROWS = 6` (pricing rows padded for rendering).
+- Template font is `Sofia Pro` at `7 pt` default. (This applies to Word output only, not the Streamlit UI.)
+- PDF conversion uses Word COM and is optional at runtime — DOCX still downloads on failure, with a PDF warning.
+- Force a rebuild of canonical templates from legacy sources: `scripts/build_stocking_agreement_templates.py`.
 
-`app_logging.py` creates one shared log file per user:
-- Log root: `config.LOGS_ROOT_DIR`
-- Log filename: `AppLogs.log`
-- User-specific folder: `config.get_log_dir_for_user()`
+## Common changes
 
-Message format:
-- `timestamp | level | [context] message`
+- **New page**: create the file following the standard page pattern (above), register in `page_registry.py`, set `admin_only=True` if needed AND enforce access in the page.
+- **Nav labels/icons/captions/quotes**: edit `page_registry.py`. Don't hardcode titles elsewhere.
+- **Shared visual styling**: edit `utils.get_global_css()`.
+- **New field on task records**: update `utils.PARQUET_SCHEMA`, `build_task_record(...)`, then task-log loaders/editors and analytics loaders if relevant. Verify older parquet files still load gracefully.
 
-Most pages create loggers through:
-- `utils.get_page_logger(page_name)`
-- `utils.get_program_logger(source_file, context_name)`
+## Files worth reading first
 
-Admin review page:
-- `pages/admin-logs.py` loads all user log files under the logs root
-- Maps logins to full names and departments via `users.parquet`
-- Supports filters for date, department, user, and page
-
-## 8. Data Storage And Schemas
-
-Important configured storage locations in `config.py`:
-- `COMPLETED_TASKS_DIR`
-- `LIVE_ACTIVITY_DIR`
-- `ARCHIVED_TASKS_DIR`
-- `PERSONNEL_DIR`
-- `TIME_ALLOCATION_DIR`
-- `ADDRESS_VALIDATION_RESULTS_FILE`
-- `TASK_TARGETS_CSV_PATH`
-
-### Completed task records
-Written by the Task Tracker page.
-
-Partition layout:
-- `user=<user_key>/year=<YYYY>/month=<MM>/day=<DD>/*.parquet`
-
-Primary schema in `utils.PARQUET_SCHEMA`:
-- `TaskID`
-- `UserLogin`
-- `FullName`
-- `TaskName`
-- `TaskCadence`
-- `CompanyGroup`
-- `IsCoveringFor`
-- `CoveringFor`
-- `Notes`
-- `PartiallyComplete`
-- `StartTimestampUTC`
-- `EndTimestampUTC`
-- `DurationSeconds`
-- `UploadTimestampUTC`
-- `AppVersion`
-
-### Live activity
-One tiny parquet file per active user:
-- `LIVE_ACTIVITY_DIR/user=<user_key>.parquet`
-
-Used to restore session state and show who is currently working on what.
-
-### Archived paused tasks
-One parquet per archived paused timer:
-- `ARCHIVED_TASKS_DIR/user=<user_key>/archive_<timestamp>_<id>.parquet`
-
-### Personnel data
-Produced mostly by `startup.py`:
-- `accounts_<YYYY-MM-DD>.parquet`
-- `users.parquet`
-- `tasks.parquet`
-- `taskstargets.csv`
-
-### Time allocation exports
-One parquet per save event:
-- `time_allocation_<YYYYMMDD>_<HHMMSS>_<id>.parquet`
-
-Behavior note:
-- saving a day replaces all existing entries for the same user and date across export files before writing the new file
-
-### FedEx validation results
-Base configured file:
-- `config.ADDRESS_VALIDATION_RESULTS_FILE`
-
-Pages use:
-- `.csv` for the main validator page
-- `.parquet` preferred, with `.csv` fallback, for the admin results-management page
-
-## 9. Shared Utility Layer
-
-`utils.py` is the main internal platform layer.
-
-Important responsibilities:
-- Time helpers:
-  - UTC/Eastern conversion
-  - `HH:MM` and `HH:MM:SS` parsing/formatting
-  - relative "time ago" formatting
-- Identity:
-  - current OS user
-  - login normalization
-  - department lookup
-  - admin detection from `users.parquet`
-- Styling:
-  - global CSS
-  - page headers
-  - logo rendering
-- Safe parquet writes:
-  - `atomic_write_parquet(...)`
-- Task storage:
-  - `build_out_dir(...)`
-  - completed task loaders
-  - analytics loaders
-- Live activity:
-  - save/update/load/delete helpers
-- Archived tasks:
-  - save/load/delete helpers
-- Metadata:
-  - active tasks
-  - account list
-  - full-name maps
-- Target computation:
-  - `compute_monthly_task_targets(...)`
-  - `sync_tasks_parquet_targets(...)`
-  - `save_task_target(...)`
-
-Important performance choices in `utils.py`:
-- `@st.cache_data` on most read-heavy functions
-- `pyarrow.dataset` for partitioned parquet reads
-- selective column reads where possible
-- atomic temp-file replacement for writes
-
-When changing persistence logic, preserve these patterns.
-
-## 10. Page-By-Page Behavior
-
-### Home (`pages/home.py`)
-
-Purpose:
-- Landing page for the suite
-
-What it does:
-- Resolves visible sections through `page_registry.py`
-- Renders simple navigation cards in two-column rows
-- Reuses shared page header and styling
-
-Notes:
-- This page is intentionally lightweight
-- If you add a page to the registry, it will appear here automatically if visible
-
-### Management (`pages/tasks-management.py`)
-
-Purpose:
-- Admin-only control center for task definitions, monthly targets, submitted task logs, and users
-
-Top-level tabs:
-- `Logistics - Support`
-- `Project Services` (currently placeholder only)
-- `General`
-
-Logistics tabs:
-- `Task Definition`
-- `Task Targets`
-- `Task Log`
-
-General tab:
-- `Users`
-
-Task Definition behavior:
-- Loads `tasks.parquet`
-- Normalizes columns such as `TaskName`, `TaskCadence`, `IsActive`
-- Allows filtering by task name and cadence
-- Supports row selection for deletion
-- Supports adding a task name + cadence
-- Uses a confirmation dialog before overwriting `tasks.parquet`
-
-Task Targets behavior:
-- Loads `taskstargets.csv`
-- Filters by year and month
-- Allows editing only the `Target` column for existing rows
-- Includes an "Add Target" form
-- Computes default targets using:
-  - number of assigned users
-  - cadence
-  - business days / approximate weeks
-- Saves through `utils.save_task_target(...)`
-
-Task Log behavior:
-- Reads all completed-task parquet files
-- Allows filtering by date range, task, user, and notes
-- Allows editing:
-  - `Duration`
-  - `Notes`
-- Supports row deletion with confirmation
-- Persists edits back to original source parquet files
-
-Users behavior:
-- Reads `users.parquet`
-- Supports search, department filter, admin-status filter
-- Read-only display
-
-Change risk notes:
-- This page writes back into live production parquet and CSV files
-- If you change column names or write logic, verify every consuming page
-
-### Logging (`pages/admin-logs.py`)
-
-Purpose:
-- Admin-only log viewer
-
-What it does:
-- Reads per-user `AppLogs.log` files
-- Parses lines with regex
-- Maps user folders to full name and department
-- Filters by date, department, user, and page
-- Shows parsed log entries in a dataframe
-
-### FedEx Validator Results (`pages/fedex-address-validation-management.py`)
-
-Purpose:
-- Admin-only review and cleanup page for validation results
-
-What it does:
-- Prefers `results.parquet`, falls back to `results.csv`
-- Detects the disputed flag column with alias matching
-- Filters by:
-  - disputed state
-  - classification
-  - service type
-  - residential match
-- Lets admin select rows and clear the disputed flag
-
-Key behavior:
-- It preserves source row IDs while filtering so writes map back to the original dataframe correctly
-
-### Task Tracker (`pages/task-tracker.py` and `pages/da-task-tracker.py`)
-
-Purpose:
-- Main day-to-day task timing page, combining Logistics Support and Data & Analytics versions
-
-Architecture:
-- Both versions live in `task-tracker.py` with a version toggle at the top
-- LS session state keys are unprefixed; DA keys are prefixed with `da_`
-- `da-task-tracker.py` is a thin wrapper that sets `_da_page_active` in session state and exec's `task-tracker.py` (with `encoding="utf-8"`)
-- Version toggle buttons use `st.switch_page()` to navigate between `/task-tracker` (LS) and `/da-task-tracker` (DA)
-- The version is determined on each render from which page file is active, not from persistent session state
-
-What it does:
-- Loads:
-  - current user and full name
-  - covering-for user list from `users.parquet` (LS) or primary stakeholder text input (DA)
-  - accounts from daily accounts parquet
-  - active tasks from `tasks.parquet` (LS) or free-text task input (DA)
-  - department dropdown (DA only)
-- Supports timer states:
-  - idle
-  - running
-  - paused
-  - ended
-- Supports actions:
-  - start
-  - pause
-  - resume
-  - end
-  - archive paused task
-  - upload completed task
-  - reset
-- Lets the user mark a task partially complete
-- Broadcasts live activity in near real time through a per-user parquet file
-- Restores an in-progress session from the live-activity file on refresh
-- Shows:
-  - other users' live activity
-  - today's completed activity
-
-DA-specific features:
-- Today's Activity uses `st.data_editor` with a Delete checkbox column for deleting own tasks
-- Partially complete tasks can be resumed: selecting one and clicking "Resume task" deletes the old entry and pre-populates all fields (task name, account, stakeholder, department, notes)
-- Resume only available when tracker is idle, task is own, and task is marked partially complete
-- DA parquet schema includes a `Department` column (defined as `DA_PARQUET_SCHEMA`)
-
-Timing behavior:
-- Uses UTC internally
-- Displays Eastern time to users
-- Excludes paused time from elapsed duration
-- Allows duration override before final upload
-
-Live updates:
-- `st.fragment(run_every=30)` for the team live-activity table
-- `streamlit_autorefresh` for the running timer display every 10 seconds
-
-Persistence behavior:
-- Completed uploads write one parquet file into the partitioned completed-task lake
-- LS upload also attempts `utils.sync_tasks_parquet_targets()` (DA does not)
-- Archived tasks go into a separate per-user archive folder
-- LS and DA use separate directory constants (`LS_COMPLETED_TASKS_DIR` / `DA_COMPLETED_TASKS_DIR`, etc.)
-
-### Tasks Analytics (`pages/task-tracker-analytics.py`)
-
-Purpose:
-- Historical performance view for completed tasks
-
-What it does:
-- Uses `utils.get_user_context()` for access
-- Loads analytics-ready completed task history
-- Filters by:
-  - user
-  - task
-  - cadence
-  - partial-completion inclusion
-  - date range
-- Displays:
-  - total tasks
-  - total time
-  - average time per task
-  - tasks per day line chart
-  - total hours by cadence
-  - top 10 tasks by total hours
-
-Implementation notes:
-- Uses Altair
-- Expects at least the analytics columns produced by `utils.load_completed_tasks_for_analytics(...)`
-
-### Packaging Estimator (`pages/packaging-estimator.py`)
-
-Purpose:
-- Match uploaded items to internal item-info data and estimate shipping / package outcomes using the shipping calculator API
-
-High-level workflow:
-1. User provides items via upload or pasted tab-separated rows
-2. Page normalizes and validates item numbers and quantities
-3. Duplicate items are aggregated
-4. Item numbers are matched against the configured item-info parquet
-5. Results are split into warehouse-sourced vs drop-ship reference tables
-6. User selects a shipping destination
-7. Page builds a shipping calculator payload and calls the API
-8. Response is summarized into origin cards, item detail, and package allocation detail
-
-Input modes:
-- Upload file
-  - Excel or CSV
-  - sheet selection for Excel
-  - header-row detection / override
-  - user maps item and quantity columns
-- Paste from Excel
-  - expects `ItemNumber<TAB>Quantity`
-
-Validation behavior:
-- Blank or invalid rows are rejected
-- Quantities must parse as integers greater than zero
-- Duplicate item numbers are aggregated
-
-Reference-data behavior:
-- Item info comes from `config.PACKAGING_CONFIG["item_info"]["parquet_path"]`
-- Warehouse lookup comes from `config.PACKAGING_CONFIG["warehouses"]["path"]`
-
-Special shipping features:
-- perishable overrides per item
-- destination can be:
-  - one of company warehouses
-  - a manually entered address
-- shipping request options include:
-  - `HasLiftGate`
-  - `ForceCommonCarrier`
-  - `ExcludeLiftGateFee`
-  - `BypassMatrix`
-
-API behavior:
-- Payload is built in `build_shipping_calculator_payload(...)`
-- API POST is done with `urllib.request`
-- response parsing extracts shipping source candidates, methods, packages, origins, costs, and package allocation estimates
-
-What the UI shows:
-- requested / matched / unmatched outcomes
-- warehouse-sourced item table
-- drop-ship item table
-- shipping destination controls
-- shipping calculator overview cards by origin
-- detailed items shipping from each origin
-- request payload and response body expander
-- package allocation detail table
-
-Important caveat:
-- `pages/packaging-estimator.py` reads runtime API settings from a `shipping_calculator_api` section
-- `config.py` currently defines packaging transport settings under `PACKAGING_CONFIG["api"]`
-- because of that mismatch, some config values may fall back to hardcoded defaults unless both sides are aligned
-
-Legacy note:
-- `CODE - do not open/config.json` appears to be legacy packaging config and is not the current source of truth
-- the bottom of the page also contains commented "legacy packager reference" code
-
-### Time Allocation Tool (`pages/time-allocation-tool.py`)
-
-Purpose:
-- Capture account-level time allocation by day and export saved results
-
-Main behavior:
-- Auto-detects:
-  - current login
-  - full name
-  - department
-- Loads the Reporting Name / Customer Code lookup from the daily accounts parquet
-  via `utils.load_account_lookup(...)` (built from the `Reporting Name` and
-  `CustomerCode` columns the startup job extracts from `CNA Personnel`)
-- Shows a clickable calendar (`streamlit-calendar`) with three views: This Week
-  (default, Mon–Fri of the current week), Last Week (Mon–Fri of the previous
-  week), and This Period (the whole fiscal period)
-- Editing window: entries can be added/edited only for days in This Week or
-  Last Week (`_editable_window()` / `_is_editable_day()`); the This Period view
-  is a read-only overview. Admins bypass this on the Input tab; the admin
-  Edit Entries table can change any date. There is no grace-period buffer.
-- Each input row pairs a Reporting Name dropdown with a Customer Code dropdown
-  that autofill each other (multiple codes per name -> first code alphabetically)
-- Time per row is entered with Hour (0-12) and Minute (00/15/30/45) dropdowns
-- Channel dropdown order: `CHANNEL_OPTIONS`' fixed defined order until 50+ total
-  saved channel selections, then sorted by usage frequency; new rows default to
-  the first option (Resupply by default, or the most-used once the frequency
-  sort kicks in)
-- Confirms before saving
-- Writes one parquet file per save
-- Replaces prior rows for the same user and date across existing export files
-
-Data schema:
-- `Entry Date`
-- `User`
-- `Full Name`
-- `Department`
-- `Account` (Reporting Name)
-- `Customer Code`
-- `Time`
-- `Channel`
-
-Channels:
-- `Projects`
-- `Resupply`
-
-Admin exports tab:
-- date range filter (defaults: From = start of the most recent fiscal year, To = today)
-- user filter
-- department filter
-- table display
-- CSV download
-
-Admin Settings tab has the custom entry-field editor and an editable
-"Edit Entries" data editor (same date defaults as exports); editing Reporting
-Name or Customer Code there autofills the pair.
-
-### FedEx Address Validator (`pages/fedex-address-validator.py`)
-
-Purpose:
-- Review address-validation results that likely justify residential-fee disputes with FedEx
-
-What it does:
-- Loads the configured `results.csv`
-- Normalizes invoice dates and tracking numbers
-- Automatically filters to:
-  - non-disputed rows
-  - residential-match statuses needing review (`mismatch`, `mixed`)
-- Removes noisy columns for display
-- Supports filters for:
-  - residential match
-  - classification
-  - service type
-  - invoice date range
-- Shows metrics:
-  - order count
-  - total dispute amount
-- Provides actions on currently visible rows:
-  - generate dispute Excel file
-  - open email draft to FedEx
-  - mark displayed rows as disputed
-
-Important behavior:
-- "Mark as Disputed" acts on all currently visible rows, not a manually selected subset
-- source row identity is preserved through `__source_row_id`
-- Excel generation uses `openpyxl` to format currency columns
-- Email flow prefers default mail handler, then tries Outlook COM automation
-
-### Stocking Agreement Generator (`pages/stocking-agreement-generator.py`)
-
-Purpose:
-- Generate Word and PDF agreement documents from app-managed templates
-
-Tabs:
-- `General Resupply`
-- `Consumables`
-
-General Resupply workflow:
-- collects project, account, client, executive summary
-- collects pricing rows with EA Sell and Qty
-- computes item subtotal, freight + tax, total order
-- collects project details, timeline, documentation requirements, add-on services, and term overrides
-- renders a Word agreement and optionally a PDF
-
-Consumables workflow:
-- collects project, account, order type
-- item summary and purpose
-- optional consolidated-order-specific fields
-- pricing rows
-- timeline and billing information
-- renders a Word agreement and optionally a PDF
-
-Template service details:
-- `stocking_agreement_service.ensure_templates_ready()` guarantees canonical template files exist
-- rendering uses `docxtpl`
-- final pricing rows are also injected by direct table-row replacement after template rendering
-- PDF conversion uses Microsoft Word COM automation
-
-Canonical templates:
-- `CODE - do not open/templates/stocking_agreements/general_resupply_template.docx`
-- `CODE - do not open/templates/stocking_agreements/consumables_template.docx`
-
-Template maintenance notes:
-- the service can rebuild canonical templates from legacy source templates if they exist
-- `scripts/build_stocking_agreement_templates.py` forces a rebuild
-- `_cleanup_legacy_template_files()` removes old source/temp artifacts after canonical templates are ready
-
-## 11. Template Details
-
-The agreement generator is more complex than a normal form page, so here are the practical rules:
-
-1. Canonical template files are the real runtime assets.
-   The app expects the two `.docx` files in `templates/stocking_agreements/`.
-
-2. Table indexes matter.
-   The service references specific Word table positions like `doc.tables[3]`, `doc.tables[5]`, etc. Template structure changes can break rendering even if placeholders still exist.
-
-3. Pricing rows are padded for template rendering.
-   `MIN_TEMPLATE_PRICING_ROWS = 6`.
-
-4. PDF generation is optional at runtime.
-   If Word COM automation fails, the DOCX still downloads and the page shows a PDF warning instead of hard failing.
-
-5. Placeholder and paragraph matching are literal-ish.
-   Functions like `_replace_first_paragraph_containing(...)` depend on recognizable source text.
-
-## 12. Performance And Efficiency Focus
-
-The project is intentionally optimized for internal operational speed more than framework purity.
-
-Current efficiency patterns:
-- `@st.cache_data` on file reads, lookup tables, analytics loads, Excel parsing, and warehouse metadata
-- `pyarrow.dataset` for large partitioned parquet reads instead of manual per-file loops when possible
-- atomic parquet writes via temp file + replace
-- small single-user live-activity files instead of a large shared state table
-- startup precomputes accounts and users to avoid repeated Excel reads at app runtime
-- completed tasks are partitioned by user and date to limit read scope
-- task tracker recent activity reads only today's partition
-- analytics loader reads only columns needed by that page
-- packaging input is normalized and aggregated before any heavy lookup or API call
-
-When adding features, try to preserve this style:
-- cache reads
-- write atomically
-- minimize columns
-- minimize scan scope
-- avoid repeated network file reads in the main rerun path
-
-## 13. Known Quirks And Gotchas
-
-1. `config.py` is gitignored. It is generated at runtime by decrypting `config.enc`.
-   The repo is public so `config.py` must never be committed. If you change `config.py`, encrypt it first (see section 2, rule 8).
-
-2. `config.json` is effectively legacy.
-   Do not assume packaging settings come from there.
-
-3. `scripts/validate_lake.py` looks stale.
-   It references older schema names such as `UserName` instead of `UserLogin`.
-
-4. The packaging page contains more helper infrastructure than the visible UI currently exposes.
-   There are simulation and recommendation helpers that appear ready for extension, but the present workflow centers on `Load Items` and `Run Estimate`.
-
-5. The app assumes Windows.
-   Batch files, Outlook automation, and Word-to-PDF conversion are Windows-specific.
-
-6. Shared-path access is not optional.
-   Many pages will appear broken if the UNC paths or synced SharePoint data are unavailable.
-
-## 14. How To Make Common Changes Safely
-
-### Add a new page
-1. Create `CODE - do not open/pages/<new-page>.py`
-2. Follow the standard page pattern:
-   - `st.set_page_config(..., page_icon=utils.get_app_icon())`
-   - `utils.render_app_logo()`
-   - `st.markdown(utils.get_global_css(), unsafe_allow_html=True)`
-   - `utils.render_page_header(PAGE_TITLE)`
-   - `LOGGER = utils.get_page_logger(...)`
-3. Register it in `page_registry.py`
-4. If admin-only, set `admin_only=True`
-5. Add the correct page-level permission check inside the page too
-
-### Change navigation labels, icons, captions, or quotes
-- Edit `page_registry.py`
-- Do not hardcode duplicate titles across pages if the registry is already the source of truth
-
-### Change shared visual styling
-- Prefer `utils.get_global_css()`
-- Avoid page-by-page CSS duplication unless the page truly needs a custom one-off treatment
-
-### Add a new persisted field to task records
-1. Update `utils.PARQUET_SCHEMA`
-2. Update `build_task_record(...)`
-3. Update task-log loaders and editors if the field should be visible/admin-editable
-4. Update analytics loaders if the field matters there
-5. Verify older parquet files still load gracefully
-
-### Change admin permissions
-- The current admin source of truth is `users.parquet`
-- `utils.is_user_admin(...)` looks for flexible aliases and role-like columns
-- Keep alias tolerance unless you are also locking the upstream schema
-
-### Change stocking agreement templates
-1. Preserve table ordering unless you also update `stocking_agreement_service.py`
-2. Preserve or intentionally update placeholder text / paragraph anchors
-3. Re-test both General Resupply and Consumables
-4. Re-test DOCX and PDF generation
-
-## 15. Manual Test Checklist
-
-There are no obvious automated tests in this repo, so use manual smoke tests after meaningful edits.
-
-Baseline checks:
-- `setup.bat` still installs successfully
-- `StartApp.bat` still launches the app
-- home page navigation still works
-- page titles and quotes still render correctly
-- logs still write to the expected user folder
-
-Task workflow checks:
-- task tracker start / pause / resume / end / upload works
-- live activity appears and clears correctly
-- archived paused task can be resumed and deleted
-- analytics still loads historical data
-
-Admin workflow checks:
-- management page loads tasks, targets, users, and task log
-- task definition updates persist
-- task target edits persist
-- task log edits and deletes persist correctly
-- admin logs page still parses log lines
-
-Packaging checks:
-- upload mode works for Excel and CSV
-- paste mode still parses tab-separated rows
-- unmatched items are reported
-- destination selection works
-- estimate runs and response renderers do not crash
-
-FedEx checks:
-- validator filters still work
-- dispute file generates
-- email draft flow still opens
-- mark disputed / clear disputed workflows still persist
-
-Agreement checks:
-- both tabs generate DOCX
-- PDF either generates or fails gracefully with warning
-
-## 16. Quick Reference: Best Files To Read First
-
-If you need to understand or change the app quickly, start here:
-- `config.py`
+- `config.py` (decrypt locally if needed)
 - `CODE - do not open/app.py`
 - `CODE - do not open/page_registry.py`
 - `CODE - do not open/utils.py`
 - `CODE - do not open/pages/task-tracker.py`
 - `CODE - do not open/pages/tasks-management.py`
-- `CODE - do not open/pages/packaging-estimator.py`
 - `CODE - do not open/stocking_agreement_service.py`
 
-## 17. Bottom Line
+## Manual test checklist
 
-This project is not a generic website. It is an internal operations app built around shared parquet data, UNC paths, Streamlit reruns, and a handful of critical workflows that people likely use every day.
-
-The safest way to modify it is:
-- keep navigation centralized in `page_registry.py`
-- keep styling centralized in `utils.py`
-- preserve parquet schemas and write paths
-- clear caches after writes
-- verify each affected page manually
-- be especially careful with `tasks.parquet`, `users.parquet`, `taskstargets.csv`, and the Word templates
+After meaningful edits, run the relevant smoke tests in `.claude/memory/manual_test_checklist.md` — there are no automated tests in this repo.

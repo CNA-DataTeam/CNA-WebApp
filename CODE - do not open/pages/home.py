@@ -33,9 +33,10 @@ if "_home_render_logged" not in st.session_state:
 if "_home_sections_logged" not in st.session_state:
     st.session_state._home_sections_logged = True
     section_parts: list[str] = []
-    for section_name, entries in page_registry.get_visible_sections(IS_ADMIN_USER):
+    for section_name, dept_buckets in page_registry.get_visible_sections(IS_ADMIN_USER):
         key = "".join(ch if ch.isalnum() else "_" for ch in section_name.strip().lower()).strip("_")
-        section_parts.append(f"{key}={len(entries)}")
+        total = sum(len(entries) for _, entries in dept_buckets)
+        section_parts.append(f"{key}={total}")
     LOGGER.info("Sections available | %s", " ".join(section_parts))
 
 # ============================================================
@@ -91,6 +92,10 @@ st.markdown(
         margin: 0 !important;
         font-size: clamp(1.4rem, 2.4vw, 1.9rem);
     }
+    /* Department sub-header between the function heading and its card grid. */
+    .cna-home-dept {
+        margin: 18px 0 6px 0;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -99,52 +104,54 @@ st.markdown(
 # ============================================================
 # APPLICATION CARDS (REAL NAVIGATION)
 # ============================================================
-def render_nav_card(column, page_path: str, label: str, icon: str, caption: str) -> None:
+def render_nav_card(column, entry: page_registry.PageEntry) -> None:
     with column:
         with st.container(border=True):
+            if entry.beta:
+                # Anchored top-right corner of the bordered card via absolute
+                # positioning. See .cna-home-card-badge in get_global_css.
+                st.markdown(
+                    '<span class="cna-home-card-badge">BETA</span>',
+                    unsafe_allow_html=True,
+                )
             st.page_link(
-                page_path,
-                label=label,
-                icon=icon,
+                entry.path,
+                label=f"**{entry.title}**",
+                icon=entry.icon,
             )
-            st.caption(caption)
+            st.caption(entry.caption)
+
+
+def _render_card_grid(entries: list[page_registry.PageEntry]) -> None:
+    """Lay out cards in a 2-column grid, filling left-to-right."""
+    for row_start in range(0, len(entries), 2):
+        col1, col2 = st.columns(2)
+        render_nav_card(col1, entries[row_start])
+        right_idx = row_start + 1
+        if right_idx < len(entries):
+            render_nav_card(col2, entries[right_idx])
+        else:
+            with col2:
+                st.empty()
 
 
 visible_sections = page_registry.get_visible_sections(IS_ADMIN_USER)
-for section_idx, (section_name, entries) in enumerate(visible_sections):
+for section_idx, (function_name, dept_buckets) in enumerate(visible_sections):
     st.markdown(
         f"""
         <div class="cna-section-head">
-            <div class="cna-eyebrow"><span class="dot"></span>Section {section_idx + 1:02d}</div>
-            <h2>{section_name}</h2>
+            <h2>{function_name}</h2>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    for row_start in range(0, len(entries), 2):
-        col1, col2 = st.columns(2)
-        left_entry = entries[row_start]
-        render_nav_card(
-            col1,
-            left_entry.path,
-            f"**{left_entry.title}**",
-            left_entry.icon,
-            left_entry.caption,
-        )
-
-        right_idx = row_start + 1
-        if right_idx < len(entries):
-            right_entry = entries[right_idx]
-            render_nav_card(
-                col2,
-                right_entry.path,
-                f"**{right_entry.title}**",
-                right_entry.icon,
-                right_entry.caption,
+    for dept_name, entries in dept_buckets:
+        if dept_name:
+            st.markdown(
+                f'<div class="cna-home-dept"><div class="cna-eyebrow"><span class="dot"></span>{dept_name}</div></div>',
+                unsafe_allow_html=True,
             )
-        else:
-            with col2:
-                st.empty()
+        _render_card_grid(entries)
 
     if section_idx < len(visible_sections) - 1:
         st.divider()

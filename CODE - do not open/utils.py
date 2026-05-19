@@ -370,10 +370,59 @@ def get_global_css() -> str:
     [data-testid="stToolbar"] button[data-testid="stBaseButton-header"]:last-of-type {
         display: none !important;
     }
-    /* Sidebar navigation sizing */
-    [data-testid="stSidebar"] [data-testid="stPageLink"] p,
-    [data-testid="stSidebar"] [data-testid="stPageLink"] span {
-        font-size: 0.92rem !important;
+    /* Sidebar page-link text — force Work Sans / 0.85rem on every descendant
+       (a, p, span, div). Streamlit's default Source Sans font was leaking
+       through because the existing `p, span` selectors didn't cover every
+       possible text-bearing element inside stPageLink's anchor. The
+       blanket override here is the only reliable way to make Streamlit
+       links match the HTML .cna-link-title rendering exactly. */
+    [data-testid="stSidebar"] [data-testid="stPageLink"],
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a,
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a p,
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a span,
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a div {
+        font-family: var(--cna-body) !important;
+        font-size: 0.85rem !important;
+        font-weight: 400 !important;
+    }
+    /* Sidebar Function pills — top-row tabs that switch which Function's
+       Departments are visible below. Compact and full-width so the three
+       options (Admin / Tools / Reports) fit cleanly. */
+    [data-testid="stSidebar"] [data-testid="stPills"] {
+        margin: 4px 0 12px 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPills"] [role="radiogroup"],
+    [data-testid="stSidebar"] [data-testid="stPills"] > div {
+        gap: 4px !important;
+        flex-wrap: wrap !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPills"] label,
+    [data-testid="stSidebar"] [data-testid="stPills"] button {
+        font-size: 0.78rem !important;
+        padding: 3px 10px !important;
+        min-height: 28px !important;
+    }
+    /* Sidebar page-link spacing — give the leading icon/emoji breathing room
+       from the page title. Collapses any genuinely empty icon slots (e.g.,
+       links that don't pass an icon) so they don't reserve unused space. */
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a {
+        gap: 10px !important;
+        padding-left: 4px !important;
+        padding-right: 4px !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a > span:empty,
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a > div:empty {
+        display: none !important;
+        width: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stPageLink"] p {
+        width: 100% !important;
+        max-width: none !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
     }
     /* Tighten sidebar page links inside expanders */
     [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stPageLink"] {
@@ -381,37 +430,106 @@ def get_global_css() -> str:
         padding-bottom: 0 !important;
         min-height: unset !important;
     }
+    /* Slightly smaller text for page links inside dept dropdowns so they
+       read as sub-items below the Function pills + dept header. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stPageLink"] p,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stPageLink"] span {
+        font-size: 0.83rem !important;
+    }
     [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stVerticalBlock"] {
         gap: 16px !important;
     }
     [data-testid="stSidebar"] [data-testid="stExpanderDetails"] {
+        padding-left: 0 !important;
+        padding-right: 0 !important;
         padding-bottom: 0 !important;
         margin-bottom: 10px !important;
+    }
+    /* Small left indent on page titles inside dept dropdowns so they sit
+       ~10px in from the dropdown container edge instead of flush left. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stPageLink"] a {
+        padding-left: 10px !important;
+        margin-left: 0 !important;
     }
     [data-testid="stSidebar"] [data-testid="stExpander"] .stElementContainer {
         margin-bottom: 0 !important;
         padding: 0 !important;
     }
-    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child [data-testid="stVerticalBlock"] {
+    /* Pin column (first child) — collapse its inner vertical block so the
+       pin SVG + invisible-button-overlay sit tight against the row baseline
+       without inflating the row height. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:first-child [data-testid="stVerticalBlock"] {
         gap: 0 !important;
-        height: 20px !important;
+        height: 22px !important;
         overflow: visible !important;
     }
-    /* Thin dividers between page rows inside expanders */
-    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] > div {
-        position: relative !important;
-    }
-    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] > div::before {
-        content: "" !important;
-        position: absolute !important;
-        top: -12px !important;
-        left: 0 !important;
-        right: 0 !important;
+    /* Page-row dividers — drawn as a real HTML <div class="cna-row-divider">
+       rendered inside each row's st.markdown call (except the first row in
+       its group). Replaces the previous wrapper-targeting ::before rule so
+       the divider is part of the HTML we fully control. Full-width inside
+       the edge-to-edge dropdown. */
+    [data-testid="stSidebar"] .cna-row-divider {
         height: 1px !important;
-        background: var(--cna-sky) !important;
+        background-color: var(--cna-rule-soft) !important;
+        margin: 0 !important;
     }
-    [data-testid="stSidebar"] [data-testid="stExpanderDetails"] > [data-testid="stVerticalBlock"] > div:first-child::before {
+    /* Nested (Department) expanders inside the sidebar — strip the inner
+       border, background, and padding so they read as sub-sections inside
+       the outer Function expander rather than as boxes-in-boxes. The summary
+       (clickable header with the dept name) and its expand/collapse caret
+       stay; only the surrounding chrome is removed. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpander"] {
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+        padding: 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpander"] details {
+        border: none !important;
+        background: transparent !important;
+        box-shadow: none !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpander"] summary {
+        border: none !important;
+        background: transparent !important;
+        padding-left: 0 !important;
+        padding-right: 0 !important;
+    }
+    /* Suppress the row-divider hairline at the top of a nested expander —
+       the outer rule draws a line before every direct child of the outer
+       stVerticalBlock, but the dept header shouldn't read as just another
+       page row. */
+    [data-testid="stSidebar"] [data-testid="stExpanderDetails"]
+        > [data-testid="stVerticalBlock"]
+        > div:has(> [data-testid="stExpander"])::before {
         display: none !important;
+    }
+    /* Suppress the row-divider hairline between page rows inside a nested
+       dept expander. Only the outer Function expander uses these dividers. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpander"]
+        [data-testid="stExpanderDetails"]
+        > [data-testid="stVerticalBlock"]
+        > div::before {
+        display: none !important;
+    }
+    /* Strip the left indent from page rows inside a nested dept expander.
+       Streamlit indents stExpanderDetails by default; nested, that compounds
+       and pushes inner links visibly to the right of the outer ones. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpander"]
+        [data-testid="stExpanderDetails"] {
+        padding-left: 0 !important;
+        margin-left: 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpander"]
+        [data-testid="stExpanderDetails"]
+        > [data-testid="stVerticalBlock"] {
+        padding-left: 0 !important;
+        margin-left: 0 !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpander"]
+        [data-testid="stPageLink"] a {
+        padding-left: 0 !important;
+        margin-left: 0 !important;
     }
     /* Sidebar page link icons — nudge up to align with text */
     [data-testid="stSidebar"] [data-testid="stPageLink"] [data-testid="stIconMaterial"],
@@ -419,42 +537,52 @@ def get_global_css() -> str:
         position: relative !important;
         top: -1px !important;
     }
-    /* Favorite star: hover toggle and positioning */
-    .star-toggle {
+    /* Favorite pin: hover toggle and positioning. Pin lives in the FIRST
+       column of each dept-dropdown page row; clicking anywhere in that
+       column toggles the page's favorite state via an invisible button
+       overlay. */
+    .cna-pin-toggle {
         position: relative !important;
-        top: -2px !important;
-        width: 20px !important;
-        height: 34px !important;
+        top: -4px !important;
+        margin-left: 8px !important;
+        width: 18px !important;
+        height: 28px !important;
         pointer-events: none !important;
+        display: flex !important;
+        align-items: center !important;
     }
-    .star-toggle img {
+    .cna-pin-toggle .cna-pin-default,
+    .cna-pin-toggle .cna-pin-hover {
         position: absolute !important;
-        top: 0 !important;
+        top: 50% !important;
         left: 0 !important;
+        transform: translateY(-50%) !important;
+        line-height: 0 !important;
     }
-    .star-toggle .star-hover {
+    .cna-pin-toggle .cna-pin-hover {
         visibility: hidden !important;
     }
-    /* Hover on the parent COLUMN (not .star-toggle) because the invisible
-       button sits on top with z-index and intercepts all pointer events.
-       Hovering the button still bubbles :hover up to the column ancestor. */
-    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child:hover .star-default {
+    /* Hover on the parent COLUMN (not the pin) because the invisible button
+       sits on top with z-index and intercepts all pointer events. Hovering
+       the button still bubbles :hover up to the column ancestor. The pin
+       column is the FIRST column in each row. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:first-child:hover .cna-pin-default {
         visibility: hidden !important;
     }
-    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child:hover .star-hover {
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:first-child:hover .cna-pin-hover {
         visibility: visible !important;
     }
-    /* Favorite star: column is the positioned ancestor for the absolute button */
-    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child {
+    /* Favorite pin: column is the positioned ancestor for the absolute button */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:first-child {
         position: relative !important;
     }
-    /* Reset all intermediate wrapper divs so position:absolute on the button
+    /* Reset intermediate wrapper divs so position:absolute on the button
        anchors to the column, not a nested Streamlit container. */
-    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child div {
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:first-child div {
         position: static !important;
     }
-    /* Invisible button covers the full column area for click capture. */
-    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:last-child [data-testid="stBaseButton-tertiary"] {
+    /* Invisible button covers the full pin column for click capture. */
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stColumn"]:first-child [data-testid="stBaseButton-tertiary"] {
         position: absolute !important;
         inset: 0 !important;
         opacity: 0 !important;
@@ -490,17 +618,28 @@ def get_global_css() -> str:
         font-size: 0.85rem !important;
         text-align: left !important;
     }
-    /* Sidebar page-link hover — soft sky highlight */
-    [data-testid="stSidebar"] [data-testid="stPageLink"] a:hover {
-        background-color: var(--cna-sky-lite) !important;
-        border-radius: 6px !important;
+    /* Sidebar page-link hover — same CNA Sky dim as the dept-dropdown rows
+       so favorites (top) and Admin rows (below pills) match the dropdown
+       look. Sky-lite was too pale to perceive against the sidebar bg. */
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a {
+        transition: background-color 0.15s ease !important;
     }
-    /* Active sidebar page link — brand teal accent */
-    [data-testid="stSidebar"] [data-testid="stPageLink"] a[aria-current="page"] {
+    [data-testid="stSidebar"] [data-testid="stPageLink"] a:hover {
         background-color: var(--cna-sky) !important;
         border-radius: 6px !important;
     }
-    [data-testid="stSidebar"] [data-testid="stPageLink"] a[aria-current="page"] p {
+    /* Active sidebar page link — brand teal accent. Scoped to the favorites
+       section only (Home + saved favorites + the implicit current-page slot).
+       Dept dropdowns and Admin rows stay visually neutral when active so the
+       only "selected" indicator the user sees lives at the top of the
+       sidebar, in the favorites stack. */
+    [data-testid="stSidebar"] .st-key-cna_favorites_section
+        [data-testid="stPageLink"] a[aria-current="page"] {
+        background-color: var(--cna-sky) !important;
+        border-radius: 6px !important;
+    }
+    [data-testid="stSidebar"] .st-key-cna_favorites_section
+        [data-testid="stPageLink"] a[aria-current="page"] p {
         color: var(--cna-teal-dark) !important;
         font-weight: 600 !important;
     }
@@ -539,6 +678,254 @@ def get_global_css() -> str:
         height: 4px;
         margin: 14px 0 0 0;
         background: linear-gradient(90deg, var(--cna-green), var(--cna-teal));
+    }
+    /* BETA badge — small pill that sits next to a page title, sidebar link,
+       or home-page card to call out in-development tools. Uses brand teal
+       so it reads as informational rather than as a warning. */
+    .cna-beta-badge {
+        display: inline-block;
+        background: var(--cna-teal);
+        color: var(--cna-white);
+        font-family: var(--cna-body);
+        font-weight: 700;
+        font-size: 0.6rem;
+        letter-spacing: 0.08em;
+        line-height: 1;
+        padding: 3px 7px 2px 7px;
+        border-radius: 4px;
+        vertical-align: middle;
+        margin-left: 10px;
+        text-transform: uppercase;
+        position: relative;
+        top: -4px;
+    }
+    /* Sidebar BETA badge — tighter so it sits cleanly next to page-link text.
+       In the sidebar the badge is absolutely positioned by .cna-sidebar-badge-anchor
+       below, so we zero out the inherited margin-left and `top` offset to
+       avoid fighting the anchor's positioning. */
+    [data-testid="stSidebar"] .cna-beta-badge {
+        font-size: 0.52rem;
+        padding: 2px 5px 1px 5px;
+        margin-left: 0;
+        top: 0;
+    }
+    /* Pure-HTML dept dropdowns — full-width "menu section" style. The
+       dropdowns break out of the sidebar's content padding (via negative
+       inline margins) so each section spans edge-to-edge of the sidebar.
+       No rounded cards; sections are separated by hairline rules instead. */
+    [data-testid="stSidebar"] .cna-dept {
+        margin: 0 -1rem !important;
+        border: none !important;
+        border-radius: 0 !important;
+        background: transparent !important;
+        border-top: 1px solid var(--cna-rule-soft) !important;
+        overflow: hidden !important;
+    }
+    /* Hide the browser's default <details> triangle marker; we render our
+       own chevron inside <summary> for full control over color/animation. */
+    [data-testid="stSidebar"] .cna-dept summary {
+        list-style: none !important;
+    }
+    [data-testid="stSidebar"] .cna-dept summary::-webkit-details-marker {
+        display: none !important;
+    }
+    /* Section header — uppercase eyebrow-style label spanning the full
+       sidebar width, with the chevron pinned to the right. */
+    [data-testid="stSidebar"] .cna-dept-header {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 8px !important;
+        padding: 12px 1rem !important;
+        font-family: var(--cna-body) !important;
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.1em !important;
+        color: var(--cna-teal-dark) !important;
+        cursor: pointer !important;
+        user-select: none !important;
+        background: transparent !important;
+        transition: background-color 0.15s ease !important;
+    }
+    [data-testid="stSidebar"] .cna-dept-header:hover {
+        background-color: var(--cna-sky-lite) !important;
+        color: var(--cna-teal-dark) !important;
+    }
+    [data-testid="stSidebar"] .cna-dept-name {
+        flex: 1 1 auto !important;
+        text-align: left !important;
+    }
+    [data-testid="stSidebar"] .cna-dept-chevron {
+        flex: 0 0 auto !important;
+        display: inline-block !important;
+        font-size: 0.7rem !important;
+        color: var(--cna-teal) !important;
+        transform: rotate(0deg) !important;
+        transition: transform 0.15s ease !important;
+        line-height: 1 !important;
+    }
+    [data-testid="stSidebar"] .cna-dept[open] .cna-dept-chevron {
+        transform: rotate(90deg) !important;
+    }
+    /* Body has zero padding so its row children stretch edge-to-edge. */
+    [data-testid="stSidebar"] .cna-dept-body {
+        padding: 0 !important;
+        border-top: none !important;
+        background: transparent !important;
+    }
+    /* When section is open, add a faint divider under the header to
+       visually anchor the rows below. */
+    [data-testid="stSidebar"] .cna-dept[open] .cna-dept-header {
+        border-bottom: 1px solid var(--cna-rule-soft) !important;
+    }
+    /* Action row inside the Settings dropdown — full-width edge-to-edge
+       clickable text rows. Matches the dept-dropdown row look so Settings
+       reads as part of the same nav system. */
+    [data-testid="stSidebar"] .cna-action-row {
+        display: block !important;
+        padding: 8px 1rem !important;
+        text-decoration: none !important;
+        color: var(--cna-navy-soft) !important;
+        font-family: var(--cna-body) !important;
+        font-size: 0.85rem !important;
+        font-weight: 400 !important;
+        line-height: 1.4 !important;
+        border-radius: 0 !important;
+        transition: background-color 0.15s ease !important;
+    }
+    [data-testid="stSidebar"] .cna-action-row:hover {
+        background-color: var(--cna-sky) !important;
+        color: var(--cna-navy-soft) !important;
+        text-decoration: none !important;
+        border-radius: 0 !important;
+    }
+    /* Pure-HTML dept-dropdown row. ONE flex container we fully control:
+       pin link + title link + optional BETA badge. The whole row is a
+       single <div> so the hover bg covers it uniformly with zero
+       Streamlit-wrapper interference. */
+    [data-testid="stSidebar"] .cna-droprow {
+        display: flex !important;
+        align-items: center !important;
+        width: 100% !important;
+        padding: 6px 1rem !important;
+        border-radius: 0 !important;
+        transition: background-color 0.15s ease !important;
+        cursor: default !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow:hover {
+        background-color: var(--cna-sky) !important;
+        border-radius: 0 !important;
+    }
+    /* Pin link — clickable target that toggles the favorite via a
+       ?fav_toggle=<path> URL navigation. Color encodes favorited state. */
+    [data-testid="stSidebar"] .cna-droprow .cna-pin-link {
+        position: relative !important;
+        flex: 0 0 auto !important;
+        width: 22px !important;
+        height: 22px !important;
+        margin-right: 8px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        color: var(--cna-muted) !important;
+        text-decoration: none !important;
+        line-height: 0 !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-pin-link.is-favorited {
+        color: var(--cna-green) !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-pin-link .cna-pin-default,
+    [data-testid="stSidebar"] .cna-droprow .cna-pin-link .cna-pin-hover {
+        position: absolute !important;
+        top: 50% !important;
+        left: 50% !important;
+        transform: translate(-50%, -50%) !important;
+        line-height: 0 !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-pin-link .cna-pin-hover {
+        visibility: hidden !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-pin-link:hover .cna-pin-default {
+        visibility: hidden !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-pin-link:hover .cna-pin-hover {
+        visibility: visible !important;
+    }
+    /* Title link — clickable target that navigates to the page. Holds the
+       page icon, title text, and (right-aligned) BETA badge. Uses
+       --cna-navy-soft to match Streamlit page-link text color (which
+       inherits from the body's --cna-navy-soft). */
+    [data-testid="stSidebar"] .cna-droprow .cna-title-link {
+        display: flex !important;
+        align-items: center !important;
+        gap: 10px !important;
+        flex: 1 1 auto !important;
+        min-width: 0 !important;
+        padding: 2px 4px !important;
+        text-decoration: none !important;
+        color: var(--cna-navy-soft) !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-title-link:hover {
+        color: var(--cna-navy-soft) !important;
+        text-decoration: none !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-link-icon {
+        flex: 0 0 auto !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        font-size: 0.85rem !important;
+        line-height: 1 !important;
+        width: 1rem !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-link-title {
+        flex: 1 1 auto !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+        font-family: var(--cna-body) !important;
+        font-size: 0.85rem !important;
+        font-weight: 400 !important;
+        line-height: 1.4 !important;
+        color: var(--cna-navy-soft) !important;
+    }
+    [data-testid="stSidebar"] .cna-droprow .cna-link-beta {
+        flex: 0 0 auto !important;
+        margin-left: auto !important;
+        margin-right: 4px !important;
+        display: inline-block !important;
+        background: var(--cna-teal) !important;
+        color: var(--cna-white) !important;
+        font-family: var(--cna-body) !important;
+        font-size: 0.52rem !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.08em !important;
+        line-height: 1 !important;
+        padding: 3px 6px 2px 6px !important;
+        border-radius: 4px !important;
+        text-transform: uppercase !important;
+    }
+    /* Home-page card BETA badge — pinned in the top-right corner of the card.
+       The bordered card is position: relative (set in home.py), so the badge
+       anchors to the card's own box rather than the page. */
+    .cna-home-card-badge {
+        position: absolute;
+        top: 10px;
+        right: 12px;
+        z-index: 2;
+        display: inline-block;
+        background: var(--cna-teal);
+        color: var(--cna-white);
+        font-family: var(--cna-body);
+        font-weight: 700;
+        font-size: 0.55rem;
+        letter-spacing: 0.08em;
+        line-height: 1;
+        padding: 3px 7px 2px 7px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        pointer-events: none;
     }
     /* Legacy header markup support (centered) */
     .header-row {
@@ -837,26 +1224,41 @@ def get_nav_logo_svg_path(logo_path: str | Path | None = None) -> str | None:
         return None
 
 
-@lru_cache(maxsize=1)
-def _registry_title_map() -> dict[str, str]:
-    """Build a normalized path->title map from page_registry."""
+def _iter_registry_entries():
+    """Yield every PageEntry across the nested SECTION_PAGES structure.
+
+    The registry is Function -> Department -> [PageEntry]. This helper hides
+    the nesting so callers building flat lookup maps don't have to.
+    """
     try:
         import page_registry
     except Exception:
-        return {}
-
-    mapping: dict[str, str] = {}
+        return
     section_pages = getattr(page_registry, "SECTION_PAGES", {})
     if not isinstance(section_pages, dict):
-        section_pages = {}
+        return
+    for depts in section_pages.values():
+        if not isinstance(depts, dict):
+            continue
+        for entries in depts.values():
+            for entry in entries:
+                yield entry
 
-    for entries in section_pages.values():
-        for entry in entries:
-            rel_path = str(getattr(entry, "path", "")).replace("\\", "/").strip().lower()
-            title = str(getattr(entry, "title", "")).strip()
-            if rel_path and title:
-                mapping[rel_path] = title
 
+@lru_cache(maxsize=1)
+def _registry_title_map() -> dict[str, str]:
+    """Build a normalized path->title map from page_registry."""
+    mapping: dict[str, str] = {}
+    for entry in _iter_registry_entries():
+        rel_path = str(getattr(entry, "path", "")).replace("\\", "/").strip().lower()
+        title = str(getattr(entry, "title", "")).strip()
+        if rel_path and title:
+            mapping[rel_path] = title
+
+    try:
+        import page_registry
+    except Exception:
+        return mapping
     home_entry = getattr(page_registry, "HOME_PAGE", None)
     if home_entry is not None:
         rel_path = str(getattr(home_entry, "path", "")).replace("\\", "/").strip().lower()
@@ -898,23 +1300,17 @@ def get_registry_page_title(source_file: str | Path, fallback_title: str) -> str
 @lru_cache(maxsize=1)
 def _registry_quote_map() -> dict[str, str]:
     """Build a normalized title->quote map from page_registry."""
+    mapping: dict[str, str] = {}
+    for entry in _iter_registry_entries():
+        title = str(getattr(entry, "title", "")).strip()
+        quote = str(getattr(entry, "quote", "")).strip()
+        if title and quote:
+            mapping[title] = quote
+
     try:
         import page_registry
     except Exception:
-        return {}
-
-    mapping: dict[str, str] = {}
-    section_pages = getattr(page_registry, "SECTION_PAGES", {})
-    if not isinstance(section_pages, dict):
-        section_pages = {}
-
-    for entries in section_pages.values():
-        for entry in entries:
-            title = str(getattr(entry, "title", "")).strip()
-            quote = str(getattr(entry, "quote", "")).strip()
-            if title and quote:
-                mapping[title] = quote
-
+        return mapping
     home_entry = getattr(page_registry, "HOME_PAGE", None)
     if home_entry is not None:
         title = str(getattr(home_entry, "title", "")).strip()
@@ -931,7 +1327,12 @@ def get_registry_page_quote(page_title: str) -> str:
 
 @lru_cache(maxsize=1)
 def _registry_section_map() -> dict[str, str]:
-    """Build a normalized page-title -> section-name map from page_registry."""
+    """Build a normalized page-title -> eyebrow-label map from page_registry.
+
+    Eyebrow label is the department name when the page has one, else the
+    function name. This puts the most specific location info on the page
+    header (e.g. "LOGISTICS" rather than the more generic "TOOLS").
+    """
     try:
         import page_registry
     except Exception:
@@ -939,18 +1340,38 @@ def _registry_section_map() -> dict[str, str]:
     mapping: dict[str, str] = {}
     section_pages = getattr(page_registry, "SECTION_PAGES", {})
     if not isinstance(section_pages, dict):
-        section_pages = {}
-    for section_name, entries in section_pages.items():
-        for entry in entries:
-            title = str(getattr(entry, "title", "")).strip()
-            if title:
-                mapping[title] = str(section_name).strip()
+        return mapping
+    for function_name, depts in section_pages.items():
+        if not isinstance(depts, dict):
+            continue
+        for dept_name, entries in depts.items():
+            label = str(dept_name).strip() or str(function_name).strip()
+            for entry in entries:
+                title = str(getattr(entry, "title", "")).strip()
+                if title:
+                    mapping[title] = label
     return mapping
 
 
 def get_registry_page_section(page_title: str) -> str:
     """Resolve the section a page belongs to from page_registry."""
     return _registry_section_map().get(str(page_title).strip(), "")
+
+
+@lru_cache(maxsize=1)
+def _registry_beta_map() -> dict[str, bool]:
+    """Build a normalized page-title -> beta-flag map from page_registry."""
+    mapping: dict[str, bool] = {}
+    for entry in _iter_registry_entries():
+        title = str(getattr(entry, "title", "")).strip()
+        if title:
+            mapping[title] = bool(getattr(entry, "beta", False))
+    return mapping
+
+
+def is_registry_page_beta(page_title: str) -> bool:
+    """Return True when the page is flagged as beta in page_registry."""
+    return _registry_beta_map().get(str(page_title).strip(), False)
 
 
 def render_page_header(
@@ -979,11 +1400,16 @@ def render_page_header(
     kicker_html = (
         f'<div class="header-kicker">{safe_kicker}</div>' if safe_kicker else ""
     )
+    beta_badge_html = (
+        '<span class="cna-beta-badge">BETA</span>'
+        if is_registry_page_beta(page_title)
+        else ""
+    )
     st.markdown(
         f"""
         <div class="cna-pageheader">
             {eyebrow_html}
-            <h1 class="header-title">{safe_title}</h1>
+            <h1 class="header-title">{safe_title}{beta_badge_html}</h1>
             <div class="header-accent"></div>
             {kicker_html}
         </div>

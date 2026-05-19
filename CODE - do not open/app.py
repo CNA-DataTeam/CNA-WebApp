@@ -1,5 +1,7 @@
 from pathlib import Path
+from urllib.parse import quote as _url_quote
 import base64
+import html
 import json
 import os
 import shutil
@@ -307,18 +309,49 @@ def _toggle_favorite(page_path: str):
     _save_favorites(favs)
 
 
-# Star icon images (40x40 PNGs rendered at 20x20 for crispness)
+# Pin icons (inline Material Symbols push_pin SVGs). fill="currentColor" lets
+# CSS drive the color — brand green when favorited, muted gray when not.
 _ASSETS_DIR = APP_DIR / "assets"
-_STAR_FILLED_B64 = base64.b64encode((_ASSETS_DIR / "star_filled.png").read_bytes()).decode()
-_STAR_HOLLOW_B64 = base64.b64encode((_ASSETS_DIR / "star_hollow.png").read_bytes()).decode()
-_STAR_IMG = '<img src="data:image/png;base64,{b64}" width="20" height="20" style="vertical-align:middle">'
-STAR_FILLED_HTML = _STAR_IMG.format(b64=_STAR_FILLED_B64)
-STAR_HOLLOW_HTML = _STAR_IMG.format(b64=_STAR_HOLLOW_B64)
+_PIN_FILLED_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    'width="18" height="18" fill="currentColor">'
+    '<path d="M16,9V4l1,0c0.55,0,1-0.45,1-1v0c0-0.55-0.45-1-1-1H7C6.45,2,6,2.45,6,3v0 '
+    'c0,0.55,0.45,1,1,1l1,0v5c0,1.66-1.34,3-3,3v2h5.97v7l1,1l1-1v-7H19v-2C17.34,12,16,10.66,16,9z"/>'
+    '</svg>'
+)
+_PIN_OUTLINED_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+    'width="18" height="18" fill="currentColor">'
+    '<path d="M14,4v5c0,1.12,0.37,2.16,1,3H9c0.65-0.86,1-1.9,1-3V4H14 M17,2H7C6.45,2,6,2.45,6,3 '
+    'c0,0.55,0.45,1,1,1c0,0,1,0,1,0v5c0,1.66-1.34,3-3,3v2h5.97v7l1,1l1-1v-7H19v-2c0,0-1,0-1,0 '
+    'c-1.66,0-3-1.34-3-3V4c0,0,1,0,1,0c0.55,0,1-0.45,1-1C18,2.45,17.55,2,17,2L17,2z"/>'
+    '</svg>'
+)
+
+
+def _page_url(page_obj: "st.Page", page_paths: dict) -> str:
+    """Derive the URL path for a Streamlit MPA Page object.
+
+    Used by the hybrid HTML sidebar rows where we render our own <a> tags
+    instead of st.page_link so we can fully control the row's DOM (page name
+    + BETA badge layout). Streamlit's MPA router picks up clicks on these
+    anchors as long as the href matches a registered page URL.
+    """
+    url_path = getattr(page_obj, "url_path", None)
+    if url_path is not None:
+        return f"/{url_path}" if url_path else "/"
+    # Fallback for older Streamlit versions — derive from file stem.
+    rel_path = page_paths.get(page_obj, "")
+    if rel_path:
+        return f"/{Path(rel_path).stem}"
+    return "/"
 
 
 # -----------------------------------------------------------------
 # Build navigation pages
 # -----------------------------------------------------------------
+# Registry is now a 3-tier hierarchy: Function -> Department -> PageEntry.
+# Admin uses "" as a sentinel dept key so it renders without a middle tier.
 home_entry = page_registry.get_home_page()
 visible_sections = page_registry.get_visible_sections(is_admin_user)
 home_page = st.Page(home_entry.path, title=home_entry.title)
@@ -326,81 +359,297 @@ pages = {"": [home_page]}
 # Track icons and paths separately — passing icon to st.Page() overrides the favicon
 page_icons: dict[st.Page, str] = {home_page: home_entry.icon}
 page_paths: dict[st.Page, str] = {home_page: home_entry.path}
+page_beta: dict[st.Page, bool] = {home_page: False}
 path_to_page: dict[str, st.Page] = {home_entry.path: home_page}
-sidebar_sections: list[tuple[str, list[st.Page]]] = []
-for section_name, entries in visible_sections:
-    section_pages = []
-    for entry in entries:
-        page = st.Page(entry.path, title=entry.title)
-        page_icons[page] = entry.icon
-        page_paths[page] = entry.path
-        path_to_page[entry.path] = page
-        section_pages.append(page)
-    pages[section_name] = section_pages
-    sidebar_sections.append((section_name, section_pages))
-
-# Hidden pages for URL routing only (not shown in sidebar)
-pages["_routing"] = [
-    st.Page("pages/da-task-tracker.py", title="Task Tracker"),
-]
+# Nested sidebar structure: [(function_name, [(dept_name, [st.Page])])]
+sidebar_sections: list[tuple[str, list[tuple[str, list[st.Page]]]]] = []
+for function_name, dept_buckets in visible_sections:
+    function_pages: list[st.Page] = []
+    dept_rows: list[tuple[str, list[st.Page]]] = []
+    for dept_name, entries in dept_buckets:
+        dept_pages: list[st.Page] = []
+        for entry in entries:
+            page = st.Page(entry.path, title=entry.title)
+            page_icons[page] = entry.icon
+            page_paths[page] = entry.path
+            page_beta[page] = bool(getattr(entry, "beta", False))
+            path_to_page[entry.path] = page
+            dept_pages.append(page)
+            function_pages.append(page)
+        dept_rows.append((dept_name, dept_pages))
+    pages[function_name] = function_pages
+    sidebar_sections.append((function_name, dept_rows))
 
 navigation = st.navigation(pages, position="hidden")
+# --- Handle sidebar URL-param actions ---
+# The HTML dropdown area uses URL params for actions that need a Python
+# round-trip: ?fav_toggle=<path> toggles a page's favorite state;
+# ?dept_toggle=<name> opens/closes a dept dropdown (state persisted in
+# session_state.cna_open_depts).
+if "fav_toggle" in st.query_params:
+    _toggle_favorite(st.query_params["fav_toggle"])
+    del st.query_params["fav_toggle"]
+    st.rerun()
+# Settings dropdown actions (HTML <a> links with ?settings_action=NAME).
+# Each handler does its work, optionally queues a toast for the next render,
+# then clears the param and reruns. Same URL-round-trip pattern as the pin
+# toggle — slight reload per click but full visual control over the Settings
+# dropdown UI.
+if "settings_action" in st.query_params:
+    _action = st.query_params["settings_action"]
+    del st.query_params["settings_action"]
+    if _action == "check_updates":
+        if not _check_for_updates_manual():
+            st.session_state["_settings_toast"] = "You're up to date!"
+        # If an update IS available, _check_for_updates_manual writes
+        # .update_available; the existing dialog block above picks it up
+        # automatically on the next render.
+    elif _action == "clear_cache":
+        st.cache_data.clear()
+        st.session_state["_settings_toast"] = "Cache cleared"
+    elif _action == "repair":
+        st.session_state["_show_repair_dialog"] = True
+    # "refresh" is implicit — the rerun below IS the refresh.
+    st.rerun()
+# Note: dept dropdowns now use native HTML <details>/<summary>, so toggling
+# is handled instantly by the browser with zero Streamlit rerun. The
+# trade-off: open/closed state is NOT persisted across reruns (when the page
+# re-renders, depts revert to their default — active dept open, others
+# closed). For an internal nav that's an acceptable trade vs. the full
+# refresh on every click that the URL-param approach caused.
+
 user_favorites = _load_favorites()
+
+# Resolve the currently-active page so it can be appended to the favorites
+# stack as an implicit "current page" entry when it isn't already saved.
+current_page_obj = next(
+    (p for p in page_paths if p.title == navigation.title),
+    None,
+)
+current_page_path = page_paths.get(current_page_obj) if current_page_obj else None
+
 
 with st.sidebar:
     # --- Top row: Home + favorited pages ---
-    st.page_link(home_page, icon=page_icons[home_page], use_container_width=True)
-    for fav_path in user_favorites:
-        fav_page = path_to_page.get(fav_path)
-        if fav_page:
-            st.page_link(fav_page, icon=page_icons[fav_page], use_container_width=True)
+    # Icons show on top-level sidebar links (Home, favorites, Admin pages)
+    # and are suppressed inside dept dropdowns where they crowd the text.
+    # The container key gives the favorites block a stable CSS hook
+    # (`.st-key-cna_favorites_section`) so the active-page highlight can be
+    # scoped to this section only — dept dropdowns and Admin rows stay
+    # visually neutral when the current page is in them.
+    with st.container(key="cna_favorites_section"):
+        st.page_link(home_page, icon=page_icons[home_page], use_container_width=True)
+        for fav_path in user_favorites:
+            fav_page = path_to_page.get(fav_path)
+            if fav_page:
+                st.page_link(fav_page, icon=page_icons[fav_page], use_container_width=True)
 
-    # --- Section dropdowns with star toggles ---
-    for section_name, section_pages in sidebar_sections:
-        section_active = any(p.title == navigation.title for p in section_pages)
-        with st.expander(section_name, expanded=section_active):
-            for page_obj in section_pages:
-                p_path = page_paths[page_obj]
-                is_fav = p_path in user_favorites
-                link_col, star_col = st.columns([0.88, 0.12])
-                with link_col:
-                    st.page_link(page_obj, icon=page_icons[page_obj], use_container_width=True)
-                with star_col:
-                    default_b64 = _STAR_FILLED_B64 if is_fav else _STAR_HOLLOW_B64
-                    hover_b64 = _STAR_HOLLOW_B64 if is_fav else _STAR_FILLED_B64
-                    star_tip = "Remove from favorites" if is_fav else "Add to favorites"
-                    st.markdown(
-                        f'<span class="star-toggle" title="{star_tip}" '
-                        f'style="display:block; margin-top:2px; cursor:pointer">'
-                        f'<img class="star-default" src="data:image/png;base64,{default_b64}" width="20" height="20">'
-                        f'<img class="star-hover" src="data:image/png;base64,{hover_b64}" width="20" height="20">'
-                        f'</span>',
-                        unsafe_allow_html=True,
+        # Always include the current page in the favorites stack. If it's
+        # already a saved favorite (or it's the Home page rendered above),
+        # skip to avoid a duplicate row — the existing entry already
+        # highlights as active via the scoped [aria-current="page"] CSS.
+        # Otherwise render an extra bare page_link that morphs to whatever
+        # page the user is viewing.
+        if (
+            current_page_obj is not None
+            and current_page_path != home_entry.path
+            and current_page_path not in user_favorites
+        ):
+            st.page_link(
+                current_page_obj,
+                icon=page_icons[current_page_obj],
+                use_container_width=True,
+            )
+
+    # --- Section dropdowns with pin toggles ---
+    # Function (top tier) -> Department (middle tier, flat expander when
+    # named) -> Page link. Dept-dropdown rows use a HYBRID HTML approach:
+    # pin column on the left is a real Streamlit button (invisible overlay
+    # on a pin SVG), and the link column is a custom HTML <a> tag with the
+    # page name and optional BETA badge as flex siblings. The flex layout
+    # gives us perfect, automatic vertical alignment with no positioning
+    # gymnastics \u2014 the entire link is one HTML block under our control.
+    # Streamlit's MPA router intercepts clicks on anchors whose href matches
+    # a registered page URL, so navigation behaves the same as st.page_link.
+    def _build_row_html(page_obj, *, is_first: bool) -> str:
+        # Returns the HTML for one dept-dropdown row: pin link + title link
+        # + optional BETA badge. Caller composes multiple of these into the
+        # dept body. Divider drawn above all rows except the first.
+        p_path = page_paths[page_obj]
+        is_fav = p_path in user_favorites
+        is_beta = page_beta.get(page_obj, False)
+        url = _page_url(page_obj, page_paths)
+        title_html = html.escape(page_obj.title)
+        icon_raw = page_icons.get(page_obj) or ""
+        icon_html = (
+            f'<span class="cna-link-icon">{html.escape(icon_raw)}</span>'
+            if icon_raw
+            else ""
+        )
+        badge_html = (
+            '<span class="cna-link-beta">BETA</span>' if is_beta else ""
+        )
+        default_svg = _PIN_FILLED_SVG if is_fav else _PIN_OUTLINED_SVG
+        hover_svg = _PIN_OUTLINED_SVG if is_fav else _PIN_FILLED_SVG
+        pin_tip = "Remove from favorites" if is_fav else "Add to favorites"
+        pin_class = "cna-pin-link is-favorited" if is_fav else "cna-pin-link"
+        fav_toggle_url = f"?fav_toggle={_url_quote(p_path, safe='')}"
+        divider_html = "" if is_first else '<div class="cna-row-divider"></div>'
+        return (
+            f"{divider_html}"
+            f'<div class="cna-droprow">'
+            f'<a class="{pin_class}" href="{fav_toggle_url}" '
+            f'title="{pin_tip}" target="_self">'
+            f'<span class="cna-pin-default">{default_svg}</span>'
+            f'<span class="cna-pin-hover">{hover_svg}</span>'
+            f"</a>"
+            f'<a class="cna-title-link" href="{url}" target="_self">'
+            f"{icon_html}"
+            f'<span class="cna-link-title">{title_html}</span>'
+            f"{badge_html}"
+            f"</a>"
+            f"</div>"
+        )
+
+    def _build_dept_html(dept_name: str, dept_pages: list, is_open: bool) -> str:
+        # Returns the HTML for one dept dropdown using NATIVE HTML
+        # <details>/<summary>. The browser handles open/close on click
+        # instantly — no Streamlit rerun, no URL navigation, no flicker.
+        # `open` attribute sets the initial state on first render; the
+        # user's subsequent toggles live in the browser and aren't
+        # persisted server-side.
+        rows_html = "".join(
+            _build_row_html(p, is_first=(i == 0))
+            for i, p in enumerate(dept_pages)
+        )
+        open_attr = " open" if is_open else ""
+        dept_safe = html.escape(dept_name)
+        return (
+            f'<details class="cna-dept"{open_attr}>'
+            f'<summary class="cna-dept-header">'
+            f'<span class="cna-dept-name">{dept_safe}</span>'
+            f'<span class="cna-dept-chevron">&#9656;</span>'
+            f"</summary>"
+            f'<div class="cna-dept-body">{rows_html}</div>'
+            f"</details>"
+        )
+
+    def _render_dept_dropdowns_html(dept_rows) -> None:
+        # Composes the entire dept-dropdown area for the active function as
+        # ONE st.markdown call. Default open state: only the dept containing
+        # the currently-viewed page is open; the rest start collapsed.
+        active_dept = next(
+            (
+                dn for dn, pages in dept_rows
+                if dn and any(p.title == navigation.title for p in pages)
+            ),
+            None,
+        )
+        parts = []
+        for dept_name, dept_pages in dept_rows:
+            if not dept_name:
+                continue
+            parts.append(
+                _build_dept_html(dept_name, dept_pages, dept_name == active_dept)
+            )
+        if parts:
+            st.markdown("".join(parts), unsafe_allow_html=True)
+
+    # --- Function pills + Department expanders ---
+    # Pills at the top of the sidebar switch which Function is being browsed.
+    # Below the pills, only the active Function's Departments render (as flat
+    # expanders). Admin has no Department tier, so its pages render directly
+    # under the pills when Admin is active.
+    function_names = [fn for fn, _ in sidebar_sections]
+
+    if function_names:
+        # Detect which Function the current page belongs to. Used as the
+        # active pill on initial load and re-synced whenever the user
+        # navigates to a page in a different Function.
+        active_from_page = next(
+            (
+                fn for fn, depts in sidebar_sections
+                if any(
+                    p.title == navigation.title
+                    for _, pages_in_dept in depts
+                    for p in pages_in_dept
+                )
+            ),
+            function_names[0],
+        )
+
+        pill_key = "_sidebar_active_function"
+        nav_tracking_key = "_sidebar_last_nav_title"
+        # On navigation, follow the new page's Function so the pill stays in
+        # sync with the visible page. Pill clicks (without navigation) leave
+        # this alone so the user can browse other Functions without losing
+        # their place.
+        if st.session_state.get(nav_tracking_key) != navigation.title:
+            st.session_state[nav_tracking_key] = navigation.title
+            st.session_state[pill_key] = active_from_page
+        elif pill_key not in st.session_state:
+            st.session_state[pill_key] = active_from_page
+
+        st.pills(
+            "Section",
+            function_names,
+            selection_mode="single",
+            label_visibility="collapsed",
+            key=pill_key,
+        )
+        active_function = st.session_state.get(pill_key) or active_from_page
+
+        active_dept_rows = next(
+            (depts for fn, depts in sidebar_sections if fn == active_function),
+            [],
+        )
+        has_dropdowns = any(dn for dn, _ in active_dept_rows)
+        if has_dropdowns:
+            # Tools/Reports: render dept dropdowns + their rows as ONE HTML
+            # block. Zero Streamlit primitives in this area — full visual
+            # control. Dept toggle state and pin toggles flow through URL
+            # params handled at the top of this file.
+            _render_dept_dropdowns_html(active_dept_rows)
+        else:
+            # Admin: no dropdowns. Bare st.page_link rows match the
+            # favorites stack (tight default spacing, native active-page
+            # highlight, no per-row column wrapper).
+            for dept_name, dept_pages in active_dept_rows:
+                for page_obj in dept_pages:
+                    st.page_link(
+                        page_obj,
+                        icon=page_icons[page_obj],
+                        use_container_width=True,
                     )
-                    if st.button(
-                        "\u200b",
-                        key=f"fav_{p_path}",
-                        type="tertiary",
-                    ):
-                        _toggle_favorite(p_path)
-                        st.rerun()
 
-    st.divider()
-    with st.popover("Settings", use_container_width=True):
-        if st.button("Check for Updates", use_container_width=True, type="tertiary"):
-            with st.spinner("Checking..."):
-                has_update = _check_for_updates_manual()
-            if has_update:
-                st.rerun()
-            else:
-                st.success("You're up to date!")
-        if st.button("Refresh", use_container_width=True, type="tertiary"):
-            st.rerun()
-        if st.button("Clear Cache", use_container_width=True, type="tertiary"):
-            st.cache_data.clear()
-            st.rerun()
-        if st.button("Repair App", use_container_width=True, type="tertiary"):
-            st.session_state["_show_repair_dialog"] = True
+    # Settings dropdown — HTML <details> styled the same way as the dept
+    # dropdowns. Each action is an <a> link to ?settings_action=NAME,
+    # handled at the top of this file.
+    st.markdown(
+        '<details class="cna-dept cna-settings-dept">'
+        '<summary class="cna-dept-header">'
+        '<span class="cna-dept-name">Settings</span>'
+        '<span class="cna-dept-chevron">&#9656;</span>'
+        '</summary>'
+        '<div class="cna-dept-body">'
+        '<a class="cna-action-row" href="?settings_action=check_updates" target="_self">'
+        'Check for Updates</a>'
+        '<div class="cna-row-divider"></div>'
+        '<a class="cna-action-row" href="?settings_action=refresh" target="_self">'
+        'Refresh</a>'
+        '<div class="cna-row-divider"></div>'
+        '<a class="cna-action-row" href="?settings_action=clear_cache" target="_self">'
+        'Clear Cache</a>'
+        '<div class="cna-row-divider"></div>'
+        '<a class="cna-action-row" href="?settings_action=repair" target="_self">'
+        'Repair App</a>'
+        '</div>'
+        '</details>',
+        unsafe_allow_html=True,
+    )
+    # Surface any queued message from a settings action via st.toast.
+    if "_settings_toast" in st.session_state:
+        st.toast(st.session_state.pop("_settings_toast"))
 
 if st.session_state.get("_show_repair_dialog"):
     @st.dialog("Repair App", width="small")
