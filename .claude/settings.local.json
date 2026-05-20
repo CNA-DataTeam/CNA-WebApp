@@ -86,7 +86,18 @@
       "Bash(awk -F: '$2+0 < 987')",
       "Bash(awk *)",
       "Bash(../.venv/Scripts/python.exe -c ' *)",
-      "Bash(../.venv/Scripts/python.exe *)"
+      "Bash(../.venv/Scripts/python.exe *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell(gh release *)",
+      "PowerShell($gh = \"$env:LOCALAPPDATA\\\\Microsoft\\\\WinGet\\\\Packages\\\\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\\\\bin\\\\gh.exe\"; & $gh release upload v1.0.0 \"installer-output/CNA-Console-Installer.exe\"; Write-Output \"Upload exit: $LASTEXITCODE\"; if \\($LASTEXITCODE -eq 0\\) { & $gh release delete-asset v1.0.0 \"CNA-WebApp-Setup.exe\" --yes; Write-Output \"Delete exit: $LASTEXITCODE\"; & $gh release view v1.0.0 --json assets --jq '.assets[].name' })",
+      "PowerShell($url = \"https://github.com/CNA-DataTeam/CNA-WebApp/releases/latest/download/CNA-Console-Installer.exe\"; try { $r = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 5 -UseBasicParsing; Write-Output \"Status: $\\($r.StatusCode\\)  Content-Length: $\\($r.Headers.'Content-Length'\\)  Final URL: $\\($r.BaseResponse.ResponseUri.AbsoluteUri\\)\" } catch { Write-Output \"FAILED: $\\($_.Exception.Message\\)\" })",
+      "Bash(curl -s -o /dev/null -w \"Status: %{http_code}\\\\nFinal URL: %{url_effective}\\\\nContent-Length: %{size_download}\\\\n\" -L \"https://github.com/CNA-DataTeam/CNA-WebApp/releases/latest/download/CNA-Console-Installer.exe\")",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:unit42.paloaltonetworks.com)",
+      "WebFetch(domain:docs.astral.sh)",
+      "PowerShell(& \"$env:LOCALAPPDATA\\\\Programs\\\\Inno Setup 6\\\\ISCC.exe\" /Qp /O\"$env:TEMP\\\\cna-iss-check\" \"CODE - do not open\\\\installer\\\\CNA-Console-Installer.iss\")",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Remove-Item *)"
     ]
   }
 }

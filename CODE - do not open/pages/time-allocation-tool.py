@@ -18,6 +18,7 @@ Output schema:
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import date, timedelta
 from pathlib import Path
@@ -206,6 +207,31 @@ def _iter_time_allocation_day_candidate_files(base_dir: Path, entry_date: date) 
                 files.append(path)
                 seen.add(path_key)
 
+    for path in sorted(base_dir.glob(legacy_pattern), reverse=True):
+        path_key = str(path).lower()
+        if path.is_file() and path_key not in seen:
+            files.append(path)
+            seen.add(path_key)
+
+    return files
+
+
+def _iter_user_day_candidate_files(
+    base_dir: Path,
+    user_login: str,
+    full_name: str,
+    entry_date: date,
+) -> list[Path]:
+    """Candidate parquet files for one specific user/date — targets the known per-user file path directly instead of a recursive month-dir scan, which is materially faster over UNC."""
+    files: list[Path] = []
+    seen: set[str] = set()
+
+    user_path = _get_time_allocation_daily_file(base_dir, user_login, full_name, entry_date)
+    if user_path.is_file():
+        files.append(user_path)
+        seen.add(str(user_path).lower())
+
+    legacy_pattern = f"time_allocation_{entry_date:%Y%m%d}*.parquet"
     for path in sorted(base_dir.glob(legacy_pattern), reverse=True):
         path_key = str(path).lower()
         if path.is_file() and path_key not in seen:
@@ -676,11 +702,13 @@ def _format_field_value_for_preview(entry_field: dict, raw_value: object) -> str
     return str(raw_value)
 
 
-def _render_custom_field_widget(entry_field: dict, row_idx: int, disabled: bool) -> object:
-    """Render a single custom-field input bound to ta_detailed_cf_<id>_<row> session state."""
+def _render_custom_field_widget(
+    entry_field: dict, row_idx: int, disabled: bool, key_prefix: str = "ta_detailed"
+) -> object:
+    """Render a single custom-field input bound to <key_prefix>_cf_<id>_<row> session state."""
     field_id = entry_field["id"]
     field_type = entry_field["type"]
-    key = f"ta_detailed_cf_{field_id}_{row_idx}"
+    key = f"{key_prefix}_cf_{field_id}_{row_idx}"
     label = f"{entry_field['name']}{' *' if entry_field['required'] else ''}"
 
     if key not in st.session_state:
@@ -858,6 +886,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         window_start.isoformat(),
         window_end.isoformat(),
     ).copy()
+    window_df = _apply_window_overrides(window_df, window_start, window_end)
     if window_df.empty:
         window_df = pd.DataFrame(columns=["Entry Date", "Account", "Time", "Channel", "Source File"])
 
@@ -1310,7 +1339,7 @@ def _replace_user_day_entries(base_dir: Path, user_login: str, full_name: str, e
     """Remove existing rows for (user, entry_date) across export files."""
     removed_rows = 0
     touched_files = 0
-    for file_path in _iter_time_allocation_day_candidate_files(base_dir, entry_date):
+    for file_path in _iter_user_day_candidate_files(base_dir, user_login, full_name, entry_date):
         try:
             file_df = pd.read_parquet(file_path)
         except Exception as exc:
@@ -1340,6 +1369,113 @@ def _replace_user_day_entries(base_dir: Path, user_login: str, full_name: str, e
 def _invalidate_input_seed() -> None:
     """Force the selected-day editor to reload from persisted data on next rerun."""
     st.session_state.pop("ta_loaded_day_token", None)
+
+
+_WINDOW_OVERRIDE_COLUMNS = [
+    "Entry Date",
+    "User",
+    "Full Name",
+    "Department",
+    "Account",
+    "Customer Code",
+    "Time",
+    "Channel",
+    "Source File",
+]
+
+_WINDOW_OVERRIDE_TTL_SECONDS = 60.0
+
+
+def _store_window_override(entry_date: date, override_df: pd.DataFrame) -> None:
+    """Stash freshly-saved rows for a date so the next render can skip the UNC reload."""
+    overrides = st.session_state.get("ta_input_window_overrides")
+    if not isinstance(overrides, dict):
+        overrides = {}
+    overrides[entry_date.isoformat()] = {
+        "df": override_df.copy(),
+        "stored_at": time.monotonic(),
+    }
+    st.session_state["ta_input_window_overrides"] = overrides
+
+
+def _build_window_override_from_records(
+    rows: list[dict[str, object]],
+    parsed_seconds: list[int],
+    user_login: str,
+    full_name: str,
+    department: str,
+    entry_date: date,
+) -> pd.DataFrame:
+    """Build a window-shaped DataFrame from the rows we just persisted."""
+    records: list[dict[str, object]] = []
+    for row, seconds in zip(rows, parsed_seconds):
+        records.append({
+            "Entry Date": entry_date,
+            "User": _empty_to_none(user_login),
+            "Full Name": _empty_to_none(full_name),
+            "Department": _empty_to_none(department),
+            "Account": _empty_to_none(row.get("account")),
+            "Customer Code": _empty_to_none(row.get("customer_code")),
+            "Time": utils.format_hhmmss(int(max(0, seconds))),
+            "Channel": _empty_to_none(row.get("channel")),
+            "Source File": "",
+        })
+    if not records:
+        return pd.DataFrame(columns=_WINDOW_OVERRIDE_COLUMNS)
+    df = pd.DataFrame(records)
+    df["Entry Date"] = pd.to_datetime(df["Entry Date"], errors="coerce").dt.date
+    return df[_WINDOW_OVERRIDE_COLUMNS].copy()
+
+
+def _apply_window_overrides(
+    window_df: pd.DataFrame,
+    window_start: date,
+    window_end: date,
+) -> pd.DataFrame:
+    """Splice saved/deleted-row overrides into the loaded window DataFrame."""
+    overrides = st.session_state.get("ta_input_window_overrides")
+    if not isinstance(overrides, dict) or not overrides:
+        return window_df
+
+    now = time.monotonic()
+    relevant: dict[date, pd.DataFrame] = {}
+    stale_keys: list[str] = []
+    for date_iso, entry in overrides.items():
+        if not isinstance(entry, dict):
+            stale_keys.append(date_iso)
+            continue
+        stored_at = entry.get("stored_at")
+        if not isinstance(stored_at, (int, float)) or (now - stored_at) > _WINDOW_OVERRIDE_TTL_SECONDS:
+            stale_keys.append(date_iso)
+            continue
+        override_df = entry.get("df")
+        if not isinstance(override_df, pd.DataFrame):
+            stale_keys.append(date_iso)
+            continue
+        try:
+            d = pd.to_datetime(date_iso).date()
+        except Exception:
+            stale_keys.append(date_iso)
+            continue
+        if window_start <= d <= window_end:
+            relevant[d] = override_df
+
+    if stale_keys:
+        for key in stale_keys:
+            overrides.pop(key, None)
+        st.session_state["ta_input_window_overrides"] = overrides
+
+    if not relevant:
+        return window_df
+
+    base = window_df
+    if not base.empty and "Entry Date" in base.columns:
+        base = base[~base["Entry Date"].isin(set(relevant.keys()))].copy()
+
+    extra_frames = [df for df in relevant.values() if not df.empty]
+    if not extra_frames:
+        return base
+    return pd.concat([base, *extra_frames], ignore_index=True)
 
 
 def _queue_input_status(level: str, message: str) -> None:
@@ -1412,7 +1548,12 @@ def save_records(
         removed_rows, touched_files = _replace_user_day_entries(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
         utils.atomic_write_parquet(df, output_path, schema=_current_time_allocation_schema())
         load_time_allocation_exports.clear()
-        load_time_allocation_user_window.clear()
+        _store_window_override(
+            entry_date,
+            _build_window_override_from_records(
+                rows, parsed_seconds, user_login, full_name, department, entry_date
+            ),
+        )
         _invalidate_input_seed()
         LOGGER.info(
             "Saved time allocation export | rows=%s file='%s' user='%s' entry_date=%s replaced_rows=%s touched_files=%s",
@@ -1451,7 +1592,7 @@ def delete_records_for_day(user_login: str, full_name: str, entry_date: date) ->
     try:
         removed_rows, touched_files = _replace_user_day_entries(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
         load_time_allocation_exports.clear()
-        load_time_allocation_user_window.clear()
+        _store_window_override(entry_date, pd.DataFrame(columns=_WINDOW_OVERRIDE_COLUMNS))
         _invalidate_input_seed()
         LOGGER.info(
             "Deleted time allocation export rows | user='%s' entry_date=%s removed_rows=%s touched_files=%s",
@@ -2593,13 +2734,535 @@ def render_entry_fields_editor_view() -> None:
         confirm_entry_field_delete_dialog()
 
 
-def render_admin_settings_view(account_lookup: dict) -> None:
-    """Admin-only Time Allocation Tool settings: entry-field definitions and the Edit Entries table."""
+# --- Admin: add new entries (mirrors the Input tab; current fiscal period only) ---
+
+@st.cache_data(ttl=300)
+def _user_login_lookup() -> dict[str, str]:
+    """Map full name (lowercased) -> user login from users.parquet for the add-entry user picker."""
+    lookup: dict[str, str] = {}
+    for login, full_name in utils.load_user_fullname_map().items():
+        key = str(full_name or "").strip().lower()
+        if key and key not in lookup:
+            lookup[key] = str(login or "").strip()
+    return lookup
+
+
+def _current_period_bounds() -> tuple[date, date] | None:
+    """Return (start, end) of the fiscal period containing today, or None if not configured."""
+    period = _get_current_period()
+    if not period:
+        return None
+    start = _parse_date_value(period.get("StartDate"))
+    end = _parse_date_value(period.get("EndDate"))
+    if start is None or end is None or end < start:
+        return None
+    return start, end
+
+
+def _is_within_current_period(day: date) -> bool:
+    """True when `day` falls inside the current fiscal period."""
+    bounds = _current_period_bounds()
+    if bounds is None:
+        return False
+    start, end = bounds
+    return start <= day <= end
+
+
+def _on_add_reporting_name_change(idx: int, lookup: dict) -> None:
+    """Autofill the add-row's Customer Code when its Reporting Name selection changes."""
+    reporting_name = str(st.session_state.get(f"ta_add_account_{idx}", "")).strip()
+    st.session_state[f"ta_add_custcode_{idx}"] = lookup["rn_to_first_code"].get(reporting_name, "")
+
+
+def _on_add_customer_code_change(idx: int, lookup: dict) -> None:
+    """Autofill the add-row's Reporting Name when its Customer Code selection changes."""
+    customer_code = str(st.session_state.get(f"ta_add_custcode_{idx}", "")).strip()
+    reporting_name = lookup["code_to_rn"].get(customer_code, "")
+    if reporting_name:
+        st.session_state[f"ta_add_account_{idx}"] = reporting_name
+
+
+def _delete_add_row(delete_idx: int) -> None:
+    """Delete one row from the admin add-entry form state (shifts later rows up)."""
+    count = int(st.session_state.get("ta_add_count", 1) or 1)
+    if count <= 1 or delete_idx < 0 or delete_idx >= count:
+        return
+
+    entry_fields = _load_entry_fields()
+    for idx in range(delete_idx, count - 1):
+        st.session_state[f"ta_add_account_{idx}"] = st.session_state.get(f"ta_add_account_{idx + 1}", "")
+        st.session_state[f"ta_add_custcode_{idx}"] = st.session_state.get(f"ta_add_custcode_{idx + 1}", "")
+        st.session_state[f"ta_add_dur_h_{idx}"] = st.session_state.get(f"ta_add_dur_h_{idx + 1}", 0)
+        st.session_state[f"ta_add_dur_m_{idx}"] = st.session_state.get(f"ta_add_dur_m_{idx + 1}", 0)
+        st.session_state[f"ta_add_channel_{idx}"] = st.session_state.get(
+            f"ta_add_channel_{idx + 1}", _default_channel()
+        )
+        for entry_field in entry_fields:
+            next_key = f"ta_add_cf_{entry_field['id']}_{idx + 1}"
+            st.session_state[f"ta_add_cf_{entry_field['id']}_{idx}"] = st.session_state.get(
+                next_key, _default_for_field(entry_field)
+            )
+
+    last_idx = count - 1
+    last_keys = [
+        f"ta_add_account_{last_idx}",
+        f"ta_add_custcode_{last_idx}",
+        f"ta_add_dur_h_{last_idx}",
+        f"ta_add_dur_m_{last_idx}",
+        f"ta_add_channel_{last_idx}",
+    ]
+    for entry_field in entry_fields:
+        last_keys.append(f"ta_add_cf_{entry_field['id']}_{last_idx}")
+    for key in last_keys:
+        st.session_state.pop(key, None)
+
+    st.session_state["ta_add_count"] = count - 1
+
+
+def _reset_add_form() -> None:
+    """Clear the add-entry row widgets back to a single blank row (keeps the selected user/date)."""
+    count = int(st.session_state.get("ta_add_count", 1) or 1)
+    entry_fields = _load_entry_fields()
+    for idx in range(count):
+        for key in (
+            f"ta_add_account_{idx}",
+            f"ta_add_custcode_{idx}",
+            f"ta_add_dur_h_{idx}",
+            f"ta_add_dur_m_{idx}",
+            f"ta_add_channel_{idx}",
+        ):
+            st.session_state.pop(key, None)
+        for entry_field in entry_fields:
+            st.session_state.pop(f"ta_add_cf_{entry_field['id']}_{idx}", None)
+    st.session_state["ta_add_count"] = 1
+
+
+def _save_admin_added_records(
+    rows: list[dict[str, object]],
+    parsed_seconds: list[int],
+    user_login: str,
+    full_name: str,
+    department: str,
+    entry_date: date,
+) -> bool:
+    """Append admin-entered rows to a user's saved entries for one day (current period only)."""
+    if not _is_within_current_period(entry_date):
+        bounds = _current_period_bounds()
+        if bounds is None:
+            st.error("No current fiscal period is configured, so entries can't be added.")
+        else:
+            start, end = bounds
+            st.error(
+                f"Entries can only be added within the current fiscal period "
+                f"({start:%m/%d/%Y}–{end:%m/%d/%Y}). Cannot save for {entry_date:%m/%d/%Y}."
+            )
+        return False
+
+    entry_fields = _load_entry_fields()
+    new_records: list[dict[str, object]] = []
+    for row, seconds in zip(rows, parsed_seconds):
+        record: dict[str, object] = {
+            "Entry Date": entry_date,
+            "User": _empty_to_none(user_login),
+            "Full Name": _empty_to_none(full_name),
+            "Department": _empty_to_none(department),
+            "Account": _empty_to_none(row.get("account")),
+            "Customer Code": _empty_to_none(row.get("customer_code")),
+            "Time": utils.format_hhmmss(int(max(0, seconds))),
+            "Channel": _empty_to_none(row.get("channel")),
+        }
+        custom_values = row.get("custom_values") or {}
+        for entry_field in entry_fields:
+            col = f"cf_{entry_field['id']}"
+            record[col] = _serialize_custom_value(entry_field, custom_values.get(entry_field["id"]))
+        new_records.append(record)
+
+    if not new_records:
+        st.error("No rows to add.")
+        return False
+
+    new_df = _ensure_time_allocation_columns(pd.DataFrame(new_records))
+
+    # Preserve any existing rows for this user/day so we append rather than replace.
+    existing_frames: list[pd.DataFrame] = []
+    for file_path in _iter_user_day_candidate_files(TIME_ALLOCATION_DIR, user_login, full_name, entry_date):
+        try:
+            file_df = pd.read_parquet(file_path)
+        except Exception as exc:
+            LOGGER.warning("Admin add: skipping unreadable file '%s': %s", file_path, exc)
+            continue
+        if file_df.empty:
+            continue
+        mask = _build_user_day_mask(file_df, user_login, full_name, entry_date)
+        if bool(mask.any()):
+            existing_frames.append(_ensure_time_allocation_columns(file_df.loc[mask].copy()))
+
+    combined = (
+        pd.concat([*existing_frames, new_df], ignore_index=True) if existing_frames else new_df
+    )
+    combined = _ensure_time_allocation_columns(combined)
+
+    output_path = _get_time_allocation_daily_file(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
+    try:
+        removed_rows, touched_files = _replace_user_day_entries(
+            TIME_ALLOCATION_DIR, user_login, full_name, entry_date
+        )
+        utils.atomic_write_parquet(combined, output_path, schema=_current_time_allocation_schema())
+        load_time_allocation_exports.clear()
+        load_time_allocation_user_window.clear()
+        _invalidate_input_seed()
+        LOGGER.info(
+            "Admin added time-allocation entries | admin='%s' target='%s' entry_date=%s "
+            "added_rows=%s preserved_rows=%s total_rows=%s touched_files=%s",
+            utils.get_os_user(),
+            user_login or full_name,
+            entry_date,
+            len(new_df),
+            removed_rows,
+            len(combined),
+            touched_files,
+        )
+        st.session_state["ta_add_status"] = {
+            "level": "success",
+            "message": (
+                f"Added {len(new_df)} entry/entries for {full_name or user_login} "
+                f"on {entry_date:%m/%d/%Y}."
+            ),
+        }
+        return True
+    except Exception as exc:
+        LOGGER.exception("Admin add: failed to save entries: %s", exc)
+        st.error(f"Failed to save entries: {exc}")
+        return False
+
+
+@st.dialog("Add Allocation?")
+def confirm_admin_add_entry_dialog() -> None:
+    """Confirmation modal for admin-added time-allocation entries."""
+    payload = st.session_state.get("ta_add_confirm_payload")
+    if not isinstance(payload, dict):
+        st.error("No pending entries found.")
+        st.session_state["ta_add_confirm_open"] = False
+        st.session_state["ta_add_confirm_rendered"] = False
+        return
+
+    entry_date_dt = pd.to_datetime(payload.get("entry_date"), errors="coerce")
+    if pd.isna(entry_date_dt):
+        st.error("Invalid entry date.")
+        st.session_state["ta_add_confirm_open"] = False
+        st.session_state["ta_add_confirm_rendered"] = False
+        return
+    entry_date = entry_date_dt.date()
+
+    user_login = str(payload.get("user_login") or "")
+    full_name = str(payload.get("full_name") or "")
+    department = str(payload.get("department") or "")
+    rows: list[dict[str, object]] = list(payload.get("rows") or [])
+    parsed_seconds: list[int] = [int(max(0, s)) for s in list(payload.get("parsed_seconds") or [])]
+    display_user = full_name.strip() if str(full_name).strip() else user_login
+
+    st.caption(f"**User:** {display_user}")
+    st.caption(f"**Department:** {department or 'N/A'}")
+    st.caption(f"**Entry Date:** {entry_date:%m/%d/%Y}")
+    st.divider()
+
+    entry_fields = _load_entry_fields()
+    preview_rows: list[dict[str, object]] = []
+    for row, seconds in zip(rows, parsed_seconds):
+        preview: dict[str, object] = {
+            "Reporting Name": _empty_to_none(row.get("account")) or "",
+            "Customer Code": _empty_to_none(row.get("customer_code")) or "",
+            "Time": utils.format_hhmmss(seconds),
+            "Channel": _empty_to_none(row.get("channel")) or "",
+        }
+        custom_values = row.get("custom_values") or {}
+        for entry_field in entry_fields:
+            preview[entry_field["name"]] = _format_field_value_for_preview(
+                entry_field, custom_values.get(entry_field["id"])
+            )
+        preview_rows.append(preview)
+    st.dataframe(pd.DataFrame(preview_rows), hide_index=True, width="stretch")
+    st.caption("These rows are added to the user's existing entries for the day.")
+
+    left, right = st.columns(2)
+    with left:
+        if st.button("Add Entries", type="primary", width="stretch", key="ta_add_confirm_submit_button"):
+            if _save_admin_added_records(rows, parsed_seconds, user_login, full_name, department, entry_date):
+                st.session_state["ta_add_confirm_open"] = False
+                st.session_state["ta_add_confirm_rendered"] = False
+                st.session_state["ta_add_confirm_payload"] = None
+                # Reset on the next run, before the row widgets are re-created.
+                st.session_state["ta_add_reset_pending"] = True
+                st.rerun()
+    with right:
+        if st.button("Cancel", width="stretch", key="ta_add_confirm_cancel_button"):
+            st.session_state["ta_add_confirm_open"] = False
+            st.session_state["ta_add_confirm_rendered"] = False
+            st.session_state["ta_add_confirm_payload"] = None
+            st.rerun()
+
+
+@st.fragment
+def render_admin_add_entry_view(account_options: list[str], account_lookup: dict) -> None:
+    """Admin-only form to add new entries for any user, restricted to the current fiscal period."""
+    if "ta_add_confirm_open" not in st.session_state:
+        st.session_state["ta_add_confirm_open"] = False
+    if "ta_add_confirm_rendered" not in st.session_state:
+        st.session_state["ta_add_confirm_rendered"] = False
+    if "ta_add_confirm_payload" not in st.session_state:
+        st.session_state["ta_add_confirm_payload"] = None
+
+    st.subheader("Add Entries", anchor=False)
+
+    bounds = _current_period_bounds()
+    if bounds is None:
+        st.info(
+            "No current fiscal period is configured, so entries can't be added here. "
+            "Set up the current period to enable this section."
+        )
+        return
+    period_start, period_end = bounds
+    period_label = str((_get_current_period() or {}).get("PeriodName") or "").strip()
+    period_suffix = f" ({period_label})" if period_label else ""
+    st.caption(
+        "Add new entries for any user; rows are appended to that user's existing entries "
+        f"for the day. Limited to the current fiscal period{period_suffix}: "
+        f"{period_start:%m/%d/%Y}–{period_end:%m/%d/%Y}."
+    )
+
+    status = st.session_state.pop("ta_add_status", None)
+    if isinstance(status, dict):
+        message = str(status.get("message") or "").strip()
+        level = str(status.get("level") or "").lower()
+        if message:
+            if level == "success":
+                st.success(message)
+            elif level == "error":
+                st.error(message)
+            else:
+                st.info(message)
+
+    full_name_options = utils.load_all_user_full_names()
+    if not full_name_options:
+        st.warning("No users are available to add entries for.")
+        return
+
+    sel_col, date_col, dept_col = st.columns([3, 2, 2])
+    with sel_col:
+        selected_full_name = st.selectbox("User", options=[""] + full_name_options, key="ta_add_user")
+    with date_col:
+        default_date = _today_eastern()
+        if not (period_start <= default_date <= period_end):
+            default_date = period_start
+        entry_date = st.date_input(
+            "Entry Date",
+            value=default_date,
+            min_value=period_start,
+            max_value=period_end,
+            format="MM/DD/YYYY",
+            key="ta_add_date",
+        )
+
+    target_login = _user_login_lookup().get(str(selected_full_name).strip().lower(), "")
+    # get_user_department early-returns on an empty login, so when we don't have one
+    # pass the full name through as the lookup key to let its full-name fallback resolve.
+    target_department = (
+        utils.get_user_department(target_login or selected_full_name, full_name=selected_full_name) or ""
+        if selected_full_name
+        else ""
+    )
+    with dept_col:
+        # No widget key: a disabled input reflects the current selection every rerun.
+        st.text_input("Department", value=target_department, disabled=True)
+
+    if st.session_state.pop("ta_add_reset_pending", False):
+        _reset_add_form()
+
+    pending_delete_idx = st.session_state.pop("ta_add_delete_idx", None)
+    if pending_delete_idx is not None:
+        _delete_add_row(int(pending_delete_idx))
+
+    number_of_accounts = int(max(1, st.session_state.get("ta_add_count", 1) or 1))
+    st.session_state["ta_add_count"] = number_of_accounts
+    entry_fields = _load_entry_fields()
+
+    for idx in range(number_of_accounts):
+        if f"ta_add_account_{idx}" not in st.session_state:
+            st.session_state[f"ta_add_account_{idx}"] = ""
+        if f"ta_add_custcode_{idx}" not in st.session_state:
+            st.session_state[f"ta_add_custcode_{idx}"] = ""
+        if f"ta_add_dur_h_{idx}" not in st.session_state:
+            st.session_state[f"ta_add_dur_h_{idx}"] = 0
+        if f"ta_add_dur_m_{idx}" not in st.session_state:
+            st.session_state[f"ta_add_dur_m_{idx}"] = 0
+        if f"ta_add_channel_{idx}" not in st.session_state:
+            st.session_state[f"ta_add_channel_{idx}"] = _default_channel()
+        for entry_field in entry_fields:
+            cf_key = f"ta_add_cf_{entry_field['id']}_{idx}"
+            if cf_key not in st.session_state:
+                st.session_state[cf_key] = _default_for_field(entry_field)
+
+    st.caption(
+        "Select a Reporting Name or Customer Code (they fill each other in), then pick the hours and minutes for each row."
+    )
+
+    header_labels = [
+        ("Reporting Name", 3.2),
+        ("Customer Code", 2.3),
+        ("Time", 2.6),
+        ("Channel", 2),
+        ("", 1),
+    ]
+    header_cols = st.columns([w for _, w in header_labels])
+    for hcol, (label, _) in zip(header_cols, header_labels):
+        if label:
+            hcol.markdown(f"<div class='ta-entry-col-header'>{label}</div>", unsafe_allow_html=True)
+
+    rows: list[dict[str, object]] = []
+    for idx in range(number_of_accounts):
+        with st.container(border=True):
+            c1, c2, c3, c4, c5 = st.columns([3.2, 2.3, 2.6, 2, 1])
+            with c1:
+                account_key = f"ta_add_account_{idx}"
+                account = st.selectbox(
+                    "Reporting Name",
+                    options=_account_options_for_row(account_options, st.session_state.get(account_key, "")),
+                    key=account_key,
+                    label_visibility="collapsed",
+                    on_change=_on_add_reporting_name_change,
+                    args=(idx, account_lookup),
+                )
+            with c2:
+                custcode_key = f"ta_add_custcode_{idx}"
+                customer_code = st.selectbox(
+                    "Customer Code",
+                    options=_customer_code_options_for_row(
+                        [""] + account_lookup["customer_codes"],
+                        st.session_state.get(custcode_key, ""),
+                    ),
+                    key=custcode_key,
+                    label_visibility="collapsed",
+                    on_change=_on_add_customer_code_change,
+                    args=(idx, account_lookup),
+                )
+            with c3:
+                h_col, m_col = st.columns(2)
+                with h_col:
+                    hour_value = st.selectbox(
+                        "Hours",
+                        options=TIME_HOUR_OPTIONS,
+                        key=f"ta_add_dur_h_{idx}",
+                        label_visibility="collapsed",
+                        format_func=lambda h: f"{h} hr",
+                    )
+                with m_col:
+                    minute_value = st.selectbox(
+                        "Minutes",
+                        options=TIME_MINUTE_OPTIONS,
+                        key=f"ta_add_dur_m_{idx}",
+                        label_visibility="collapsed",
+                        format_func=lambda m: f"{m:02d} min",
+                    )
+                duration = _hm_to_duration(hour_value, minute_value)
+            with c4:
+                channel = st.selectbox(
+                    "Channel",
+                    options=_channel_options_for_row(st.session_state.get(f"ta_add_channel_{idx}", "")),
+                    key=f"ta_add_channel_{idx}",
+                    label_visibility="collapsed",
+                )
+            with c5:
+                if st.button(
+                    "Delete",
+                    key=f"ta_add_delete_btn_{idx}",
+                    icon=":material/delete_outline:",
+                    disabled=number_of_accounts <= 1,
+                    type="tertiary",
+                    width="content",
+                ):
+                    st.session_state["ta_add_delete_idx"] = idx
+                    st.rerun(scope="fragment")
+
+            custom_values: dict[str, object] = {}
+            for chunk_start in range(0, len(entry_fields), 4):
+                chunk = entry_fields[chunk_start:chunk_start + 4]
+                cf_cols = st.columns(4)
+                for slot, entry_field in enumerate(chunk):
+                    with cf_cols[slot]:
+                        custom_values[entry_field["id"]] = _render_custom_field_widget(
+                            entry_field, idx, False, key_prefix="ta_add"
+                        )
+
+        rows.append(
+            {
+                "account": account,
+                "customer_code": customer_code,
+                "duration": duration,
+                "channel": channel,
+                "custom_values": custom_values,
+            }
+        )
+
+    add_col, save_col, _ = st.columns([1, 1, 6])
+    with add_col:
+        if st.button("Add Row", key="ta_add_add_row_btn", icon=":material/add:", type="secondary"):
+            st.session_state["ta_add_count"] = number_of_accounts + 1
+            st.rerun(scope="fragment")
+    with save_col:
+        add_clicked = st.button("Add Entries", type="primary", key="ta_add_submit")
+
+    if add_clicked:
+        errors: list[str] = []
+        if not str(selected_full_name).strip():
+            errors.append("Select a user to add entries for.")
+        if not _is_within_current_period(entry_date):
+            errors.append("Entry Date must be within the current fiscal period.")
+        parsed_seconds: list[int] = []
+        for i, row in enumerate(rows, start=1):
+            if not _empty_to_none(row["account"]):
+                errors.append(f"Reporting Name for row {i} is required.")
+            seconds = utils.parse_hhmmss(str(row["duration"]))
+            if seconds <= 0:
+                errors.append(f"Time for row {i} must be greater than 0 hr 00 min.")
+            parsed_seconds.append(max(0, seconds))
+            row_custom = row.get("custom_values") or {}
+            for entry_field in entry_fields:
+                if not entry_field["required"]:
+                    continue
+                if not _is_field_value_present(entry_field, row_custom.get(entry_field["id"])):
+                    errors.append(f"Row {i}: '{entry_field['name']}' is required.")
+        if errors:
+            for message in errors:
+                st.error(message)
+            return
+
+        st.session_state["ta_add_confirm_payload"] = {
+            "entry_date": entry_date.isoformat(),
+            "user_login": target_login,
+            "full_name": selected_full_name,
+            "department": target_department,
+            "rows": rows,
+            "parsed_seconds": parsed_seconds,
+        }
+        st.session_state["ta_add_confirm_open"] = True
+        st.session_state["ta_add_confirm_rendered"] = False
+        st.rerun()
+
+    if st.session_state["ta_add_confirm_open"] and not st.session_state["ta_add_confirm_rendered"]:
+        st.session_state["ta_add_confirm_rendered"] = True
+        confirm_admin_add_entry_dialog()
+
+
+def render_admin_settings_view(account_lookup: dict, account_options: list[str]) -> None:
+    """Admin-only Time Allocation Tool settings: entry fields, add-entry form, and the Edit Entries table."""
     if not utils.is_current_user_admin():
         st.info("Sorry, you don't have access to this section.")
         return
 
     render_entry_fields_editor_view()
+
+    st.divider()
+    render_admin_add_entry_view(account_options, account_lookup)
 
     st.divider()
     render_admin_data_editor_view(account_lookup)
@@ -2625,6 +3288,6 @@ if is_admin_user:
     with exports_tab:
         render_exports_view()
     with settings_tab:
-        render_admin_settings_view(account_lookup)
+        render_admin_settings_view(account_lookup, account_options)
 else:
     render_input_view(user_login, full_name, department, account_options, account_lookup)

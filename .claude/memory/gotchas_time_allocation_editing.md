@@ -15,6 +15,8 @@ metadata:
 
 4. **Reporting Name and Customer Code autofill each other.** When a Reporting Name has multiple codes, the first alphabetically wins. This pairing logic also runs in the admin Edit Entries data editor.
 
+5. **Admin "Add Entries" form (Admin Settings tab) APPENDS; it does not replace.** Unlike the Input tab's `save_records` (which replaces all of a user's rows for a day), `_save_admin_added_records` reads the user's existing rows for the day, concatenates the new rows, then writes — so it adds to the day instead of wiping it. It also targets *any* user (picked from `users.parquet` via `_user_login_lookup`) and is **restricted to the current fiscal period** (`_current_period_bounds` / `_is_within_current_period`), not the This Week/Last Week window. It reuses the Input tab's row widgets via `_render_custom_field_widget(..., key_prefix="ta_add")` and its own `ta_add_*` session keys.
+
 **Why these matter:** The editing window in particular has tripped people up — they think it's broken when really they're trying to edit a day outside the allowed range. The channel-order rule means dev/test environments behave differently from prod (which has more history).
 
 **How to apply:** Before "fixing" any of these, confirm the user actually wants the rule changed vs. is running into the expected behavior. The 50-row threshold and the editable-window window are deliberate UX choices, not bugs.

@@ -26,16 +26,18 @@ DefaultDirName={localappdata}\CNA-WebApp
 DisableProgramGroupPage=yes
 ; Keep the directory page enabled. The default ({localappdata}) works for
 ; most users. On machines where the user profile is a mounted container
-; (FSLogix) or AppData is junctioned to a network share, every path under
+; (FSLogix) or AppData is redirected to a network share, every path under
 ; the profile sits behind a Windows "untrusted mount point" and uv fails
-; with error 448 while building the venv. A pre-check at the start of
-; installation (see CurStepChanged) detects a reparse point anywhere in
-; the install path's ancestry and offers to relaunch Setup into
-; C:\Users\Public\CNA-WebApp, which is off-profile. Post-install
-; validation still catches the 448 case as a backstop.
+; with error 448 while building the venv (it can't create the directory
+; junction it uses for the Python minor-version link). A pre-check at the
+; start of installation (see CurStepChanged) tests whether a junction can
+; actually be created in the chosen folder — the exact operation uv
+; performs — and offers to relaunch Setup into C:\Users\Public\CNA-WebApp
+; (off-profile) if it can't. Post-install validation still catches the 448
+; case as a backstop.
 DisableDirPage=no
 OutputDir=..\..\installer-output
-OutputBaseFilename=CNA-WebApp-Setup
+OutputBaseFilename=CNA-Console-Installer
 SetupIconFile=..\..\cna_icon.ico
 UninstallDisplayIcon={app}\cna_icon.ico
 Compression=lzma
@@ -50,11 +52,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Code]
 
 // -------------------------------------------------------
-// Win32 API imports — used by the untrusted-mount-point
-// pre-check and to terminate this instance for a relaunch.
+// Win32 API import — used to terminate this instance when
+// we relaunch Setup into an off-profile location.
 // -------------------------------------------------------
-function GetFileAttributesW(lpFileName: String): Cardinal;
-  external 'GetFileAttributesW@kernel32.dll stdcall';
 procedure TerminateInstaller(uExitCode: Cardinal);
   external 'ExitProcess@kernel32.dll stdcall';
 
@@ -186,43 +186,45 @@ begin
 end;
 
 // -------------------------------------------------------
-// Helper: is this exact path a reparse point (junction,
-// symlink, mounted container)? Returns False for paths
-// that don't exist.
+// Helper: can a directory junction actually be created
+// inside Dir? This is the definitive test for the condition
+// that makes uv fail with Windows error 448 ("untrusted
+// mount point"). uv builds the venv by creating a directory
+// junction for the Python minor-version link (its
+// transparent patch-upgrade mechanism). On machines where
+// the profile is a mounted container (FSLogix) or AppData is
+// redirected to a network share, creating that junction is
+// blocked by the filesystem — even though nothing in the
+// path is itself a reparse point we could detect by reading
+// attributes (a VHD volume mount has no REPARSE_POINT flag).
+// So instead of inferring, we perform the exact operation uv
+// will: try to create a junction in Dir. If it fails, the
+// location is unusable and we relaunch off-profile.
 // -------------------------------------------------------
-function IsReparsePoint(const Path: String): Boolean;
+function CanCreateJunction(const Dir: String): Boolean;
 var
-  Attrs: Cardinal;
-begin
-  Attrs := GetFileAttributesW(Path);
-  // $FFFFFFFF = INVALID_FILE_ATTRIBUTES, $400 = FILE_ATTRIBUTE_REPARSE_POINT
-  Result := (Attrs <> $FFFFFFFF) and ((Attrs and $400) <> 0);
-end;
-
-// -------------------------------------------------------
-// Helper: does the install path — or ANY of its ancestor
-// directories — sit on a reparse point? This is what makes
-// uv fail with Windows error 448 ("untrusted mount point"):
-// a process can't traverse a junction / mounted container it
-// doesn't trust. The usual culprit is a corporate roaming
-// profile or FSLogix container at C:\Users\<user>, which
-// poisons every path beneath it regardless of install dir.
-// -------------------------------------------------------
-function InstallPathHasReparsePoint(const StartPath: String): Boolean;
-var
-  Cur, Prev: String;
+  Target, Link: String;
+  ResultCode: Integer;
 begin
   Result := False;
-  Cur := StartPath;
-  repeat
-    if IsReparsePoint(Cur) then
-    begin
-      Result := True;
-      Exit;
-    end;
-    Prev := Cur;
-    Cur := ExtractFileDir(Cur);
-  until (Cur = Prev) or (Length(Cur) < 3);
+  ForceDirectories(Dir);
+  Target := AddBackslash(Dir) + '_cna_probe_target';
+  Link   := AddBackslash(Dir) + '_cna_probe_link';
+  ForceDirectories(Target);
+  // Remove any stale link left by a prior aborted run.
+  if DirExists(Link) then
+    Exec('cmd.exe', '/c rmdir "' + Link + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // mklink /J creates a directory junction and needs no admin / developer
+  // mode — same reparse-point operation uv performs. On an untrusted mount
+  // it returns nonzero and the link is never created.
+  if Exec('cmd.exe', '/c mklink /J "' + Link + '" "' + Target + '" >nul 2>&1',
+          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    Result := (ResultCode = 0) and DirExists(Link);
+  // Clean up the probe artifacts regardless of outcome.
+  if DirExists(Link) then
+    Exec('cmd.exe', '/c rmdir "' + Link + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if DirExists(Target) then
+    Exec('cmd.exe', '/c rmdir "' + Target + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
 // -------------------------------------------------------
@@ -242,13 +244,33 @@ begin
   InstallDir := ExpandConstant('{app}');
 
   // ---- Step 0: untrusted-mount-point pre-check ----
-  // Before doing ANY work, make sure the install path can actually be
-  // traversed. If a reparse point sits anywhere in its ancestry (roaming
-  // profile / FSLogix container / AppData junctioned to a network share),
-  // uv will later fail with Windows error 448 while building the venv.
-  // Catch it now and offer to relaunch into an off-profile location.
-  if InstallPathHasReparsePoint(InstallDir) then
+  // Before doing ANY work, make sure this location can host the Python
+  // environment. uv builds the venv by creating a directory junction for
+  // the Python minor-version link; on a mounted-container / redirected
+  // profile that junction creation fails with Windows error 448 and the
+  // install dies halfway through. Reading reparse-point attributes misses
+  // the FSLogix VHD-mount case, so we test the real operation: try to
+  // create a junction here. If we can't, relaunch off-profile.
+  if not CanCreateJunction(InstallDir) then
   begin
+    // Guard against an infinite relaunch loop: if we're ALREADY at the
+    // off-profile fallback and it still can't create junctions, stop and
+    // report instead of relaunching into the same place forever.
+    if CompareText(InstallDir, 'C:\Users\Public\CNA-WebApp') = 0 then
+    begin
+      MsgBox(
+        'Setup can''t create the Python environment on this machine.' + #13#10#13#10 +
+        'Even the off-profile location' + #13#10 +
+        '    C:\Users\Public\CNA-WebApp' + #13#10 +
+        'cannot create the directory junctions uv needs (Windows error 448). ' +
+        'This usually means a security policy is blocking junction creation ' +
+        'system-wide.' + #13#10#13#10 +
+        'Please contact IT, or install to a standard local NTFS folder where ' +
+        'junctions are permitted.',
+        mbError, MB_OK);
+      TerminateInstaller(1);
+    end;
+
     SetArrayLength(Btns, 2);
     Btns[0] := 'OK';
     Btns[1] := 'Exit';
@@ -256,18 +278,17 @@ begin
          'This install location can''t be used',
          'The folder you selected:' + #13#10 +
          '    ' + InstallDir + #13#10#13#10 +
-         'sits behind a Windows "untrusted mount point". Your Windows user ' +
-         'profile is most likely stored on a network share or a mounted ' +
-         'container — common with corporate roaming profiles or FSLogix. ' +
-         'Installing here will fail when Setup builds the Python environment ' +
-         '(Windows error 448).' + #13#10#13#10 +
+         'can''t create the directory junctions uv needs to build the Python ' +
+         'environment (Windows error 448). Your Windows user profile is most ' +
+         'likely stored on a network share or a mounted container — common ' +
+         'with corporate roaming profiles or FSLogix.' + #13#10#13#10 +
          'Setup can install to an off-profile location that avoids this:' + #13#10 +
          '    C:\Users\Public\CNA-WebApp' + #13#10#13#10 +
          'Click OK to restart Setup at that location now, or Exit to quit.',
          mbError, MB_OKCANCEL, Btns, 0) = IDOK then
     begin
       // Relaunch this same installer pointed at the off-profile path. The
-      // fresh instance re-runs this very check, which will pass for Public.
+      // fresh instance re-runs this very probe, which will pass for Public.
       Exec(ExpandConstant('{srcexe}'),
            '/SILENT /DIR="C:\Users\Public\CNA-WebApp"',
            '', SW_SHOW, ewNoWait, ResultCode);

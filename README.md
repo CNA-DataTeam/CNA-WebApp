@@ -14,7 +14,7 @@ Internal Streamlit application for Clark National Accounts logistics and data wo
 ## Quick Start (New Install)
 
 **Option A — Installer (recommended):**
-1. Download and run `CNA-WebApp-Setup.exe`
+1. Download and run `CNA-Console-Installer.exe`
 2. Follow the prompts — Git, Python, and all dependencies are installed automatically
 3. Open the app using the **CNA Console** shortcut
 

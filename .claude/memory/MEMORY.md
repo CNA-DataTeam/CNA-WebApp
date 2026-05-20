@@ -22,6 +22,7 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 ### Project behavior
 
 - [Installer fresh install flow](project_installer_flow.md) — how `_internal/` gets built on fresh installs
+- [Installer untrusted-mount (error 448)](gotchas_installer_untrusted_mount.md) — detect via functional junction probe, not reparse-point attributes (FSLogix)
 - [Accounts parquet daily regen lag](project_accounts_parquet_daily_regen.md) — new accounts columns appear only after the daily parquet rebuilds
 
 ### Per-page gotchas

@@ -42,6 +42,8 @@ This project uses `.claude/memory/` for hard-won lessons that aren't documented 
    2. Rebuild installer: `RebuildInstaller.bat`
    3. Stage `config.enc` alongside other changes.
 
+   **MANDATORY post-push step.** After the push succeeds, publish a GitHub Release with the freshly-built `installer-output/CNA-Console-Installer.exe` attached as an asset. This keeps the stable shareable download URL `https://github.com/CNA-DataTeam/CNA-WebApp/releases/latest/download/CNA-Console-Installer.exe` pointing at the newest installer. Tag scheme is auto-bumped semver patch (next `vMAJOR.MINOR.PATCH` from the highest existing tag). The commit skill has the executable details, including the `gh auth login --web` fallback that opens the browser automatically if the user isn't signed in yet.
+
    The repo is public — NEVER commit `config.py` directly. `CNA Web App.exe` and `_internal/` are gitignored (built by `setup.bat` and rebuilt by the in-app updater if missing); don't commit them and don't run `RebuildExe.bat` as part of commits. See "Config encryption" below for the file layout.
 
 9. **Keep the commit skill in sync.** `.claude/skills/commit/SKILL.md` is the executable version of the commit workflow. Any change to pre-commit steps, commit steps, or related process here MUST be reflected there, or commits will be wrong.

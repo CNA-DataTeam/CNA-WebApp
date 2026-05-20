@@ -45,7 +45,7 @@ fi
 mkdir -p installer-output
 cat > /tmp/run_iscc.bat << 'BATEOF'
 @echo off
-"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /Qp /O"%~1\installer-output" "%~1\CODE - do not open\installer\CNA-WebApp-Setup.iss"
+"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" /Qp /O"%~1\installer-output" "%~1\CODE - do not open\installer\CNA-Console-Installer.iss"
 BATEOF
 cmd //c "$(cygpath -w /tmp/run_iscc.bat)" "$(cygpath -w "$(pwd)")"
 ```
@@ -143,6 +143,76 @@ git -c credential.helper=manager push
 
 If the push is rejected again (another commit landed while you were resolving), repeat from 6a. If this happens more than twice, stop and tell the user.
 
-### 7. Confirm
+### 7. Publish GitHub Release with the installer attached
 
-Tell the user the commit hash, branch, and a brief summary of what was pushed.
+After the push lands, publish a GitHub Release with `installer-output/CNA-Console-Installer.exe` attached so that the stable shareable download link
+
+```
+https://github.com/CNA-DataTeam/CNA-WebApp/releases/latest/download/CNA-Console-Installer.exe
+```
+
+always serves the newest installer. This step runs on every commit — coworkers paste that one URL and always get the latest build.
+
+#### 7a. Make sure `gh` is installed and authenticated
+
+```bash
+if ! command -v gh >/dev/null 2>&1; then
+  echo "ERROR: GitHub CLI (gh) is not installed."
+  echo "Install it with: winget install --id GitHub.cli -e --silent --scope user --accept-package-agreements --accept-source-agreements"
+  echo "Then reopen the shell and re-run the commit flow."
+  exit 1
+fi
+```
+
+If `gh auth status` fails, open the browser for device-code sign-in. **Run this with an extended Bash timeout (e.g. `timeout: 600000`)** because it blocks until the user finishes signing in:
+
+```bash
+if ! gh auth status >/dev/null 2>&1; then
+  echo "Not signed in to gh — opening browser for sign-in. Complete the prompt in the browser."
+  gh auth login --hostname github.com --git-protocol https --web
+fi
+```
+
+Do **not** ask the user to do anything else — `--web` opens the browser automatically. The user only needs to confirm the device code in the browser tab.
+
+#### 7b. Compute the next release tag
+
+Auto-bump the patch number from the highest existing `vMAJOR.MINOR.PATCH` tag. If no semver tag exists yet, start at `v1.0.0`.
+
+```bash
+git fetch --tags --quiet 2>/dev/null || true
+
+LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
+if [[ -z "$LATEST_TAG" ]]; then
+  NEXT_TAG="v1.0.0"
+else
+  IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_TAG#v}"
+  NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+fi
+echo "Next release tag: $NEXT_TAG"
+```
+
+#### 7c. Create the release
+
+```bash
+gh release create "$NEXT_TAG" "installer-output/CNA-Console-Installer.exe" \
+  --title "CNA Web App $NEXT_TAG" \
+  --generate-notes
+```
+
+`gh release create` creates the git tag at `HEAD`, pushes it to the remote, uploads the installer as a release asset, and auto-generates release notes from commits since the previous release.
+
+If the call fails because the tag somehow already exists (rare race), bump the patch once more and retry:
+
+```bash
+NEXT_TAG="v${MAJOR}.${MINOR}.$((PATCH + 2))"
+gh release create "$NEXT_TAG" "installer-output/CNA-Console-Installer.exe" \
+  --title "CNA Web App $NEXT_TAG" \
+  --generate-notes
+```
+
+If it still fails, stop and report to the user — do not silently skip the release.
+
+### 8. Confirm
+
+Tell the user the commit hash, branch, a brief summary of what was pushed, and the release tag that was just published (so they know the `/releases/latest/download/CNA-Console-Installer.exe` URL now serves the newest installer).

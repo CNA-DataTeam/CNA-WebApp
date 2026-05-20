@@ -58,3 +58,4 @@ There are no automated tests in this repo. Use these manual smoke tests after me
 - Day saves replace prior rows for same user+date across files
 - Editing window restriction (This Week / Last Week only) holds — [editing rules](gotchas_time_allocation_editing.md)
 - Admin export filters work
+- Admin "Add Entries" form (Admin Settings tab): user picker lists all known users; date picker is bounded to the current fiscal period; adding appends to (does not replace) the user's existing rows for that day, and the new rows appear in Edit Entries / Exports

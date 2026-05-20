@@ -3,13 +3,13 @@ REM ============================================================
 REM RebuildInstaller.bat — Compile the Inno Setup installer
 REM ============================================================
 REM Uses ISCC.exe (Inno Setup Command-Line Compiler) to build
-REM CNA-WebApp-Setup.exe into the installer-output folder.
+REM CNA-Console-Installer.exe into the installer-output folder.
 REM ============================================================
 
 setlocal EnableDelayedExpansion
 
 set "ROOT_DIR=%~dp0"
-set "ISS_FILE=%ROOT_DIR%CODE - do not open\installer\CNA-WebApp-Setup.iss"
+set "ISS_FILE=%ROOT_DIR%CODE - do not open\installer\CNA-Console-Installer.iss"
 set "OUTPUT_DIR=%ROOT_DIR%installer-output"
 
 REM --- Locate ISCC.exe ---
@@ -83,8 +83,8 @@ if errorlevel 1 (
         exit /b 1
     )
     echo Copying from TEMP to installer-output...
-    copy /Y "%TEMP%\CNA-WebApp-Setup.exe" "%OUTPUT_DIR%\CNA-WebApp-Setup.exe" >nul
+    copy /Y "%TEMP%\CNA-Console-Installer.exe" "%OUTPUT_DIR%\CNA-Console-Installer.exe" >nul
 )
 
 echo.
-echo Installer built: %OUTPUT_DIR%\CNA-WebApp-Setup.exe
+echo Installer built: %OUTPUT_DIR%\CNA-Console-Installer.exe
