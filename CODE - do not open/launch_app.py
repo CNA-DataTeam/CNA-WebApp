@@ -100,6 +100,16 @@ LOADING_HTML = """\
       transition: opacity 0.3s ease;
     }
     .status.fade { opacity: 0; }
+    .timeout-msg {
+      margin-top: 22px;
+      max-width: 340px;
+      font-size: 0.82rem;
+      line-height: 1.5;
+      color: #999;
+      opacity: 0;
+      transition: opacity 0.6s ease;
+    }
+    .timeout-msg.show { opacity: 1; }
   </style>
 </head>
 <body>
@@ -108,6 +118,9 @@ LOADING_HTML = """\
     <div class="app-subtitle">Clark National Accounts</div>
     <div class="spinner"></div>
     <div class="status" id="status">Starting up...</div>
+    <div class="timeout-msg" id="timeoutMsg">
+      Still loading after a few minutes? You may want to close this window and open the app again.
+    </div>
   </div>
   <script>
     const statusEl = document.getElementById('status');
@@ -127,6 +140,13 @@ LOADING_HTML = """\
         statusEl.classList.remove('fade');
       }, 300);
     }, 3000);
+
+    // If the splash is still showing after 5 minutes, something is likely
+    // stuck — suggest closing and reopening. (The splash is replaced by the
+    // app once the server is ready, so this only fires when load stalls.)
+    setTimeout(() => {
+      document.getElementById('timeoutMsg').classList.add('show');
+    }, 5 * 60 * 1000);
   </script>
 </body>
 </html>

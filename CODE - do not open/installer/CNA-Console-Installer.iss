@@ -23,6 +23,10 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\CNA-WebApp
+; Always offer the {localappdata} default. Without this, Inno's default
+; UsePreviousAppDir=yes reuses a path remembered from a prior install
+; (e.g. a stale C:\Users\Public\CNA-WebApp), overriding DefaultDirName.
+UsePreviousAppDir=no
 DisableProgramGroupPage=yes
 ; Keep the directory page enabled; the default ({localappdata}) works for
 ; most users. The failure mode we guard against is Windows RedirectionGuard:
@@ -329,6 +333,53 @@ begin
 end;
 
 // -------------------------------------------------------
+// Stop any leftover processes from a previous install.
+//
+// The symptom this fixes: a Streamlit server from an OUTDATED install is
+// still listening on port 8501. launch_app.py treats an already-listening
+// 8501 as "the app is already running" and just opens a window to that
+// stale server — so after a successful reinstall the user keeps seeing the
+// OLD version. We kill, identified precisely (mirrors ForceCloseApp.bat):
+//   1. The launcher  "CNA Web App.exe"  — distinctive image name.
+//   2. Whatever owns TCP 8501 (the Streamlit server), by PID + tree.
+//   3. Any python/cmd whose command line carries "CODE - do not open"
+//      (the app.py path fragment, unique to this app and present in the
+//      Streamlit launch command at any install location) or "CNA-WebApp".
+// All best-effort and quiet; an absent process is success. Runs as the
+// current user, which owns the stale processes, so no elevation needed.
+// -------------------------------------------------------
+procedure KillExistingAppProcesses();
+var
+  ResultCode: Integer;
+  PsCmd: String;
+begin
+  // 1. Launcher exe by its distinctive image name.
+  Exec('taskkill.exe', '/F /IM "CNA Web App.exe"', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // 2 + 3. Port-8501 owner (the Streamlit server) and any python/cmd whose
+  //        command line carries this app's unique path fragments. Done in one
+  //        PowerShell pass; powershell.exe itself is neither python nor
+  //        cmd.exe, so the literal patterns below don't match this process.
+  PsCmd :=
+    '$ErrorActionPreference=''SilentlyContinue'';' +
+    'foreach($c in Get-NetTCPConnection -LocalPort 8501 -State Listen){' +
+      'taskkill /F /T /PID $c.OwningProcess | Out-Null};' +
+    'Get-CimInstance Win32_Process | Where-Object {' +
+      '($_.Name -match ''python'' -or $_.Name -eq ''cmd.exe'') -and ' +
+      '$_.CommandLine -and ' +
+      '($_.CommandLine -match ''CODE - do not open'' -or $_.CommandLine -match ''CNA-WebApp'')' +
+    '} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }';
+  Exec('powershell.exe',
+       '-NoProfile -ExecutionPolicy Bypass -Command "' + PsCmd + '"', '',
+       SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // Give the OS a moment to release port 8501 and file handles before we
+  // pull/clone into the install dir.
+  Sleep(1500);
+end;
+
+// -------------------------------------------------------
 // Main install logic
 // -------------------------------------------------------
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -345,6 +396,13 @@ begin
   InstallDir := ExpandConstant('{app}');
 
   SetProgress(0);
+
+  // ---- Step 0: stop any running/leftover copy of the app ----
+  // Must happen before clone/pull (releases file handles on the install dir)
+  // and well before the finish-page "Launch" so the new launcher starts a
+  // FRESH server instead of attaching to an outdated one still on port 8501.
+  UpdateStatus('Closing any running copy of CNA Console...');
+  KillExistingAppProcesses();
 
   // ---- Step 1: Git ----
   UpdateStatus('Checking for Git...');
