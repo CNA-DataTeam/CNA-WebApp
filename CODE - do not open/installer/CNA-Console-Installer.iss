@@ -24,17 +24,15 @@ AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\CNA-WebApp
 DisableProgramGroupPage=yes
-; Keep the directory page enabled. The default ({localappdata}) works for
-; most users. On machines where the user profile is a mounted container
-; (FSLogix) or AppData is redirected to a network share, every path under
-; the profile sits behind a Windows "untrusted mount point" and uv fails
-; with error 448 while building the venv (it can't create the directory
-; junction it uses for the Python minor-version link). A pre-check at the
-; start of installation (see CurStepChanged) tests whether a junction can
-; actually be created in the chosen folder — the exact operation uv
-; performs — and offers to relaunch Setup into C:\Users\Public\CNA-WebApp
-; (off-profile) if it can't. Post-install validation still catches the 448
-; case as a backstop.
+; Keep the directory page enabled; the default ({localappdata}) works for
+; most users. The failure mode we guard against is Windows RedirectionGuard:
+; when this installer carries Mark-of-the-Web, the mitigation is inherited by
+; every child process and blocks uv from traversing the junction to its
+; managed Python (error 448) during "uv pip install". To avoid it, setup.bat
+; is run via a one-shot scheduled task — spawned by the Task Scheduler
+; service, so it runs OUTSIDE this installer's (mitigated) process tree. See
+; RunSetupViaScheduledTask in [Code]. If the install still can't finish, a
+; guided manual-finish dialog walks the user through running setup by hand.
 DisableDirPage=no
 OutputDir=..\..\installer-output
 OutputBaseFilename=CNA-Console-Installer
@@ -51,15 +49,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Code]
 
-// -------------------------------------------------------
-// Win32 API import — used to terminate this instance when
-// we relaunch Setup into an off-profile location.
-// -------------------------------------------------------
-procedure TerminateInstaller(uExitCode: Cardinal);
-  external 'ExitProcess@kernel32.dll stdcall';
-
 var
   StatusLabel: TNewStaticText;
+  GFailInstallDir: String;
 
 // -------------------------------------------------------
 // Helper: run a command and wait for it to finish
@@ -186,45 +178,154 @@ begin
 end;
 
 // -------------------------------------------------------
-// Helper: can a directory junction actually be created
-// inside Dir? This is the definitive test for the condition
-// that makes uv fail with Windows error 448 ("untrusted
-// mount point"). uv builds the venv by creating a directory
-// junction for the Python minor-version link (its
-// transparent patch-upgrade mechanism). On machines where
-// the profile is a mounted container (FSLogix) or AppData is
-// redirected to a network share, creating that junction is
-// blocked by the filesystem — even though nothing in the
-// path is itself a reparse point we could detect by reading
-// attributes (a VHD volume mount has no REPARSE_POINT flag).
-// So instead of inferring, we perform the exact operation uv
-// will: try to create a junction in Dir. If it fails, the
-// location is unusable and we relaunch off-profile.
+// Run setup.bat OUTSIDE this installer's process tree.
+//
+// When the downloaded installer carries Mark-of-the-Web, Windows applies the
+// RedirectionGuard mitigation to it, and that mitigation is INHERITED by every
+// child process. Under it, uv cannot traverse the junction to its managed
+// Python and fails with error 448 during "uv pip install". A one-shot
+// scheduled task is spawned by the Task Scheduler service (not by us), so the
+// task — and the uv it runs — execute WITHOUT the inherited mitigation.
+//
+// The wrapper .bat lives under {commonappdata} (C:\ProgramData\...), a path
+// with no spaces, so schtasks /tr needs no fragile quoting. It always writes a
+// completion marker (with setup's exit code) so we can tell when the task has
+// finished, success or failure.
+//
+// Returns True if the task ran to completion; False if it could not be
+// created/started (e.g. scheduled tasks blocked by policy) so the caller can
+// fall back to running setup directly in-process.
 // -------------------------------------------------------
-function CanCreateJunction(const Dir: String): Boolean;
+function RunSetupViaScheduledTask(const InstallDir, SetupBat, SetupLog: String): Boolean;
 var
-  Target, Link: String;
-  ResultCode: Integer;
+  WorkDir, Wrapper, Marker: String;
+  ResultCode, Waited: Integer;
 begin
   Result := False;
-  ForceDirectories(Dir);
-  Target := AddBackslash(Dir) + '_cna_probe_target';
-  Link   := AddBackslash(Dir) + '_cna_probe_link';
-  ForceDirectories(Target);
-  // Remove any stale link left by a prior aborted run.
-  if DirExists(Link) then
-    Exec('cmd.exe', '/c rmdir "' + Link + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  // mklink /J creates a directory junction and needs no admin / developer
-  // mode — same reparse-point operation uv performs. On an untrusted mount
-  // it returns nonzero and the link is never created.
-  if Exec('cmd.exe', '/c mklink /J "' + Link + '" "' + Target + '" >nul 2>&1',
-          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
-    Result := (ResultCode = 0) and DirExists(Link);
-  // Clean up the probe artifacts regardless of outcome.
-  if DirExists(Link) then
-    Exec('cmd.exe', '/c rmdir "' + Link + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if DirExists(Target) then
-    Exec('cmd.exe', '/c rmdir "' + Target + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  WorkDir := ExpandConstant('{commonappdata}') + '\CNAConsoleSetup';
+  ForceDirectories(WorkDir);
+  Wrapper := WorkDir + '\run_setup.bat';
+  Marker := WorkDir + '\setup_done.marker';
+  DeleteFile(Marker);
+
+  // Self-contained wrapper: cd to the install dir, run setup silently with the
+  // log captured, then ALWAYS record a completion marker with the exit code.
+  SaveStringToFile(Wrapper,
+    '@echo off' + #13#10 +
+    'cd /d "' + InstallDir + '"' + #13#10 +
+    'call "' + SetupBat + '" /silent > "' + SetupLog + '" 2>&1' + #13#10 +
+    'echo DONE_%errorlevel%>"' + Marker + '"' + #13#10, False);
+
+  // Replace any stale task, then create + run a one-shot task as the current user.
+  Exec('schtasks.exe', '/delete /tn "CNAConsoleSetup" /f', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if (not Exec('schtasks.exe',
+        '/create /tn "CNAConsoleSetup" /tr "' + Wrapper + '" /sc ONCE /st 23:59 /f',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+    Exit;
+  if (not Exec('schtasks.exe', '/run /tn "CNAConsoleSetup"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode)) or (ResultCode <> 0) then
+  begin
+    Exec('schtasks.exe', '/delete /tn "CNAConsoleSetup" /f', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exit;
+  end;
+
+  // Wait for the marker. setup.bat can take several minutes (uv Python
+  // download, venv, pip install, PyInstaller build); cap at ~20 minutes.
+  Waited := 0;
+  while (not FileExists(Marker)) and (Waited < 1200) do
+  begin
+    Sleep(1000);
+    Waited := Waited + 1;
+  end;
+
+  Exec('schtasks.exe', '/delete /tn "CNAConsoleSetup" /f', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := FileExists(Marker);
+end;
+
+// -------------------------------------------------------
+// "Open Install Folder" button handler for the manual-finish dialog.
+// -------------------------------------------------------
+procedure OpenInstallFolderClick(Sender: TObject);
+var
+  ErrorCode: Integer;
+begin
+  Exec('explorer.exe', '"' + GFailInstallDir + '"', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
+end;
+
+// -------------------------------------------------------
+// Friendly "finish setup by hand" dialog, shown when the install could not
+// complete automatically — for ANY setup reason. Plain step-by-step
+// instructions plus a button that opens the install folder in Explorer.
+// -------------------------------------------------------
+procedure ShowSetupFailedDialog(const InstallDir, Details: String);
+var
+  Form: TSetupForm;
+  Steps: TNewStaticText;
+  DetailBox: TNewMemo;
+  OpenBtn, CloseBtn: TNewButton;
+begin
+  GFailInstallDir := InstallDir;
+  Form := CreateCustomForm(ScaleX(500), ScaleY(442), False, False);
+  try
+    Form.Caption := 'CNA Console — one quick step to finish';
+    Form.Position := poScreenCenter;
+    Form.BorderStyle := bsDialog;
+
+    Steps := TNewStaticText.Create(Form);
+    Steps.Parent := Form;
+    Steps.Left := ScaleX(20);
+    Steps.Top := ScaleY(18);
+    Steps.Width := Form.ClientWidth - ScaleX(40);
+    Steps.AutoSize := False;
+    Steps.Height := ScaleY(280);
+    Steps.WordWrap := True;
+    Steps.Caption :=
+      'Please retry running this installer again.' + #13#10#13#10 +
+      'If you see this error message again, the app is installed but one final' + #13#10 +
+      'setup step needs to be run by hand. It only takes a minute:' + #13#10#13#10 +
+      '    1.  Click the "Open Install Folder" button below.' + #13#10#13#10 +
+      '    2.  In the window that opens, double-click the file named  setup' + #13#10 +
+      '         (it may show as "setup.bat").' + #13#10#13#10 +
+      '    3.  A black window will appear and run for a few minutes.' + #13#10 +
+      '         Wait for it to finish — it closes by itself when done.' + #13#10#13#10 +
+      '    4.  Open "CNA Console" by searching from your task bar or Start Menu.' + #13#10#13#10 +
+      'Stuck on any of these steps? Contact Jordan Ramsey at' + #13#10 +
+      'jramsey@clarknationalaccounts.com.';
+
+    DetailBox := TNewMemo.Create(Form);
+    DetailBox.Parent := Form;
+    DetailBox.Left := ScaleX(20);
+    DetailBox.Top := ScaleY(304);
+    DetailBox.Width := Form.ClientWidth - ScaleX(40);
+    DetailBox.Height := ScaleY(80);
+    DetailBox.ReadOnly := True;
+    DetailBox.ScrollBars := ssVertical;
+    DetailBox.Text := 'Technical details (for support):' + #13#10 + Details;
+
+    OpenBtn := TNewButton.Create(Form);
+    OpenBtn.Parent := Form;
+    OpenBtn.Caption := 'Open Install Folder';
+    OpenBtn.Left := ScaleX(20);
+    OpenBtn.Top := Form.ClientHeight - ScaleY(42);
+    OpenBtn.Width := ScaleX(170);
+    OpenBtn.Height := ScaleY(28);
+    OpenBtn.OnClick := @OpenInstallFolderClick;
+
+    CloseBtn := TNewButton.Create(Form);
+    CloseBtn.Parent := Form;
+    CloseBtn.Caption := 'Close';
+    CloseBtn.Left := Form.ClientWidth - ScaleX(110);
+    CloseBtn.Top := Form.ClientHeight - ScaleY(42);
+    CloseBtn.Width := ScaleX(90);
+    CloseBtn.Height := ScaleY(28);
+    CloseBtn.ModalResult := mrOK;
+    CloseBtn.Default := True;
+
+    Form.ActiveControl := CloseBtn;
+    Form.ShowModal;
+  finally
+    Form.Free;
+  end;
 end;
 
 // -------------------------------------------------------
@@ -233,70 +334,15 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath, CloneLog, SetupLog: String;
-  PythonDll, VenvPython, MissingArtifacts, LogTail, Tip: String;
+  PythonDll, VenvPython, MissingArtifacts, LogTail: String;
   CloneLogContent, SetupLogContent: AnsiString;
   ResultCode, WingetCode, LogLen: Integer;
-  Btns: TArrayOfString;
+  SetupRan: Boolean;
 begin
   if CurStep <> ssInstall then
     Exit;
 
   InstallDir := ExpandConstant('{app}');
-
-  // ---- Step 0: untrusted-mount-point pre-check ----
-  // Before doing ANY work, make sure this location can host the Python
-  // environment. uv builds the venv by creating a directory junction for
-  // the Python minor-version link; on a mounted-container / redirected
-  // profile that junction creation fails with Windows error 448 and the
-  // install dies halfway through. Reading reparse-point attributes misses
-  // the FSLogix VHD-mount case, so we test the real operation: try to
-  // create a junction here. If we can't, relaunch off-profile.
-  if not CanCreateJunction(InstallDir) then
-  begin
-    // Guard against an infinite relaunch loop: if we're ALREADY at the
-    // off-profile fallback and it still can't create junctions, stop and
-    // report instead of relaunching into the same place forever.
-    if CompareText(InstallDir, 'C:\Users\Public\CNA-WebApp') = 0 then
-    begin
-      MsgBox(
-        'Setup can''t create the Python environment on this machine.' + #13#10#13#10 +
-        'Even the off-profile location' + #13#10 +
-        '    C:\Users\Public\CNA-WebApp' + #13#10 +
-        'cannot create the directory junctions uv needs (Windows error 448). ' +
-        'This usually means a security policy is blocking junction creation ' +
-        'system-wide.' + #13#10#13#10 +
-        'Please contact IT, or install to a standard local NTFS folder where ' +
-        'junctions are permitted.',
-        mbError, MB_OK);
-      TerminateInstaller(1);
-    end;
-
-    SetArrayLength(Btns, 2);
-    Btns[0] := 'OK';
-    Btns[1] := 'Exit';
-    if TaskDialogMsgBox(
-         'This install location can''t be used',
-         'The folder you selected:' + #13#10 +
-         '    ' + InstallDir + #13#10#13#10 +
-         'can''t create the directory junctions uv needs to build the Python ' +
-         'environment (Windows error 448). Your Windows user profile is most ' +
-         'likely stored on a network share or a mounted container — common ' +
-         'with corporate roaming profiles or FSLogix.' + #13#10#13#10 +
-         'Setup can install to an off-profile location that avoids this:' + #13#10 +
-         '    C:\Users\Public\CNA-WebApp' + #13#10#13#10 +
-         'Click OK to restart Setup at that location now, or Exit to quit.',
-         mbError, MB_OKCANCEL, Btns, 0) = IDOK then
-    begin
-      // Relaunch this same installer pointed at the off-profile path. The
-      // fresh instance re-runs this very probe, which will pass for Public.
-      Exec(ExpandConstant('{srcexe}'),
-           '/SILENT /DIR="C:\Users\Public\CNA-WebApp"',
-           '', SW_SHOW, ewNoWait, ResultCode);
-    end;
-    // Either way this instance is done — it must not install to the bad
-    // path. On OK, the relaunched instance has already taken over.
-    TerminateInstaller(0);
-  end;
 
   SetProgress(0);
 
@@ -415,17 +461,26 @@ begin
   UpdateStatus('Running setup (installing Python, dependencies, creating shortcut)...');
   SetupLog := ExpandConstant('{tmp}') + '\cna-setup.log';
   SaveStringToFile(SetupLog, '', False);
-  Exec('cmd.exe',
-       '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '" /silent > "' + SetupLog + '" 2>&1',
-       InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  if ResultCode <> 0 then
-    Log('setup.bat returned non-zero exit code: ' + IntToStr(ResultCode));
+  // Run setup OUT of this installer's (possibly Mark-of-the-Web-mitigated)
+  // process tree via a scheduled task, so uv can traverse its Python junction.
+  // If the task can't be created (policy-locked machine), fall back to running
+  // setup directly in-process — that still works on machines without the
+  // RedirectionGuard mitigation. Either way, validation below is the backstop.
+  SetupRan := RunSetupViaScheduledTask(InstallDir, SetupBat, SetupLog);
+  if not SetupRan then
+  begin
+    Log('Scheduled-task setup unavailable; running setup directly in-process.');
+    Exec('cmd.exe',
+         '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '" /silent > "' + SetupLog + '" 2>&1',
+         InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 
-  // Post-condition validation: setup.bat is best-effort and historically
-  // swallows several failure modes (PyInstaller build, move/xcopy, antivirus
-  // quarantine of _internal\python311.dll). Verify the artifacts the launcher
-  // actually needs at runtime before reporting success.
+  // Post-condition validation (backstop for ANY setup failure — the
+  // scheduled-task path, the in-process fallback, antivirus quarantine of
+  // _internal\python311.dll, a failed PyInstaller build, etc.). If the files
+  // the launcher needs at runtime aren't present, show the guided
+  // manual-finish dialog rather than declaring success.
   PythonDll := InstallDir + '\_internal\python311.dll';
   VenvPython := InstallDir + '\.venv\Scripts\python.exe';
   if (not FileExists(PythonDll)) or (not FileExists(VenvPython)) then
@@ -440,40 +495,17 @@ begin
     if FileExists(SetupLog) then
       LoadStringFromFile(SetupLog, SetupLogContent);
     if Length(SetupLogContent) = 0 then
-      SetupLogContent := '(setup.bat produced no captured output)';
+      SetupLogContent := '(setup produced no captured output)';
 
-    // Show the tail of the setup log — errors are usually near the end.
+    // Tail of the setup log — errors are usually near the end.
     LogTail := String(SetupLogContent);
     LogLen := Length(LogTail);
-    if LogLen > 2500 then
-      LogTail := '...' + Copy(LogTail, LogLen - 2496, 2500);
+    if LogLen > 1500 then
+      LogTail := '...' + Copy(LogTail, LogLen - 1496, 1500);
 
-    // Pick a tailored hint based on what's in the log. Two common failure
-    // modes we know about:
-    //   - "untrusted mount point" (Windows error 448): corporate folder
-    //     redirection on AppData. Fix: install to a non-redirected dir.
-    //   - Default: antivirus quarantine of a PyInstaller-built file.
-    if Pos('untrusted mount point', LowerCase(LogTail)) > 0 then
-      Tip := 'The install location is behind a Windows "untrusted mount point" ' +
-             '(Windows error 448). This happens when the user profile is a ' +
-             'mounted container (FSLogix) or AppData is redirected to a network ' +
-             'share — uv cannot traverse into the virtual environment.' + #13#10#13#10 +
-             'Fix: re-run this installer and install to a location outside your ' +
-             'user profile instead — for example:' + #13#10 +
-             '  C:\Users\Public\CNA-WebApp'
-    else
-      Tip := 'This usually means antivirus quarantined a file during install ' +
-             '(Windows Defender frequently flags PyInstaller-built executables). ' +
-             'Check your antivirus quarantine and whitelist ' + InstallDir + ', ' +
-             'then re-run setup.bat from that folder.';
-
-    MsgBox(
-      'Setup finished, but the app is not ready to launch.' + #13#10#13#10 +
-      'Missing required files:' + #13#10 + MissingArtifacts + #13#10 +
-      'setup.bat exit code: ' + IntToStr(ResultCode) + #13#10#13#10 +
-      Tip + #13#10#13#10 +
-      'setup.bat output (tail):' + #13#10 + LogTail,
-      mbError, MB_OK);
+    ShowSetupFailedDialog(InstallDir,
+      'Missing files:' + #13#10 + MissingArtifacts + #13#10 +
+      'setup output (tail):' + #13#10 + LogTail);
   end;
 
   // ---- Step 4: Copy config key ----
