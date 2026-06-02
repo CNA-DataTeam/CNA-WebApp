@@ -1742,6 +1742,29 @@ def _attach_fiscal_columns(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _resolve_downloads_dir() -> Path:
+    """
+    Return the current user's Downloads folder.
+
+    Honors Windows known-folder redirection (e.g. OneDrive) by reading the
+    Downloads GUID from the Shell Folders registry key, which stores fully
+    expanded absolute paths. Falls back to ~/Downloads if anything fails.
+    """
+    try:
+        import winreg
+
+        shell_folders_key = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+        downloads_guid = "{374DE290-123F-4565-9164-39C4925E467B}"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, shell_folders_key) as key:
+            value, _ = winreg.QueryValueEx(key, downloads_guid)
+        candidate = Path(str(value).strip())
+        if str(candidate).strip():
+            return candidate
+    except Exception:
+        pass
+    return Path.home() / "Downloads"
+
+
 @st.fragment
 def render_exports_view() -> None:
     """Render admin export view with filters and CSV download."""
@@ -1853,6 +1876,11 @@ def render_exports_view() -> None:
             filtered["Department"].fillna("").astype(str).str.strip().eq(selected_department)
         ]
 
+    # Total Minutes mirrors the Time column (HH:MM[:SS]) converted to whole minutes.
+    filtered["Total Minutes"] = (
+        filtered["Time"].fillna("").astype(str).map(utils.parse_hhmmss).clip(lower=0).div(60).round().astype(int)
+    )
+
     column_order = [
         "Entry Date",
         "Fiscal Year",
@@ -1863,6 +1891,7 @@ def render_exports_view() -> None:
         "Account",
         "Customer Code",
         "Time",
+        "Total Minutes",
         "Channel",
         "Source File",
     ]
@@ -1871,14 +1900,21 @@ def render_exports_view() -> None:
     display_df = filtered.drop(columns=["User", "Source File"], errors="ignore")
     st.dataframe(display_df, hide_index=True, width="stretch")
 
-    csv_bytes = filtered.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Download CSV",
-        data=csv_bytes,
-        file_name=f"time_allocation_export_{utils.to_eastern(utils.now_utc()):%Y%m%d_%H%M%S}.csv",
-        mime="text/csv",
-        disabled=filtered.empty,
-    )
+    # The app runs locally on the user's own Windows machine, so we save the
+    # CSV straight to their Downloads folder rather than relying on a browser
+    # download (st.download_button was silently doing nothing for users).
+    if st.button("Download CSV", key="ta_export_download_csv", disabled=filtered.empty):
+        file_name = f"time_allocation_export_{utils.to_eastern(utils.now_utc()):%Y%m%d_%H%M%S}.csv"
+        try:
+            downloads_dir = _resolve_downloads_dir()
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+            out_path = downloads_dir / file_name
+            out_path.write_bytes(filtered.to_csv(index=False).encode("utf-8"))
+            st.success(f"Saved {len(filtered):,} rows to {out_path}")
+            LOGGER.info("Saved time-allocation export (%d rows) to '%s'", len(filtered), out_path)
+        except Exception as exc:
+            LOGGER.exception("Failed to save time-allocation export: %s", exc)
+            st.error(f"Could not save the export: {exc}")
 
 
 def _count_admin_editor_changes(

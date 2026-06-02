@@ -97,7 +97,27 @@
       "WebFetch(domain:docs.astral.sh)",
       "PowerShell(& \"$env:LOCALAPPDATA\\\\Programs\\\\Inno Setup 6\\\\ISCC.exe\" /Qp /O\"$env:TEMP\\\\cna-iss-check\" \"CODE - do not open\\\\installer\\\\CNA-Console-Installer.iss\")",
       "PowerShell(Get-ChildItem *)",
-      "PowerShell(Remove-Item *)"
+      "PowerShell(Remove-Item *)",
+      "Bash(gh release *)",
+      "mcp__claude_ai_Microsoft_Learn__microsoft_docs_search",
+      "mcp__claude_ai_Microsoft_Learn__microsoft_docs_fetch",
+      "WebFetch(domain:msrc.microsoft.com)",
+      "WebFetch(domain:theryuu.github.io)",
+      "mcp__Windows-MCP__PowerShell",
+      "PowerShell(Join-Path *)",
+      "Bash(command -v gh)",
+      "Bash(gh auth *)",
+      "Bash(git ls-remote *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(command -v git-credential-manager git-credential-manager-core)",
+      "Bash(git-credential-manager --version)",
+      "Bash(git credential-manager *)",
+      "PowerShell(git ls-remote *)",
+      "Bash(git *)",
+      "Bash(echo \"erase exit: $?\")",
+      "Bash(echo \"PUSH_EXIT=$?\")",
+      "Bash(git show *)",
+      "Read(//tmp/**)"
     ]
   }
 }
