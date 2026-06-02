@@ -1092,13 +1092,124 @@ def _load_task_log_entries(completed_dir: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def _save_task_log_changes(changes_df: pd.DataFrame) -> tuple[int, int]:
-    """Persist edited task-log values back to the original parquet files."""
+def _parse_partition_user_key(source_file: Path) -> str | None:
+    """Extract the ``user=<key>`` partition segment from a completed-task path."""
+    for part in Path(source_file).parts:
+        text = str(part)
+        if text.startswith("user="):
+            return text[len("user="):]
+    return None
+
+
+def _parse_partition_date(source_file: Path) -> tuple[int, int, int] | None:
+    """Extract the (year, month, day) partition segments from a path, if present."""
+    year = month = day = None
+    for part in Path(source_file).parts:
+        text = str(part)
+        try:
+            if text.startswith("year="):
+                year = int(text[len("year="):])
+            elif text.startswith("month="):
+                month = int(text[len("month="):])
+            elif text.startswith("day="):
+                day = int(text[len("day="):])
+        except ValueError:
+            continue
+    if year and month and day:
+        return (year, month, day)
+    return None
+
+
+def _completed_root_from_source(source_file: Path) -> Path:
+    """Return the partition root (the path above ``user=...``) for a source file."""
+    parts = Path(source_file).parts
+    for i, part in enumerate(parts):
+        if str(part).startswith("user=") and i > 0:
+            return Path(*parts[:i])
+    return Path(config.COMPLETED_TASKS_DIR)
+
+
+def _et_str_to_utc(text: object):
+    """Parse an Eastern 'YYYY-MM-DD HH:MM[:SS]' string to a tz-aware UTC Timestamp.
+
+    Returns None for blank input, or the sentinel string 'INVALID' if it cannot
+    be parsed.
+    """
+    text = str(text or "").strip()
+    if not text:
+        return None
+    parsed = None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            parsed = datetime.datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        return "INVALID"
+    try:
+        localized = pd.Timestamp(parsed).tz_localize(
+            "America/New_York", ambiguous=True, nonexistent="shift_forward"
+        )
+    except Exception:
+        return "INVALID"
+    return localized.tz_convert("UTC")
+
+
+def _build_fullname_login_map() -> dict[str, str]:
+    """Map each known Full Name to its login from users.parquet (first wins)."""
+    try:
+        users_df = _load_users_parquet(USERS_PARQUET_PATH)
+    except Exception:
+        return {}
+    name_col = _resolve_existing_column(users_df, ["Full Name", "FullName", "Name"])
+    login_col = _resolve_existing_column(
+        users_df, ["User", "UserLogin", "Login", "Username", "User Name"]
+    )
+    mapping: dict[str, str] = {}
+    if name_col and login_col:
+        for _, row in users_df.iterrows():
+            name = str(row.get(name_col) or "").strip()
+            login = str(row.get(login_col) or "").strip()
+            if name and login and name not in mapping:
+                mapping[name] = login
+    return mapping
+
+
+def _new_task_log_filename(start_ts: object, task_id: object, target_dir: Path) -> Path:
+    """Build a non-colliding task_<ts>_<id>.parquet path inside ``target_dir``."""
+    if start_ts is not None and not pd.isna(start_ts):
+        eastern = pd.Timestamp(start_ts).tz_convert("America/New_York")
+        stamp = eastern.strftime("%Y%m%d_%H%M%S")
+    else:
+        stamp = "00000000_000000"
+    tid = str(task_id or "").strip() or uuid.uuid4().hex
+    base = f"task_{stamp}_{tid[:8]}"
+    candidate = target_dir / f"{base}.parquet"
+    if candidate.exists():
+        candidate = target_dir / f"{base}_{uuid.uuid4().hex[:8]}.parquet"
+    return candidate
+
+
+def _save_task_log_changes(changes_df: pd.DataFrame) -> tuple[int, int, int]:
+    """Persist edited task-log values back to the partitioned parquet files.
+
+    Rows whose owning user (FullName) or calendar date changed are relocated to
+    the correct ``user=/year=/month=/day=`` partition: the row is written to a
+    new file in the destination partition and removed from its source file.
+    Everything else is updated in place. Returns
+    (updated_rows, touched_files, relocated_rows).
+    """
     if changes_df.empty:
-        return 0, 0
+        return 0, 0, 0
+
+    string_cols = ["TaskID", "Notes", "TaskName", "FullName", "UserLogin"]
+    ts_cols = ["StartTimestampUTC", "EndTimestampUTC"]
 
     updated_rows = 0
-    touched_files = 0
+    relocated_rows = 0
+    touched_files: set[str] = set()
+
     for source_file, group in changes_df.groupby("__source_file"):
         file_path = Path(str(source_file))
         if not file_path.exists():
@@ -1113,7 +1224,23 @@ def _save_task_log_changes(changes_df: pd.DataFrame) -> tuple[int, int]:
         if file_df.empty:
             continue
 
-        file_updated = False
+        for col in string_cols:
+            if col not in file_df.columns:
+                file_df[col] = pd.NA
+        for col in ts_cols:
+            if col not in file_df.columns:
+                file_df[col] = pd.NaT
+        if "DurationSeconds" not in file_df.columns:
+            file_df["DurationSeconds"] = 0
+
+        src_user_key = _parse_partition_user_key(file_path)
+        src_date = _parse_partition_date(file_path)
+        root = _completed_root_from_source(file_path)
+
+        file_changed = False
+        drop_index_labels: set = set()
+        inserts: list[tuple[Path, pd.DataFrame]] = []
+
         for _, change in group.iterrows():
             target_index = None
             task_id = str(change.get("TaskID") or "").strip()
@@ -1122,7 +1249,6 @@ def _save_task_log_changes(changes_df: pd.DataFrame) -> tuple[int, int]:
                 matches = file_df.index[task_id_series.eq(task_id)]
                 if len(matches) > 0:
                     target_index = matches[0]
-
             if target_index is None:
                 try:
                     row_idx = int(change.get("__row_idx"))
@@ -1130,48 +1256,116 @@ def _save_task_log_changes(changes_df: pd.DataFrame) -> tuple[int, int]:
                     row_idx = -1
                 if 0 <= row_idx < len(file_df):
                     target_index = file_df.index[row_idx]
-
             if target_index is None:
                 continue
 
-            row_updated = False
+            new_task_name = str(change.get("new_TaskName") or "").strip()
+            new_notes = str(change.get("new_Notes") or "").strip()
+            new_full_name = str(change.get("new_FullName") or "").strip()
+            new_login = str(change.get("new_UserLogin") or "").strip()
+            new_start = change.get("new_StartUTC")
+            new_end = change.get("new_EndUTC")
+            try:
+                new_duration = int(change.get("new_DurationSeconds"))
+            except (TypeError, ValueError):
+                new_duration = None
+            user_changed = bool(change.get("user_changed"))
+            time_changed = bool(change.get("time_changed"))
 
-            if "Notes_new" in change.index:
-                if "Notes" not in file_df.columns:
-                    file_df["Notes"] = pd.NA
-                new_notes = str(change.get("Notes_new") or "").strip()
-                file_df.at[target_index, "Notes"] = new_notes or None
-                row_updated = True
+            new_start_ts = (
+                pd.Timestamp(new_start) if new_start is not None and not pd.isna(new_start) else None
+            )
+            new_end_ts = (
+                pd.Timestamp(new_end) if new_end is not None and not pd.isna(new_end) else None
+            )
 
-            if "DurationSeconds_new" in change.index:
-                try:
-                    new_duration_seconds = int(change.get("DurationSeconds_new"))
-                except (TypeError, ValueError):
-                    new_duration_seconds = None
+            # ---- resolve the destination partition ----
+            if user_changed and new_login:
+                target_user_key = utils.sanitize_key(new_login)
+            elif src_user_key is not None:
+                target_user_key = src_user_key
+            else:
+                target_user_key = utils.sanitize_key(new_login)
 
-                if new_duration_seconds is not None and new_duration_seconds >= 0:
-                    if "DurationSeconds" not in file_df.columns:
-                        file_df["DurationSeconds"] = 0
-                    file_df.at[target_index, "DurationSeconds"] = new_duration_seconds
+            target_date = None
+            if time_changed and new_start_ts is not None:
+                eastern = new_start_ts.tz_convert("America/New_York")
+                target_date = (eastern.year, eastern.month, eastern.day)
+            elif src_date is not None:
+                target_date = src_date
+            elif new_start_ts is not None:
+                eastern = new_start_ts.tz_convert("America/New_York")
+                target_date = (eastern.year, eastern.month, eastern.day)
 
-                    if "EndTimestampUTC" not in file_df.columns:
-                        file_df["EndTimestampUTC"] = pd.NaT
-                    start_value = file_df.at[target_index, "StartTimestampUTC"] if "StartTimestampUTC" in file_df.columns else pd.NaT
-                    if pd.notna(start_value):
-                        file_df.at[target_index, "EndTimestampUTC"] = (
-                            pd.Timestamp(start_value) + pd.to_timedelta(new_duration_seconds, unit="s")
-                        )
-                    row_updated = True
+            user_moved = bool(
+                user_changed and src_user_key is not None and target_user_key != src_user_key
+            )
+            date_moved = bool(
+                time_changed
+                and target_date is not None
+                and (src_date is None or target_date != src_date)
+            )
+            relocate = (user_moved or date_moved) and target_date is not None
 
-            if row_updated:
-                file_updated = True
+            def _apply_values(frame: pd.DataFrame, idx) -> None:
+                frame.at[idx, "TaskName"] = new_task_name or None
+                frame.at[idx, "Notes"] = new_notes or None
+                frame.at[idx, "FullName"] = new_full_name or None
+                if new_login:
+                    frame.at[idx, "UserLogin"] = new_login
+                if new_start_ts is not None:
+                    frame.at[idx, "StartTimestampUTC"] = new_start_ts
+                if new_end_ts is not None:
+                    frame.at[idx, "EndTimestampUTC"] = new_end_ts
+                if new_duration is not None and new_duration >= 0:
+                    frame.at[idx, "DurationSeconds"] = int(new_duration)
+
+            if relocate:
+                insert_df = file_df.loc[[target_index]].copy()
+                ins_idx = insert_df.index[0]
+                _apply_values(insert_df, ins_idx)
+                if not str(insert_df.at[ins_idx, "TaskID"] or "").strip():
+                    insert_df.at[ins_idx, "TaskID"] = str(uuid.uuid4())
+                year, month, day = target_date
+                target_dir = (
+                    root
+                    / f"user={target_user_key}"
+                    / f"year={year}"
+                    / f"month={month:02d}"
+                    / f"day={day:02d}"
+                )
+                dest = _new_task_log_filename(new_start_ts, insert_df.at[ins_idx, "TaskID"], target_dir)
+                inserts.append((dest, insert_df.reset_index(drop=True)))
+                drop_index_labels.add(target_index)
+                relocated_rows += 1
+                updated_rows += 1
+            else:
+                _apply_values(file_df, target_index)
+                file_changed = True
                 updated_rows += 1
 
-        if file_updated:
-            _write_tasks_parquet(file_path, file_df)
-            touched_files += 1
+        # Write relocated rows to their new partition before pruning the source,
+        # so a mid-operation failure cannot lose data.
+        for dest, insert_df in inserts:
+            _write_tasks_parquet(dest, insert_df)
+            touched_files.add(str(dest))
 
-    return updated_rows, touched_files
+        if drop_index_labels:
+            file_df = file_df.drop(index=list(drop_index_labels))
+            file_changed = True
+
+        if file_changed:
+            touched_files.add(str(file_path))
+            if file_df.empty:
+                try:
+                    file_path.unlink(missing_ok=True)
+                except Exception as exc:
+                    LOGGER.warning("Failed to remove emptied task log source file '%s': %s", file_path, exc)
+                    _write_tasks_parquet(file_path, file_df.reset_index(drop=True))
+            else:
+                _write_tasks_parquet(file_path, file_df.reset_index(drop=True))
+
+    return updated_rows, len(touched_files), relocated_rows
 
 
 def _delete_task_log_rows(delete_df: pd.DataFrame) -> tuple[int, int]:
@@ -1316,6 +1510,13 @@ def render_task_log_section() -> None:
     else:
         df["DurationSeconds"] = 0
 
+    # Truth columns needed to recompute edits / relocate rows on save.
+    for _ts_col in ("StartTimestampUTC", "EndTimestampUTC"):
+        if _ts_col not in df.columns:
+            df[_ts_col] = pd.NaT
+    if "UserLogin" not in df.columns:
+        df["UserLogin"] = ""
+
     display_cols = [
         "Entry Date",
         "FullName",
@@ -1407,25 +1608,63 @@ def render_task_log_section() -> None:
         sorted_df = filtered_df.sort_values("StartTimestampUTC", ascending=False, na_position="last")
     else:
         sorted_df = filtered_df
-    working_df = sorted_df[display_cols + ["DurationSeconds", "TaskID", "__source_file", "__row_idx"]].reset_index(drop=True)
+    working_df = sorted_df[
+        display_cols
+        + [
+            "DurationSeconds",
+            "StartTimestampUTC",
+            "EndTimestampUTC",
+            "UserLogin",
+            "TaskID",
+            "__source_file",
+            "__row_idx",
+        ]
+    ].reset_index(drop=True)
     view_df = working_df[display_cols].copy()
     editor_input_df = view_df.copy()
     editor_input_df.insert(0, "Select", False)
     st.caption(f"Rows: {len(view_df):,} (of {len(df):,})")
 
+    # FullName becomes a dropdown so reassignments resolve to a real login.
+    fullname_login_map = _build_fullname_login_map()
+    existing_full_names = sorted(
+        n
+        for n in editor_input_df["FullName"].fillna("").astype(str).str.strip().unique().tolist()
+        if n
+    )
+    fullname_options = sorted(set(fullname_login_map.keys()) | set(existing_full_names))
+    # SelectboxColumn requires every shown value to be in options; blanks -> None.
+    editor_input_df["FullName"] = (
+        editor_input_df["FullName"].fillna("").astype(str).str.strip().replace("", None)
+    )
+
     task_log_column_config = {
-        "Entry Date": st.column_config.DateColumn("Entry Date", width=110),
-        "FullName": st.column_config.TextColumn(
+        "Entry Date": st.column_config.DateColumn(
+            "Entry Date",
+            width=120,
+            format="YYYY-MM-DD",
+            help=(
+                "Moves the entry to another day, keeping its original time of day. "
+                "If you also edit Start (ET), Start (ET) wins."
+            ),
+        ),
+        "FullName": st.column_config.SelectboxColumn(
             "FullName",
             width=_estimate_text_column_width(editor_input_df["FullName"], "FullName", min_px=140, max_px=260),
+            options=fullname_options,
+            help="Reassign this entry to another user. Only users in users.parquet can be picked.",
         ),
         "TaskName": st.column_config.TextColumn(
             "TaskName",
             width=_estimate_text_column_width(editor_input_df["TaskName"], "TaskName", min_px=160, max_px=300),
         ),
         "Duration": st.column_config.TextColumn("Duration", width=110, help="Use HH:MM or HH:MM:SS."),
-        "Start (ET)": st.column_config.TextColumn("Start (ET)", width=170),
-        "End (ET)": st.column_config.TextColumn("End (ET)", width=170),
+        "Start (ET)": st.column_config.TextColumn(
+            "Start (ET)", width=170, help="Eastern time: YYYY-MM-DD HH:MM:SS"
+        ),
+        "End (ET)": st.column_config.TextColumn(
+            "End (ET)", width=170, help="Eastern time: YYYY-MM-DD HH:MM:SS"
+        ),
         "PartiallyComplete": st.column_config.CheckboxColumn("PartiallyComplete", width=145),
         "Notes": st.column_config.TextColumn(
             "Notes",
@@ -1447,36 +1686,226 @@ def render_task_log_section() -> None:
         width="stretch",
         key="tm_task_log_editor",
         column_config=task_log_column_config,
-        disabled=[c for c in editor_input_df.columns if c not in {"Duration", "Notes", "Select"}],
+        disabled=[
+            c
+            for c in editor_input_df.columns
+            if c
+            not in {
+                "Entry Date",
+                "FullName",
+                "TaskName",
+                "Duration",
+                "Start (ET)",
+                "End (ET)",
+                "Notes",
+                "Select",
+            }
+        ],
     )
 
-    base_notes_series = editor_input_df["Notes"].fillna("").astype(str).str.strip()
-    new_notes_series = edited_view_df["Notes"].fillna("").astype(str).str.strip()
-    base_duration_seconds = pd.to_numeric(working_df["DurationSeconds"], errors="coerce").fillna(0).astype(int)
-    edited_duration_series = edited_view_df["Duration"].fillna("").astype(str).str.strip()
-    parsed_duration_series = edited_duration_series.map(utils.parse_hhmmss)
-    invalid_duration_mask = edited_duration_series.eq("") | parsed_duration_series.lt(0)
-    changed_mask = new_notes_series.ne(base_notes_series) | parsed_duration_series.ne(base_duration_seconds)
-    has_changes = bool(changed_mask.any())
+    def _strip(series: pd.Series) -> pd.Series:
+        return series.fillna("").astype(str).str.strip()
+
+    base_full = _strip(editor_input_df["FullName"])
+    new_full = _strip(edited_view_df["FullName"])
+    base_task = _strip(editor_input_df["TaskName"])
+    new_task = _strip(edited_view_df["TaskName"])
+    base_notes_series = _strip(editor_input_df["Notes"])
+    new_notes_series = _strip(edited_view_df["Notes"])
+    base_start = _strip(editor_input_df["Start (ET)"])
+    new_start = _strip(edited_view_df["Start (ET)"])
+    base_end = _strip(editor_input_df["End (ET)"])
+    new_end = _strip(edited_view_df["End (ET)"])
+    base_duration = _strip(editor_input_df["Duration"])
+    new_duration = _strip(edited_view_df["Duration"])
+
+    def _date_key(series: pd.Series) -> pd.Series:
+        # Normalize dates (and any null representation) to YYYY-MM-DD / "" so an
+        # untouched empty Entry Date never reads as a change.
+        return series.apply(
+            lambda v: "" if v is None or pd.isna(v) else pd.Timestamp(v).strftime("%Y-%m-%d")
+        )
+
+    base_entry = _date_key(editor_input_df["Entry Date"])
+    new_entry = _date_key(edited_view_df["Entry Date"])
+
+    task_changed = new_task.ne(base_task)
+    notes_changed = new_notes_series.ne(base_notes_series)
+    full_changed = new_full.ne(base_full)
+    start_changed = new_start.ne(base_start)
+    end_changed = new_end.ne(base_end)
+    duration_changed = new_duration.ne(base_duration)
+    entry_changed = new_entry.ne(base_entry)
+
+    row_changed_mask = (
+        task_changed
+        | notes_changed
+        | full_changed
+        | start_changed
+        | end_changed
+        | duration_changed
+        | entry_changed
+    )
+    has_changes = bool(row_changed_mask.any())
     delete_mask = edited_view_df["Select"].fillna(False).astype(bool)
     has_deletes = bool(delete_mask.any())
 
     save_col, delete_col, refresh_col = st.columns([1, 1, 1])
     with save_col:
         if st.button("Save Task Log Edits", type="primary", width="stretch", disabled=not has_changes):
-            if bool(invalid_duration_mask.loc[changed_mask].any()):
-                st.error("Duration must use HH:MM or HH:MM:SS.")
-            else:
-                changes = working_df.loc[changed_mask, ["TaskID", "__source_file", "__row_idx"]].copy()
-                changes["Notes_new"] = new_notes_series.loc[changed_mask].values
-                changes["DurationSeconds_new"] = parsed_duration_series.loc[changed_mask].astype(int).values
+            errors: list[str] = []
+            payload_rows: list[dict] = []
+            for i in [pos for pos in range(len(edited_view_df)) if bool(row_changed_mask.iloc[pos])]:
+                row_label = i + 1
+                orig_start_ts = working_df.at[i, "StartTimestampUTC"]
+                orig_end_ts = working_df.at[i, "EndTimestampUTC"]
+                try:
+                    orig_duration_val = int(working_df.at[i, "DurationSeconds"])
+                except (TypeError, ValueError):
+                    orig_duration_val = 0
+                orig_login = str(working_df.at[i, "UserLogin"] or "").strip()
 
-                updated_rows, touched_files = _save_task_log_changes(changes)
+                time_changed = bool(
+                    start_changed.iloc[i]
+                    or end_changed.iloc[i]
+                    or duration_changed.iloc[i]
+                    or entry_changed.iloc[i]
+                )
+
+                # --- FullName / login ---
+                row_full_name = base_full.iloc[i]
+                row_login = orig_login
+                user_changed = False
+                if full_changed.iloc[i]:
+                    row_full_name = new_full.iloc[i]
+                    if not row_full_name:
+                        errors.append(f"Row {row_label}: FullName cannot be blank.")
+                        continue
+                    resolved = fullname_login_map.get(row_full_name)
+                    if not resolved:
+                        errors.append(
+                            f"Row {row_label}: cannot reassign to '{row_full_name}' "
+                            "— no matching user in users.parquet."
+                        )
+                        continue
+                    row_login = resolved
+                    user_changed = utils.sanitize_key(row_login) != utils.sanitize_key(orig_login)
+
+                # --- TaskName ---
+                row_task_name = base_task.iloc[i]
+                if task_changed.iloc[i]:
+                    row_task_name = new_task.iloc[i]
+                    if not row_task_name:
+                        errors.append(f"Row {row_label}: TaskName cannot be blank.")
+                        continue
+
+                # --- Notes ---
+                row_notes = new_notes_series.iloc[i] if notes_changed.iloc[i] else base_notes_series.iloc[i]
+
+                # --- Start / End / Duration ---
+                row_start_ts = orig_start_ts
+                row_end_ts = orig_end_ts
+                row_duration = orig_duration_val
+                if time_changed:
+                    # Start (ET) wins over Entry Date when both were touched.
+                    if start_changed.iloc[i]:
+                        parsed = _et_str_to_utc(new_start.iloc[i])
+                        if parsed is None or isinstance(parsed, str):
+                            errors.append(
+                                f"Row {row_label}: invalid Start (ET). Use YYYY-MM-DD HH:MM:SS."
+                            )
+                            continue
+                        row_start_ts = parsed
+                    elif entry_changed.iloc[i]:
+                        new_date = edited_view_df.iloc[i]["Entry Date"]
+                        if new_date is None or pd.isna(new_date):
+                            errors.append(f"Row {row_label}: invalid Entry Date.")
+                            continue
+                        if orig_start_ts is not None and not pd.isna(orig_start_ts):
+                            tod = pd.Timestamp(orig_start_ts).tz_convert("America/New_York").time()
+                        else:
+                            tod = datetime.time(0, 0, 0)
+                        naive = datetime.datetime.combine(new_date, tod)
+                        try:
+                            row_start_ts = (
+                                pd.Timestamp(naive)
+                                .tz_localize("America/New_York", ambiguous=True, nonexistent="shift_forward")
+                                .tz_convert("UTC")
+                            )
+                        except Exception:
+                            errors.append(f"Row {row_label}: invalid Entry Date.")
+                            continue
+
+                    # End (ET) wins over Duration when both were touched.
+                    if end_changed.iloc[i]:
+                        parsed_end = _et_str_to_utc(new_end.iloc[i])
+                        if parsed_end is None or isinstance(parsed_end, str):
+                            errors.append(
+                                f"Row {row_label}: invalid End (ET). Use YYYY-MM-DD HH:MM:SS."
+                            )
+                            continue
+                        row_end_ts = parsed_end
+                        row_duration = int((row_end_ts - row_start_ts).total_seconds())
+                    elif duration_changed.iloc[i]:
+                        parsed_dur = utils.parse_hhmmss(new_duration.iloc[i])
+                        if parsed_dur < 0:
+                            errors.append(
+                                f"Row {row_label}: invalid Duration. Use HH:MM or HH:MM:SS."
+                            )
+                            continue
+                        row_duration = parsed_dur
+                        row_end_ts = (
+                            row_start_ts + pd.to_timedelta(parsed_dur, unit="s")
+                            if (row_start_ts is not None and not pd.isna(row_start_ts))
+                            else orig_end_ts
+                        )
+                    else:
+                        # Only the start moved: shift end with it, keep duration.
+                        row_duration = orig_duration_val
+                        row_end_ts = (
+                            row_start_ts + pd.to_timedelta(orig_duration_val, unit="s")
+                            if (row_start_ts is not None and not pd.isna(row_start_ts))
+                            else orig_end_ts
+                        )
+
+                    if row_duration is not None and row_duration < 0:
+                        errors.append(f"Row {row_label}: End (ET) is before Start (ET).")
+                        continue
+
+                payload_rows.append(
+                    {
+                        "TaskID": working_df.at[i, "TaskID"],
+                        "__source_file": working_df.at[i, "__source_file"],
+                        "__row_idx": working_df.at[i, "__row_idx"],
+                        "new_TaskName": row_task_name,
+                        "new_Notes": row_notes,
+                        "new_FullName": row_full_name,
+                        "new_UserLogin": row_login,
+                        "new_StartUTC": row_start_ts,
+                        "new_EndUTC": row_end_ts,
+                        "new_DurationSeconds": int(row_duration)
+                        if row_duration is not None
+                        else orig_duration_val,
+                        "user_changed": user_changed,
+                        "time_changed": time_changed,
+                    }
+                )
+
+            if errors:
+                st.error("Could not save:\n\n" + "\n\n".join(f"- {e}" for e in errors[:20]))
+            elif not payload_rows:
+                st.info("No rows were updated.")
+            else:
+                changes = pd.DataFrame(payload_rows)
+                updated_rows, touched_files, relocated_rows = _save_task_log_changes(changes)
                 _load_task_log_entries.clear()
                 utils.load_all_completed_tasks.clear()
                 utils.load_completed_tasks_for_analytics.clear()
                 if updated_rows > 0:
-                    st.success(f"Saved {updated_rows} row update(s) across {touched_files} file(s).")
+                    message = f"Saved {updated_rows} row update(s) across {touched_files} file(s)."
+                    if relocated_rows:
+                        message += f" {relocated_rows} row(s) moved to a different user/date."
+                    st.success(message)
                     st.rerun()
                 else:
                     st.info("No rows were updated.")

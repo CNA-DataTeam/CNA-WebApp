@@ -100,6 +100,49 @@ _TA_COMPACT_CSS = """
 """
 st.markdown(_TA_COMPACT_CSS, unsafe_allow_html=True)
 
+# Raw CSS (no <style> tags) injected into the calendar component via st_calendar's
+# `custom_css` so it lands *inside* the component iframe.
+#
+# Why this exists: streamlit_calendar calls Streamlit.setFrameHeight() only once on
+# mount, so the iframe height is locked to the calendar's initial height. FullCalendar's
+# default "+X more" popover is position:absolute with no max-height, so on a day with
+# many entries it grows past that fixed iframe boundary, gets clipped, and — not being
+# scrollable — the hidden entries are unreachable. Pin the popover to the iframe's own
+# viewport (position:fixed → relative to the iframe), cap it to the visible area, and let
+# its body scroll so every entry for the day is reachable no matter which cell was clicked.
+_CALENDAR_MORE_POPOVER_CSS = """
+.fc .fc-popover.fc-more-popover {
+    position: fixed !important;
+    top: 8px !important;
+    left: 8px !important;
+    right: 8px !important;
+    bottom: auto !important;
+    width: auto !important;
+    max-width: calc(100vw - 16px) !important;
+    max-height: calc(100vh - 16px) !important;
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+    z-index: 10000 !important;
+    border-radius: 8px !important;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22) !important;
+}
+.fc .fc-popover.fc-more-popover .fc-popover-header {
+    flex: 0 0 auto !important;
+    padding: 6px 10px !important;
+    font-weight: 600 !important;
+}
+.fc .fc-popover.fc-more-popover .fc-popover-body {
+    flex: 1 1 auto !important;
+    overflow-y: auto !important;
+    max-height: calc(100vh - 52px) !important;
+    padding: 6px 8px !important;
+}
+.fc .fc-popover.fc-more-popover .fc-daygrid-event {
+    white-space: normal !important;
+}
+"""
+
 TIME_ALLOCATION_DIR = config.TIME_ALLOCATION_DIR
 PERSONNEL_DIR = config.PERSONNEL_DIR
 # The canonical channel set, listed in the default display order used when
@@ -1011,7 +1054,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         line-height: 1.15;
         font-size: 0.68rem;
     }
-    """ + "\n" + height_rules + "\n" + selected_day_css
+    """ + "\n" + height_rules + "\n" + selected_day_css + "\n" + _CALENDAR_MORE_POPOVER_CSS
     calendar_widget_key = f"ta_input_calendar_{view_mode}_{num_days}"
     calendar_state = st_calendar(
         events=calendar_events,

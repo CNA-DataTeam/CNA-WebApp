@@ -31,6 +31,7 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 - [Packaging estimator config mismatch](gotchas_packaging_estimator_config.md) — page reads `shipping_calculator_api`; config.py defines `PACKAGING_CONFIG["api"]`
 - [Time allocation editing rules](gotchas_time_allocation_editing.md) — strict This Week/Last Week window; channel order flips to frequency sort at 50+ saved
 - [Task tracker LS vs DA differences](gotchas_task_tracker_ls_vs_da.md) — shared file, separate state keys, separate dirs, LS-only `sync_tasks_parquet_targets()` call
+- [Task Log editor relocation](gotchas_task_log_editing.md) — editable columns, Start/End/Duration precedence, partition move on user/date change
 
 ### Reference
 

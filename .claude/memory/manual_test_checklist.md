@@ -28,7 +28,12 @@ There are no automated tests in this repo. Use these manual smoke tests after me
 - Management page loads tasks, targets, users, and task log
 - Task definition updates persist
 - Task target edits persist
-- Task log edits and deletes persist correctly
+- Task log edits and deletes persist correctly. The data table is double-click editable: TaskName, Duration, Notes, Start (ET), End (ET), Entry Date, and FullName. Verify:
+  - In-place edits (TaskName / Notes / Duration / same-day time) update the original parquet file
+  - Editing Start/End/Entry Date or reassigning FullName **moves** the row to the correct `user=/year=/month=/day=` partition (old file pruned, new file written) — confirm via the "moved to a different user/date" toast and that the row reappears under the new filter
+  - Reassigning FullName to a name not in users.parquet is blocked with an error
+  - Bad Start/End/Duration formats are rejected; End-before-Start is rejected
+  - See [task-log relocation editing](gotchas_task_log_editing.md)
 - Admin Logs page still parses log lines
 
 ## Packaging
