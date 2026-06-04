@@ -287,6 +287,40 @@ def save_parquet(df: pd.DataFrame, output_dir: Path, filename: str) -> Path:
     df.to_parquet(output_path, index=False)
     return output_path
 
+def regenerate_accounts_parquet(
+    force: bool = False,
+    output_dir: Path | None = None,
+    accounts_xlsx: Path | None = None,
+) -> Path:
+    """Refresh the daily accounts parquet from the source Excel.
+
+    This is the exact accounts step ``main()`` runs, factored out so the in-app
+    "Refresh Account Data" button can rebuild the parquet via the SAME method the
+    app uses at startup. With ``force=False`` it keeps startup's daily behavior
+    (skip when today's file already exists and has the required columns); with
+    ``force=True`` it always rebuilds from the Excel source — the button's
+    behavior, so an updated source is pulled immediately instead of on the next
+    calendar day. ``output_dir`` / ``accounts_xlsx`` are resolved via
+    ``get_paths()`` when not supplied. Returns the path to the current accounts
+    parquet. Raises on failure (e.g. SharePoint not synced, Excel unreadable) so
+    callers can surface the error.
+    """
+    if output_dir is None or accounts_xlsx is None:
+        resolved_output_dir, _tracker_xlsx, resolved_accounts_xlsx = get_paths()
+        output_dir = output_dir or resolved_output_dir
+        accounts_xlsx = accounts_xlsx or resolved_accounts_xlsx
+
+    if not force and todays_file_exists(output_dir, "accounts") and accounts_file_is_current(output_dir):
+        LOGGER.info("Today's accounts file already exists: %s", get_todays_filename("accounts"))
+        return output_dir / get_todays_filename("accounts")
+
+    LOGGER.info("Preparing accounts data (force=%s)...", force)
+    delete_old_parquet_files(output_dir, "accounts")
+    accounts_df = load_accounts_excel(accounts_xlsx)
+    output_path = save_parquet(accounts_df, output_dir, get_todays_filename("accounts"))
+    LOGGER.info("Saved accounts data: %s", output_path)
+    return output_path
+
 def main() -> None:
     """Main startup routine."""
     LOGGER.info("Session started.")
@@ -300,19 +334,13 @@ def main() -> None:
     LOGGER.info("Output directory: %s", output_dir)
     LOGGER.info("Users source Excel: %s", tracker_xlsx)
     LOGGER.info("Accounts Excel: %s", accounts_xlsx)
-    # Handle accounts data
-    if todays_file_exists(output_dir, "accounts") and accounts_file_is_current(output_dir):
-        LOGGER.info("Today's accounts file already exists: %s", get_todays_filename("accounts"))
-    else:
-        LOGGER.info("Preparing accounts data...")
-        delete_old_parquet_files(output_dir, "accounts")
-        try:
-            accounts_df = load_accounts_excel(accounts_xlsx)
-        except Exception as e:
-            LOGGER.error("Failed to load accounts Excel: %s", e)
-            return
-        output_path = save_parquet(accounts_df, output_dir, get_todays_filename("accounts"))
-        LOGGER.info("Saved accounts data: %s", output_path)
+    # Handle accounts data (same routine the in-app Refresh Account Data button reuses)
+    try:
+        regenerate_accounts_parquet(force=False, output_dir=output_dir, accounts_xlsx=accounts_xlsx)
+    except Exception as e:
+        # Covers both the Excel read and the parquet write (the whole routine).
+        LOGGER.error("Failed to prepare accounts data: %s", e)
+        return
     # Handle users data (login to full name mapping)
     try:
         users_df = load_users_excel(tracker_xlsx)

@@ -2154,9 +2154,16 @@ def _normalize_login_key(value: object) -> str:
     return text.strip()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_users_table() -> pd.DataFrame:
-    """Load users.parquet from personnel storage."""
+    """Load users.parquet from personnel storage (cached).
+
+    users.parquet is written only by startup.py (once per app launch) and is immutable
+    during a session, so it's cached for an hour — matching the sibling loaders from the
+    same file (load_user_fullname_map / load_all_user_full_names). is_current_user_admin
+    and get_user_department read it on every rerun, so the cache keeps those off the UNC
+    share between refreshes.
+    """
     users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
     try:
         if not users_parquet.exists():
@@ -2226,8 +2233,13 @@ def get_user_department(
     if department:
         return department
 
-    # If cache is stale or mismatched, retry with a direct parquet read.
-    if users_df is None:
+    # Only re-read from disk when the cached table came back EMPTY (a genuine load
+    # failure — e.g. the file was momentarily unavailable). users.parquet is immutable
+    # within a session, so when the cached table HAS rows a fresh read cannot resolve a
+    # department the cache couldn't — re-reading then would be wasted UNC I/O on EVERY
+    # rerun for any user whose department is blank/missing (this fired on the hot save
+    # path before being gated).
+    if users_df is None and df.empty:
         try:
             users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
             if users_parquet.exists():
@@ -2354,7 +2366,22 @@ def load_account_lookup(accounts_dir: str) -> pd.DataFrame:
         return empty
     try:
         parquet_files.sort(reverse=True)
-        df = pd.read_parquet(parquet_files[0])
+        latest_file = parquet_files[0]
+        # Only the Customer Code / Reporting Name columns feed the lookup, so read
+        # just those instead of every column of the (wide) accounts parquet — a
+        # meaningful saving over the UNC share. Fall back to a full read if the
+        # column metadata can't be inspected or none of the wanted columns exist.
+        wanted_columns = ["CustomerCode", "Reporting Name", "Company Group USE"]
+        try:
+            available = set(pq.read_schema(latest_file).names)
+            project_columns = [c for c in wanted_columns if c in available]
+        except Exception:
+            project_columns = None
+        df = (
+            pd.read_parquet(latest_file, columns=project_columns)
+            if project_columns
+            else pd.read_parquet(latest_file)
+        )
     except Exception as exc:
         get_page_logger("Shared Utilities").exception("Failed to load account lookup parquet: %s", exc)
         return empty

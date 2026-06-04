@@ -18,14 +18,18 @@ Output schema:
 
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
+from collections import Counter
 from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.dataset as ds
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_calendar import calendar as st_calendar
 
 import config
@@ -96,6 +100,18 @@ _TA_COMPACT_CSS = """
     font-size: 0.72rem;
     color: rgba(49, 51, 63, 0.65);
 }
+/* Saved vs draft input rows. Each row carries a hidden marker span; we keep it in
+   the DOM (for :has()) but pull it out of layout so it adds no gap. A row with the
+   .ta-row-saved marker gets a darker teal card fill and a thicker teal border (vs the
+   draft's default 1px grey border) so saved rows read as clearly distinct — styling
+   the bordered card (the PARENT of the keyed block), not the inputs. */
+[data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .ta-row-marker) {
+    display: none !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:has(.ta-row-saved) {
+    background-color: rgba(0, 177, 158, 0.16) !important;
+    border: 2px solid rgba(0, 177, 158, 0.55) !important;
+}
 </style>
 """
 st.markdown(_TA_COMPACT_CSS, unsafe_allow_html=True)
@@ -145,22 +161,20 @@ _CALENDAR_MORE_POPOVER_CSS = """
 
 TIME_ALLOCATION_DIR = config.TIME_ALLOCATION_DIR
 PERSONNEL_DIR = config.PERSONNEL_DIR
-# The canonical channel set, listed in the default display order used when
-# there isn't yet enough saved data to sort the dropdown by usage frequency.
+# The canonical channel set, in a fixed display order shown verbatim in every
+# Channel dropdown. (Previously the dropdown re-sorted by usage frequency once
+# enough history existed, which required a full scan of every saved file on each
+# cold load; that ordering was dropped in favor of this fixed order.)
 CHANNEL_OPTIONS = [
     "Resupply",
-    "Consolidated: Equipment",
     "Consolidated: Smallwares",
-    "Express: Smallwares",
-    "Express: Equipment",
+    "Consolidated: Equipment",
     "Consolidated: Rollout",
     "Consolidated: Full",
+    "Express: Smallwares",
+    "Express: Equipment",
     "Express: Full",
 ]
-# Below this many total channel selections across all saved entries, the
-# Channel dropdown uses CHANNEL_OPTIONS' defined order; at/above it, by usage
-# frequency.
-CHANNEL_FREQUENCY_SORT_THRESHOLD = 50
 
 # Hour/minute dropdown options for the per-row Time input.
 TIME_HOUR_OPTIONS = list(range(0, 13))
@@ -234,31 +248,6 @@ def _iter_time_allocation_files(base_dir: Path) -> list[Path]:
     return sorted((path for path in base_dir.rglob("*.parquet") if path.is_file()), reverse=True)
 
 
-def _iter_time_allocation_day_candidate_files(base_dir: Path, entry_date: date) -> list[Path]:
-    """Return candidate parquet files that may contain rows for one calendar day."""
-    files: list[Path] = []
-    seen: set[str] = set()
-
-    month_dir = _get_time_allocation_month_dir(base_dir, entry_date)
-    daily_name = f"time_allocation_{entry_date:%Y%m%d}.parquet"
-    legacy_pattern = f"time_allocation_{entry_date:%Y%m%d}*.parquet"
-
-    if month_dir.exists():
-        for path in sorted(month_dir.rglob(daily_name), reverse=True):
-            path_key = str(path).lower()
-            if path.is_file() and path_key not in seen:
-                files.append(path)
-                seen.add(path_key)
-
-    for path in sorted(base_dir.glob(legacy_pattern), reverse=True):
-        path_key = str(path).lower()
-        if path.is_file() and path_key not in seen:
-            files.append(path)
-            seen.add(path_key)
-
-    return files
-
-
 def _iter_user_day_candidate_files(
     base_dir: Path,
     user_login: str,
@@ -280,6 +269,62 @@ def _iter_user_day_candidate_files(
         if path.is_file() and path_key not in seen:
             files.append(path)
             seen.add(path_key)
+
+    return files
+
+
+def _iter_user_window_candidate_files(
+    base_dir: Path,
+    user_login: str,
+    full_name: str,
+    window_start: date,
+    window_end: date,
+) -> list[Path]:
+    """Candidate parquet files for one user across a date window.
+
+    Cheaper than calling a per-day helper in a loop: each day's targeted per-user
+    partition file is resolved with a single ``is_file()`` stat (no recursive
+    month-dir rglob across every user's partitions), and the legacy flat files at
+    the directory root are listed ONCE — indexed by the date parsed from each
+    filename — instead of re-globbing the whole root once per day. Over a UNC
+    share that collapses N recursive month walks + N full-root listings into N
+    stats + one root listing. Returns the same files the per-day path returned,
+    so the downstream user/date filtering and REPLACE semantics are unchanged.
+    """
+    files: list[Path] = []
+    seen: set[str] = set()
+
+    # One top-level listing for legacy flat files, indexed by entry date, so the
+    # root isn't re-enumerated for every day in the window.
+    prefix = "time_allocation_"
+    legacy_by_day: dict[date, list[Path]] = {}
+    if base_dir.exists():
+        for path in base_dir.glob(f"{prefix}*.parquet"):
+            if not path.is_file():
+                continue
+            token = path.stem[len(prefix):len(prefix) + 8]
+            try:
+                legacy_day = date(int(token[:4]), int(token[4:6]), int(token[6:8]))
+            except (ValueError, IndexError):
+                continue
+            legacy_by_day.setdefault(legacy_day, []).append(path)
+
+    current_day = window_start
+    while current_day <= window_end:
+        # Targeted per-user partitioned file for the day (single stat).
+        user_path = _get_time_allocation_daily_file(base_dir, user_login, full_name, current_day)
+        if user_path.is_file():
+            path_key = str(user_path).lower()
+            if path_key not in seen:
+                files.append(user_path)
+                seen.add(path_key)
+        # Legacy flat files for the day, from the one-time root listing.
+        for path in sorted(legacy_by_day.get(current_day, []), reverse=True):
+            path_key = str(path).lower()
+            if path_key not in seen:
+                files.append(path)
+                seen.add(path_key)
+        current_day += timedelta(days=1)
 
     return files
 
@@ -328,10 +373,229 @@ def _read_time_allocation_exports_from_files(file_paths: list[Path], base_dir: P
     return df[expected_cols + ["Source File"]]
 
 
+# How many per-user-day files the dataset scanner reads concurrently. The export
+# load is latency-bound (one tiny parquet per user per day over a UNC share), so a
+# high readahead hides per-file round-trip latency — measured ~5x faster than the
+# sequential per-file reader on the real share.
+_EXPORTS_FRAGMENT_READAHEAD = 48
+
+
+# Initial admin tables load only this many most-recent rows so the open is cheap and
+# (because dataset.head() stops early) stays roughly constant-time as history grows.
+_EXPORTS_RECENT_LIMIT = 100
+# Files-per-batch when reading a filtered window with a progress bar.
+_EXPORTS_WINDOW_CHUNK = 40
+
+
+def _export_base_schema() -> pa.Schema:
+    """The 8 base export columns as an explicit pyarrow schema (drives every scan)."""
+    return pa.schema([pa.field(name, dtype) for name, dtype in _TIME_ALLOCATION_BASE_FIELDS])
+
+
+def _normalize_export_frame(raw_df: pd.DataFrame, base_dir: Path) -> pd.DataFrame:
+    """Turn a raw dataset-scan frame (8 base cols + ``__filename``) into the canonical
+    export frame: add the base-relative ``Source File`` string the per-file loader
+    produced (the Edit Entries save indexes back into each file by it, so it must
+    match exactly), normalize Entry Date, and order columns. NOT sorted — callers
+    sort as needed."""
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+
+    base_str = str(base_dir)
+
+    def _source_file(filename: object) -> str:
+        text = str(filename or "")
+        if not text:
+            return ""
+        try:
+            return str(Path(text).relative_to(base_dir))
+        except ValueError:
+            normalized = text.replace("/", "\\")
+            base_normalized = base_str.replace("/", "\\")
+            if normalized.lower().startswith(base_normalized.lower()):
+                return normalized[len(base_normalized):].lstrip("\\/")
+            return Path(text).name
+
+    df = raw_df.copy()
+    df["Source File"] = df["__filename"].map(_source_file) if "__filename" in df.columns else ""
+    df = df.drop(columns=["__filename"], errors="ignore")
+    expected_cols = list(_export_base_schema().names)
+    df["Entry Date"] = pd.to_datetime(df["Entry Date"], errors="coerce").dt.date
+    return df[expected_cols + ["Source File"]]
+
+
+def _read_export_files(base_dir: Path, files: list[Path]) -> pd.DataFrame:
+    """Read an explicit list of *.parquet files in ONE concurrent dataset scan and
+    return the normalized (unsorted) export frame.
+
+    An explicit base schema is passed so a file missing a base column (e.g. an old one
+    written before ``Customer Code`` existed) null-fills it instead of the column being
+    dropped, and so schema inference doesn't depend on the first-discovered file. The
+    file set is explicit (not a directory scan) so a stray non-parquet file in the tree
+    — a synced-share desktop.ini/Thumbs.db, or a leftover *.parquet.tmp from an
+    interrupted atomic write — can't make the scan raise.
+    """
+    if not files:
+        return pd.DataFrame()
+    base_schema = _export_base_schema()
+    dataset = ds.dataset([str(path) for path in files], format="parquet", schema=base_schema)
+    table = dataset.scanner(
+        columns=list(base_schema.names) + ["__filename"],
+        use_threads=True,
+        fragment_readahead=_EXPORTS_FRAGMENT_READAHEAD,
+        batch_readahead=_EXPORTS_FRAGMENT_READAHEAD,
+    ).to_table()
+    return _normalize_export_frame(table.to_pandas(), base_dir)
+
+
+def _read_exports_via_dataset(base_dir: Path) -> pd.DataFrame:
+    """Fast path for ``load_time_allocation_exports``: read ALL files in one scan,
+    ordered like the per-file loader (files reverse-sorted; within-file order
+    preserved, which ``_source_pos`` relies on). Raises on failure so the caller can
+    fall back to the resilient per-file reader."""
+    files = _iter_time_allocation_files(base_dir)
+    if not files:
+        return pd.DataFrame()
+    df = _read_export_files(base_dir, files)
+    if df.empty:
+        return df
+    return df.sort_values("Source File", ascending=False, kind="stable").reset_index(drop=True)
+
+
+def _date_from_ta_filename(path: Path) -> date | None:
+    """Parse the entry date from a ``time_allocation_YYYYMMDD[...].parquet`` filename.
+
+    Each saved file holds one user's entries for one day, so its filename date IS the
+    Entry Date of every row in it — letting a date-window filter prune at the FILE
+    level (no read) before any data is loaded."""
+    stem = Path(path).stem
+    prefix = "time_allocation_"
+    if not stem.startswith(prefix):
+        return None
+    token = stem[len(prefix):len(prefix) + 8]
+    if len(token) < 8 or not token.isdigit():
+        return None
+    try:
+        return date(int(token[:4]), int(token[4:6]), int(token[6:8]))
+    except ValueError:
+        return None
+
+
+def _iter_time_allocation_files_in_window(
+    base_dir: Path, window_start: date, window_end: date
+) -> list[Path]:
+    """Files whose filename date falls within [window_start, window_end].
+
+    Files whose date can't be parsed are included (conservative — they're filtered
+    by Entry Date in memory afterward), so no rows are ever dropped at this stage."""
+    out: list[Path] = []
+    for path in _iter_time_allocation_files(base_dir):
+        day = _date_from_ta_filename(path)
+        if day is None or (window_start <= day <= window_end):
+            out.append(path)
+    return out
+
+
+def _read_export_files_with_progress(
+    base_dir: Path, files: list[Path], progress: object = None, chunk: int = _EXPORTS_WINDOW_CHUNK
+) -> pd.DataFrame:
+    """Read ``files`` in batches, advancing an optional st.progress bar per batch, so a
+    filtered-window load shows real progress. Each batch is itself a concurrent scan."""
+    if not files:
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    total = len(files)
+    for start in range(0, total, max(1, chunk)):
+        batch = files[start:start + max(1, chunk)]
+        batch_df = _read_export_files(base_dir, batch)
+        if not batch_df.empty:
+            frames.append(batch_df)
+        if progress is not None:
+            done = min(start + max(1, chunk), total)
+            try:
+                progress.progress(done / total, text=f"Loading entries… {done}/{total} files")
+            except Exception:
+                pass
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=30, show_spinner="Loading recent entries...")
+def _load_recent_exports(base_dir: Path, limit: int = _EXPORTS_RECENT_LIMIT) -> pd.DataFrame:
+    """Load only the ``limit`` most-recent entry rows for the initial table view.
+
+    Uses ``dataset.head(limit)`` over the newest-first file list, which STOPS reading
+    once it has ``limit`` rows — so it touches only a handful of files regardless of
+    how much total history exists (roughly constant-time open). Result is sorted by
+    Entry Date descending. Falls back to truncating the full load if head() fails."""
+    files = _iter_time_allocation_files(base_dir)
+    if not files:
+        return pd.DataFrame()
+    try:
+        base_schema = _export_base_schema()
+        dataset = ds.dataset([str(path) for path in files], format="parquet", schema=base_schema)
+        table = dataset.head(
+            int(limit), columns=list(base_schema.names) + ["__filename"], use_threads=True
+        )
+        df = _normalize_export_frame(table.to_pandas(), base_dir)
+    except Exception as exc:
+        LOGGER.warning("Recent-exports head() failed; falling back to full load: %s", exc)
+        df = load_time_allocation_exports(base_dir)
+    if df.empty:
+        return df
+    return (
+        df.sort_values("Entry Date", ascending=False, kind="stable")
+        .head(int(limit))
+        .reset_index(drop=True)
+    )
+
+
+def _load_exports_window(
+    base_dir: Path, window_start: date, window_end: date, progress: object = None
+) -> pd.DataFrame:
+    """Load only the files whose date falls in [window_start, window_end], with an
+    optional progress bar. Sorted like the full loader (Source File desc, within-file
+    order preserved for ``_source_pos``)."""
+    files = _iter_time_allocation_files_in_window(base_dir, window_start, window_end)
+    df = _read_export_files_with_progress(base_dir, files, progress=progress)
+    if df.empty:
+        return df
+    return df.sort_values("Source File", ascending=False, kind="stable").reset_index(drop=True)
+
+
 @st.cache_data(ttl=30, show_spinner="Loading saved allocations...")
 def load_time_allocation_exports(base_dir: Path) -> pd.DataFrame:
-    """Load all saved time-allocation parquet files from the output directory."""
+    """Load all saved time-allocation parquet files from the output directory.
+
+    Tries the fast single-scan path first (``_read_exports_via_dataset``) and falls
+    back to the resilient per-file reader if it errors or finds nothing — so
+    correctness never depends on the fast path, only speed does.
+    """
+    try:
+        fast_df = _read_exports_via_dataset(base_dir)
+        if not fast_df.empty:
+            return fast_df
+    except Exception as exc:
+        LOGGER.warning(
+            "Fast dataset export load failed; falling back to per-file reader: %s", exc
+        )
     return _read_time_allocation_exports_from_files(_iter_time_allocation_files(base_dir), base_dir)
+
+
+def _invalidate_admin_export_tables() -> None:
+    """Clear the cached export loaders AND any per-session windowed data so the admin
+    Exports / Edit Entries tables reflect a fresh save or delete on the next render.
+
+    Call this everywhere the old code cleared ``load_time_allocation_exports`` — the
+    new top-100 (``_load_recent_exports``) cache and the windowed frames stashed in
+    session state must be invalidated together or the tables would show stale rows.
+    """
+    load_time_allocation_exports.clear()
+    _load_recent_exports.clear()
+    for prefix in ("ta_export", "ta_admin_editor"):
+        st.session_state.pop(f"{prefix}_loaded_sig", None)
+        st.session_state.pop(f"{prefix}_loaded_df", None)
 
 
 def _normalize_login(value: object) -> str:
@@ -378,16 +642,9 @@ def load_time_allocation_user_window(
     if window_start is None or window_end is None or window_end < window_start:
         return pd.DataFrame()
 
-    files: list[Path] = []
-    seen: set[str] = set()
-    current_day = window_start
-    while current_day <= window_end:
-        for path in _iter_time_allocation_day_candidate_files(base_dir, current_day):
-            path_key = str(path).lower()
-            if path_key not in seen:
-                files.append(path)
-                seen.add(path_key)
-        current_day += timedelta(days=1)
+    files = _iter_user_window_candidate_files(
+        base_dir, user_login, full_name, window_start, window_end
+    )
 
     window_df = _read_time_allocation_exports_from_files(files, base_dir)
     if window_df.empty:
@@ -430,6 +687,22 @@ def _account_options_for_row(account_options: list[str], current_value: object) 
 _customer_code_options_for_row = _account_options_for_row
 
 
+def _customer_code_pool_for_reporting_name(account_lookup: dict, reporting_name: object) -> list[str]:
+    """Customer Codes to offer in a row's dropdown, given its selected Reporting Name.
+
+    When a Reporting Name is selected, restrict the Customer Code dropdown to just
+    that name's codes (the row's autofilled first code is always among them). With
+    no Reporting Name selected, fall back to every customer code so the dropdown can
+    still drive the reverse autofill.
+    """
+    name = str(reporting_name or "").strip()
+    if name:
+        codes = account_lookup.get("rn_to_codes", {}).get(name)
+        if codes:
+            return list(codes)
+    return list(account_lookup["customer_codes"])
+
+
 def _build_account_lookup(lookup_df: pd.DataFrame) -> dict:
     """
     Build the Customer Code <-> Reporting Name lookup structures from the
@@ -439,29 +712,103 @@ def _build_account_lookup(lookup_df: pd.DataFrame) -> dict:
         reporting_names    - sorted unique Reporting Name values
         customer_codes     - sorted unique Customer Code values
         rn_to_first_code   - Reporting Name -> first (alphabetical) Customer Code
+        rn_to_codes        - Reporting Name -> sorted list of its Customer Codes
         code_to_rn         - Customer Code -> Reporting Name
     """
-    rn_to_codes: dict[str, set[str]] = {}
-    code_to_rn: dict[str, str] = {}
-    if lookup_df is not None and not lookup_df.empty:
-        for _, row in lookup_df.iterrows():
-            rn = str(row.get("ReportingName") or "").strip()
-            code = str(row.get("CustomerCode") or "").strip()
-            if rn:
-                rn_to_codes.setdefault(rn, set())
-                if code:
-                    rn_to_codes[rn].add(code)
-            if code and code not in code_to_rn and rn:
-                code_to_rn[code] = rn
-    rn_to_first_code = {
-        rn: sorted(codes)[0] for rn, codes in rn_to_codes.items() if codes
+    # Built with vectorized pandas ops rather than a per-row ``iterrows()`` loop
+    # (which re-ran over ~15k rows on every cold lookup build). Output is identical
+    # to the old loop for any input: each cell is normalized with the same
+    # ``str(x or "").strip()`` expression (kept as a per-cell map so the result is
+    # stable across pandas versions, whose ``astype(str)`` differ on how they
+    # render NaN), and the grouping preserves the original tiebreaks — every
+    # non-blank Reporting Name is offered even if it has no codes, and a Customer
+    # Code maps to the Reporting Name of its FIRST occurrence (original row order)
+    # among rows where both are present.
+    if lookup_df is None or lookup_df.empty:
+        rn_series = pd.Series([], dtype="object")
+        code_series = pd.Series([], dtype="object")
+    else:
+        # A missing column behaves like the old ``row.get`` returning None -> "".
+        rn_series = (
+            lookup_df["ReportingName"].map(lambda x: str(x or "").strip())
+            if "ReportingName" in lookup_df.columns
+            else pd.Series("", index=lookup_df.index, dtype="object")
+        )
+        code_series = (
+            lookup_df["CustomerCode"].map(lambda x: str(x or "").strip())
+            if "CustomerCode" in lookup_df.columns
+            else pd.Series("", index=lookup_df.index, dtype="object")
+        )
+
+    norm = pd.DataFrame({"rn": rn_series.to_numpy(), "code": code_series.to_numpy()})
+    has_rn = norm["rn"] != ""
+    has_code = norm["code"] != ""
+
+    # Every non-blank Reporting Name is offered, even one whose rows carry no code.
+    reporting_names = sorted(norm.loc[has_rn, "rn"].unique().tolist())
+
+    # Only rows with BOTH a name and a code drive the mappings; the boolean mask
+    # preserves original row order so "first occurrence wins" for code -> name.
+    both = norm[has_rn & has_code]
+    rn_to_codes = {
+        name: sorted(pd.unique(codes).tolist())
+        for name, codes in both.groupby("rn", sort=False)["code"]
     }
+    rn_to_first_code = {name: codes[0] for name, codes in rn_to_codes.items()}
+    code_first = both.drop_duplicates(subset="code", keep="first")
+    code_to_rn = dict(zip(code_first["code"], code_first["rn"]))
+
     return {
-        "reporting_names": sorted(rn_to_codes.keys()),
+        "reporting_names": reporting_names,
         "customer_codes": sorted(code_to_rn.keys()),
         "rn_to_first_code": rn_to_first_code,
+        "rn_to_codes": rn_to_codes,
         "code_to_rn": code_to_rn,
     }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _account_lookup_for_dir(accounts_dir: str) -> dict:
+    """Cached Customer Code <-> Reporting Name lookup for an accounts directory.
+
+    `utils.load_account_lookup` already caches the parquet read, but building the
+    lookup dicts on top of it iterates ~15k rows and used to re-run on every
+    full-script rerun because it sat at module scope. Caching it here on the cheap
+    directory-string key means that build runs about once an hour instead of on
+    every Add Row / calendar click / page rerun. The returned dict adds a
+    ``loaded_at`` timestamp but is otherwise identical, so the Reporting Name
+    <-> Customer Code autofill is unchanged.
+    """
+    lookup = _build_account_lookup(utils.load_account_lookup(accounts_dir))
+    # Stamp when this lookup was actually (re)built. Because the value is cached,
+    # this is the true data-load time: it survives full page reloads (the cache
+    # is server-side) and advances only when the cache is cleared (Refresh Account
+    # Data) or the TTL expires — so the "time since last refresh" line reflects
+    # real staleness instead of resetting to "just now" on every rerun.
+    lookup["loaded_at"] = utils.now_utc()
+    return lookup
+
+
+def _row_selection_valid(account_lookup: dict, reporting_name: object, customer_code: object) -> bool:
+    """True if a row's Reporting Name / Customer Code pairing is representable in this account data.
+
+    A blank Reporting Name is always valid. A non-blank one must exist, and any
+    chosen Customer Code must belong to it (or, with no Reporting Name, must exist
+    among all codes). Used by the Refresh Account Data button to decide whether a
+    refresh invalidated a selection — i.e. whether the source changed under the
+    user's choice — so untouched/still-valid selections are never disturbed.
+    """
+    rn = str(reporting_name or "").strip()
+    code = str(customer_code or "").strip()
+    if rn:
+        if rn not in set(account_lookup.get("reporting_names", [])):
+            return False
+        if code and code not in set(account_lookup.get("rn_to_codes", {}).get(rn, [])):
+            return False
+        return True
+    if code and code not in set(account_lookup.get("customer_codes", [])):
+        return False
+    return True
 
 
 def _split_duration_to_hm(value: object) -> tuple[int, int]:
@@ -608,39 +955,9 @@ def _build_calendar_events(
     return events
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def _channel_frequency_counts() -> dict[str, int]:
-    """Count how often each channel appears across all saved time-allocation entries."""
-    exports_df = load_time_allocation_exports(TIME_ALLOCATION_DIR)
-    if exports_df.empty or "Channel" not in exports_df.columns:
-        return {}
-    channels = exports_df["Channel"].dropna().astype(str).str.strip()
-    channels = channels[channels != ""]
-    if channels.empty:
-        return {}
-    return {str(k): int(v) for k, v in channels.value_counts().items()}
-
-
-def _ordered_channel_options() -> list[str]:
-    """
-    Return the canonical channel options ordered for display.
-
-    Under CHANNEL_FREQUENCY_SORT_THRESHOLD total selections across all channels,
-    options are shown in CHANNEL_OPTIONS' defined order. At/above the threshold,
-    they are sorted by usage frequency (most-used first), with alphabetical order
-    as the tiebreak.
-    """
-    counts = _channel_frequency_counts()
-    total = sum(counts.values())
-    if total < CHANNEL_FREQUENCY_SORT_THRESHOLD:
-        return list(CHANNEL_OPTIONS)
-    return sorted(CHANNEL_OPTIONS, key=lambda channel: (-counts.get(channel, 0), channel))
-
-
 def _default_channel() -> str:
-    """Default channel for a new/blank entry row (the most frequently used option)."""
-    ordered = _ordered_channel_options()
-    return ordered[0] if ordered else (CHANNEL_OPTIONS[0] if CHANNEL_OPTIONS else "")
+    """Default channel for a new/blank entry row (the first canonical option)."""
+    return CHANNEL_OPTIONS[0] if CHANNEL_OPTIONS else ""
 
 
 def _coerce_channel(value: object) -> str:
@@ -650,12 +967,15 @@ def _coerce_channel(value: object) -> str:
 
 
 def _channel_options_for_row(current_value: object) -> list[str]:
-    """Ensure the row's current channel exists in the selectbox options (preserves legacy values)."""
-    ordered = _ordered_channel_options()
+    """Ensure the row's current channel exists in the selectbox options.
+
+    Options are always CHANNEL_OPTIONS in their fixed defined order; a
+    non-canonical legacy value on the row is prepended so it stays selectable.
+    """
     current = str(current_value or "").strip()
-    if not current or current in ordered:
-        return list(ordered)
-    return [current, *ordered]
+    if not current or current in CHANNEL_OPTIONS:
+        return list(CHANNEL_OPTIONS)
+    return [current, *CHANNEL_OPTIONS]
 
 
 def _default_for_field(entry_field: dict) -> object:
@@ -771,6 +1091,42 @@ def _render_custom_field_widget(
     return st.text_input(label, key=key, disabled=disabled)
 
 
+def _normalize_cf_for_signature(value: object) -> object:
+    """Normalize a custom-field value into a hashable, comparable token for _row_signature."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (int, float)):
+        return float(value)
+    return str(value).strip()
+
+
+def _row_signature(idx: int, entry_field_ids: list[str]) -> tuple:
+    """Hashable fingerprint of one input row's current values, read from session state.
+
+    Distinguishes a saved row from a draft: a row matches the saved baseline only
+    when this fingerprint equals one captured at seed time (``ta_detailed_saved_sigs``).
+    It reads the same session keys the row widgets bind to, so an untouched seeded
+    row matches and any edit (or a brand-new row) does not. Time is compared as
+    (hour, minute) — exactly what the row persists.
+    """
+    base = (
+        str(st.session_state.get(f"ta_detailed_account_{idx}", "") or "").strip(),
+        str(st.session_state.get(f"ta_detailed_custcode_{idx}", "") or "").strip(),
+        int(st.session_state.get(f"ta_detailed_dur_h_{idx}", 0) or 0),
+        int(st.session_state.get(f"ta_detailed_dur_m_{idx}", 0) or 0),
+        str(st.session_state.get(f"ta_detailed_channel_{idx}", "") or "").strip(),
+    )
+    custom = tuple(
+        (fid, _normalize_cf_for_signature(st.session_state.get(f"ta_detailed_cf_{fid}_{idx}")))
+        for fid in entry_field_ids
+    )
+    return (base, custom)
+
+
 def _seed_input_state_for_day(selected_day: date, selected_day_df: pd.DataFrame, account_options: list[str]) -> None:
     """
     Initialize the input widgets from selected-day data.
@@ -810,6 +1166,8 @@ def _seed_input_state_for_day(selected_day: date, selected_day_df: pd.DataFrame,
         st.session_state["ta_detailed_channel_0"] = _default_channel()
         for entry_field in entry_fields:
             st.session_state[f"ta_detailed_cf_{entry_field['id']}_0"] = _default_for_field(entry_field)
+        # No saved rows for this day → the single blank row is a draft.
+        st.session_state["ta_detailed_saved_sigs"] = []
         st.session_state["ta_loaded_day_token"] = day_token
         return
 
@@ -826,6 +1184,13 @@ def _seed_input_state_for_day(selected_day: date, selected_day_df: pd.DataFrame,
                 entry_field["id"], _default_for_field(entry_field)
             )
 
+    # Baseline of saved-row fingerprints for this day. Captured now (after writing
+    # the seeded values to session state) so the render loop can tell which rows
+    # still match what's on disk vs. which the user has since edited.
+    entry_field_ids = [entry_field["id"] for entry_field in entry_fields]
+    st.session_state["ta_detailed_saved_sigs"] = [
+        _row_signature(idx, entry_field_ids) for idx in range(len(rows))
+    ]
     st.session_state["ta_loaded_day_token"] = day_token
 
 
@@ -869,6 +1234,157 @@ def _delete_detailed_row(delete_idx: int) -> None:
             del st.session_state[key]
 
     st.session_state["ta_detailed_count"] = count - 1
+
+
+def _rerun_input_fragment() -> None:
+    """Rerun just the Input fragment, falling back to a full-app rerun.
+
+    Add Row, multi-row Delete, and calendar day-clicks all happen inside the
+    @st.fragment render_input_view, so a fragment-scoped rerun refreshes only the
+    input area and skips re-executing the (now cached, but still non-trivial)
+    module body. If this is ever reached while the fragment is running as part of
+    a full-app rerun, st.rerun(scope="fragment") raises StreamlitAPIException — an
+    Exception raised *before* the rerun is requested — whereas a valid fragment
+    rerun unwinds via the BaseException-derived RerunException (not caught here).
+    So the except branch runs only in the disallowed-scope case, where we fall
+    back to a normal app rerun.
+    """
+    try:
+        st.rerun(scope="fragment")
+    except Exception:
+        st.rerun()
+
+
+def _refresh_account_data(number_of_accounts: int) -> None:
+    """Rebuild the accounts parquet from source, then reload the in-app lookup.
+
+    Two steps, in order:
+      1. Regenerate the accounts parquet from the source Excel via the SAME method
+         the app runs at startup (``startup.regenerate_accounts_parquet(force=True)``)
+         so a freshly-updated source is pulled now rather than on the next daily
+         rebuild. ``force=True`` rebuilds even when today's file already exists.
+      2. Clear the cached account lookup (both the parquet read and the derived
+         dicts) so the next render re-reads the just-written parquet — which
+         restamps the cached ``loaded_at`` and so advances the "time since last
+         refresh" line — and rerun only this fragment (no full-page reload).
+
+    If step 1 fails (e.g. SharePoint not synced or the Excel is open/locked), the
+    parquet is left untouched and an error is surfaced, but step 2 still runs so
+    the lookup is re-read from whatever parquet currently exists. Nothing the user
+    entered is touched, with one exception honored by the caller: a row whose
+    Reporting Name / Customer Code was valid before but is no longer supported by
+    the refreshed data is queued to reset to blank, because the source changed
+    under the user's choice. Time, channel, custom fields, and still-valid rows
+    are always preserved.
+
+    Field resets are *queued* (not applied here) because this runs from a button
+    below the row widgets, which are already instantiated this run — Streamlit
+    forbids mutating an instantiated widget's state, so the blanking is deferred
+    to the top of the next fragment run.
+    """
+    previous_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
+
+    # Step 1: rebuild the accounts parquet from the Excel source, exactly as startup
+    # does. Imported lazily so the page's normal load path never triggers startup's
+    # module-level sys.path setup.
+    rebuild_failed = False
+    try:
+        import startup
+
+        with st.spinner("Refreshing account data from source..."):
+            startup.regenerate_accounts_parquet(force=True)
+    except Exception as exc:
+        rebuild_failed = True
+        LOGGER.exception("Refresh Account Data: failed to rebuild accounts parquet: %s", exc)
+
+    # Step 2: clear both cache layers so the reload actually hits disk, then read fresh.
+    utils.load_account_lookup.clear()
+    _account_lookup_for_dir.clear()
+    refreshed_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
+
+    reset_idxs: list[int] = []
+    for idx in range(int(max(1, number_of_accounts))):
+        reporting_name = st.session_state.get(f"ta_detailed_account_{idx}", "")
+        customer_code = st.session_state.get(f"ta_detailed_custcode_{idx}", "")
+        if not str(reporting_name or "").strip() and not str(customer_code or "").strip():
+            continue
+        was_valid = _row_selection_valid(previous_lookup, reporting_name, customer_code)
+        still_valid = _row_selection_valid(refreshed_lookup, reporting_name, customer_code)
+        if was_valid and not still_valid:
+            reset_idxs.append(idx)
+
+    if reset_idxs:
+        st.session_state["ta_account_refresh_reset_idxs"] = reset_idxs
+
+    if rebuild_failed:
+        _queue_input_status(
+            "error",
+            "Couldn't rebuild account data from the source file (is SharePoint "
+            "synced and the Excel closed?). Reloaded the latest saved account data "
+            "instead.",
+        )
+    else:
+        _queue_input_status("success", "Account data rebuilt from source and reloaded.")
+
+    _rerun_input_fragment()
+
+
+def _render_last_refresh_caption() -> None:
+    """Render the auto-ticking "time since last refresh" line under Refresh Account Data.
+
+    The line only surfaces once the account data is 6+ hours stale; below that the JS
+    returns an empty string so nothing shows. Its 20px slot stays reserved either way,
+    so the line appears in place (no layout shift) and ticks up on its own once visible.
+
+    The elapsed-time text advances entirely client-side via a tiny components.html
+    iframe (a JS setInterval) — so it updates on its own with ZERO server-side
+    reruns. This deliberately avoids a ``run_every`` fragment: an auto-rerunning
+    fragment nested in the input fragment/column raced with active data entry and
+    could blank the whole app (the frontend received a delta it couldn't place).
+
+    The base timestamp is the cached data-load time the parent fragment mirrored
+    into session state (``ta_account_loaded_at``); the parent refreshes it on each
+    of its reruns, so the text reflects true staleness and survives full page
+    reloads instead of resetting to "just now".
+    """
+    loaded_at = st.session_state.get("ta_account_loaded_at")
+    base_ms = int(loaded_at.timestamp() * 1000) if loaded_at is not None else 0
+    components.html(
+        f"""<!DOCTYPE html><html><head><style>
+html, body {{ margin: 0; padding: 0; background: transparent; }}
+#ta-refresh-since {{
+    text-align: right;
+    font-family: 'Work Sans', sans-serif;
+    font-size: 0.72rem;
+    color: rgba(49, 51, 63, 0.6);
+    line-height: 1.2;
+    padding-right: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+}}
+</style></head><body>
+<div id="ta-refresh-since"></div>
+<script>
+const baseMs = {base_ms};
+function taRefreshSince() {{
+    if (!baseMs) return "";
+    const secs = Math.max(0, Math.floor((Date.now() - baseMs) / 1000));
+    const hrs = Math.floor(secs / 3600);
+    // Only surface staleness once the account data is 6+ hours old; below that the
+    // line stays blank (its slot is reserved, so nothing shifts when it appears).
+    if (hrs < 6) return "";
+    if (hrs < 24) return hrs + " hour" + (hrs !== 1 ? "s" : "") + " since last refresh - refresh recommended";
+    const days = Math.floor(hrs / 24);
+    return days + " day" + (days !== 1 ? "s" : "") + " since last refresh - refresh recommended";
+}}
+const el = document.getElementById("ta-refresh-since");
+function taRefreshTick() {{ if (el) el.textContent = taRefreshSince(); }}
+taRefreshTick();
+setInterval(taRefreshTick, 15000);
+</script>
+</body></html>""",
+        height=20,
+    )
 
 
 def _compute_calendar_window(view_mode: str, today: date) -> tuple[date, date]:
@@ -1094,7 +1610,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
             if window_start <= clicked_day <= window_end and clicked_day != selected_day:
                 selected_day = clicked_day
                 st.session_state["ta_input_selected_day"] = selected_day
-                st.rerun()
+                _rerun_input_fragment()
 
     selected_day_df = window_df[window_df["Entry Date"].eq(selected_day)].copy()
     return selected_day, selected_day_df
@@ -1122,6 +1638,17 @@ def render_input_view(
     if "ta_delete_payload" not in st.session_state:
         st.session_state.ta_delete_payload = None
 
+    # Re-resolve the account lookup from cache on every (possibly fragment-scoped)
+    # rerun. @st.fragment replays the *original* call arguments, so reading the
+    # cached lookup here — rather than trusting the passed-in args — is what lets
+    # the Refresh Account Data button surface freshly-reloaded Reporting Names /
+    # Customer Codes after it clears the cache, all without a full-page reload.
+    account_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
+    account_options = [""] + account_lookup["reporting_names"]
+    # Mirror the cached data-load time into session state so the auto-ticking
+    # caption fragment can read it cheaply (without re-copying the whole lookup).
+    st.session_state["ta_account_loaded_at"] = account_lookup.get("loaded_at")
+
     _render_input_status()
 
     selected_day, selected_day_df = render_input_day_selector(user_login, full_name)
@@ -1146,6 +1673,21 @@ def render_input_view(
     pending_delete_idx = st.session_state.pop("ta_detailed_delete_idx", None)
     if pending_delete_idx is not None and not editing_locked:
         _delete_detailed_row(int(pending_delete_idx))
+
+    # Apply any field resets queued by a Refresh Account Data click. This runs
+    # before the row widgets are instantiated, so blanking their session_state is
+    # allowed; only rows whose selection the refresh actually invalidated are here.
+    refresh_reset_idxs = st.session_state.pop("ta_account_refresh_reset_idxs", []) or []
+    for reset_idx in refresh_reset_idxs:
+        st.session_state[f"ta_detailed_account_{reset_idx}"] = ""
+        st.session_state[f"ta_detailed_custcode_{reset_idx}"] = ""
+    if refresh_reset_idxs:
+        count = len(refresh_reset_idxs)
+        st.toast(
+            f"Account data changed — cleared {count} selection{'s' if count != 1 else ''} "
+            "that no longer exist in the source.",
+            icon=":material/info:",
+        )
 
     rows = []
     number_of_accounts = int(max(1, st.session_state.get("ta_detailed_count", 1) or 1))
@@ -1189,8 +1731,33 @@ def render_input_view(
         if label:
             hcol.markdown(f"<div class='ta-entry-col-header'>{label}</div>", unsafe_allow_html=True)
 
+    # Flag each row as saved (still matches the seed-time baseline) or draft (new,
+    # or a saved row that's been edited). Computed from session state before the
+    # widgets render, so an edit this rerun already reads as a draft. Content-based,
+    # so it survives row add/delete/reorder; consumed from a multiset so duplicate
+    # rows don't both claim the same saved fingerprint.
+    entry_field_ids = [entry_field["id"] for entry_field in entry_fields]
+    saved_sig_counter = Counter(st.session_state.get("ta_detailed_saved_sigs", []))
+    saved_row_flags: list[bool] = []
     for idx in range(number_of_accounts):
+        row_sig = _row_signature(idx, entry_field_ids)
+        if saved_sig_counter[row_sig] > 0:
+            saved_sig_counter[row_sig] -= 1
+            saved_row_flags.append(True)
+        else:
+            saved_row_flags.append(False)
+
+    for idx in range(number_of_accounts):
+        is_saved_row = saved_row_flags[idx]
         with st.container(border=True):
+            # Hidden marker carrying this row's saved/draft state. Static CSS uses
+            # :has() on it to darken the card fill and thicken its border for saved
+            # rows — without touching the inputs. Always rendered (constant element
+            # position) so toggling state never re-mounts the row's widgets.
+            st.markdown(
+                f"<div class='ta-row-marker{' ta-row-saved' if is_saved_row else ''}'></div>",
+                unsafe_allow_html=True,
+            )
             c1, c2, c3, c4, c5 = st.columns([3.2, 2.3, 2.6, 2, 1])
             with c1:
                 account_key = f"ta_detailed_account_{idx}"
@@ -1205,10 +1772,13 @@ def render_input_view(
                 )
             with c2:
                 custcode_key = f"ta_detailed_custcode_{idx}"
+                code_pool = _customer_code_pool_for_reporting_name(
+                    account_lookup, st.session_state.get(account_key, "")
+                )
                 customer_code = st.selectbox(
                     "Customer Code",
                     options=_customer_code_options_for_row(
-                        [""] + account_lookup["customer_codes"],
+                        [""] + code_pool,
                         st.session_state.get(custcode_key, ""),
                     ),
                     key=custcode_key,
@@ -1262,9 +1832,11 @@ def render_input_view(
                         }
                         st.session_state.ta_delete_confirm_open = True
                         st.session_state.ta_delete_confirm_rendered = False
+                        # Opens a confirmation dialog — keep this an app rerun.
+                        st.rerun()
                     else:
                         st.session_state["ta_detailed_delete_idx"] = idx
-                    st.rerun()
+                        _rerun_input_fragment()
 
             custom_values: dict[str, object] = {}
             for chunk_start in range(0, len(entry_fields), 4):
@@ -1286,7 +1858,7 @@ def render_input_view(
             }
         )
 
-    add_col, save_col, _ = st.columns([1, 1, 6])
+    add_col, save_col, _spacer_col, refresh_col = st.columns([1, 1, 5, 2])
     with add_col:
         if st.button(
             "Add Row",
@@ -1296,7 +1868,7 @@ def render_input_view(
             disabled=editing_locked,
         ):
             st.session_state["ta_detailed_count"] = number_of_accounts + 1
-            st.rerun()
+            _rerun_input_fragment()
 
     with save_col:
         save_detailed_clicked = st.button(
@@ -1305,6 +1877,21 @@ def render_input_view(
             key="ta_save_detailed",
             disabled=editing_locked,
         )
+
+    with refresh_col:
+        # Right-aligned (fills this rightmost column so its edge lines up with the
+        # input fields above). Independent of the day-edit lock — refreshing the
+        # account source is always allowed; it never touches saved allocations.
+        if st.button(
+            "Refresh Account Data",
+            key="ta_refresh_accounts_btn",
+            icon=":material/refresh:",
+            type="secondary",
+            width="stretch",
+            help="Updates the Reporting Name and Customer Code fields.",
+        ):
+            _refresh_account_data(number_of_accounts)
+        _render_last_refresh_caption()
 
     if save_detailed_clicked:
         errors: list[str] = []
@@ -1378,11 +1965,25 @@ def _build_user_day_mask(df: pd.DataFrame, user_login: str, full_name: str, entr
     return date_match & user_match
 
 
-def _replace_user_day_entries(base_dir: Path, user_login: str, full_name: str, entry_date: date) -> tuple[int, int]:
-    """Remove existing rows for (user, entry_date) across export files."""
+def _replace_user_day_entries(
+    base_dir: Path,
+    user_login: str,
+    full_name: str,
+    entry_date: date,
+    skip_path: Path | None = None,
+) -> tuple[int, int]:
+    """Remove existing rows for (user, entry_date) across export files.
+
+    ``skip_path`` (the save's own target file) is left untouched: the caller is about
+    to overwrite it wholesale via atomic_write_parquet, so reading then deleting it
+    first would be two wasted UNC round-trips. Pass it on save; leave it None on delete
+    (which must actually remove the file)."""
     removed_rows = 0
     touched_files = 0
+    skip_key = str(skip_path).lower() if skip_path is not None else None
     for file_path in _iter_user_day_candidate_files(base_dir, user_login, full_name, entry_date):
+        if skip_key is not None and str(file_path).lower() == skip_key:
+            continue
         try:
             file_df = pd.read_parquet(file_path)
         except Exception as exc:
@@ -1588,9 +2189,15 @@ def save_records(
     df = _ensure_time_allocation_columns(pd.DataFrame(records))
     output_path = _get_time_allocation_daily_file(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
     try:
-        removed_rows, touched_files = _replace_user_day_entries(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
+        target_existed = output_path.is_file()
+        # Skip the target file in the replace step — atomic_write_parquet below
+        # overwrites it wholesale, so reading + deleting it first is wasted I/O. Only
+        # other (legacy) files holding this user/day need their rows removed.
+        removed_rows, touched_files = _replace_user_day_entries(
+            TIME_ALLOCATION_DIR, user_login, full_name, entry_date, skip_path=output_path
+        )
         utils.atomic_write_parquet(df, output_path, schema=_current_time_allocation_schema())
-        load_time_allocation_exports.clear()
+        _invalidate_admin_export_tables()
         _store_window_override(
             entry_date,
             _build_window_override_from_records(
@@ -1599,18 +2206,19 @@ def save_records(
         )
         _invalidate_input_seed()
         LOGGER.info(
-            "Saved time allocation export | rows=%s file='%s' user='%s' entry_date=%s replaced_rows=%s touched_files=%s",
+            "Saved time allocation export | rows=%s file='%s' user='%s' entry_date=%s target_existed=%s legacy_removed=%s touched_files=%s",
             len(df),
             str(output_path),
             user_login,
             entry_date,
+            target_existed,
             removed_rows,
             touched_files,
         )
-        if removed_rows > 0:
+        if target_existed or removed_rows > 0:
             _queue_input_status(
                 "success",
-                f"Updated {entry_date:%m/%d/%Y}: replaced {removed_rows} row(s) and saved {len(df)} row(s).",
+                f"Updated {entry_date:%m/%d/%Y}: saved {len(df)} row(s).",
             )
         else:
             _queue_input_status("success", f"Saved {len(df)} row(s) for {entry_date:%m/%d/%Y}.")
@@ -1634,7 +2242,7 @@ def delete_records_for_day(user_login: str, full_name: str, entry_date: date) ->
 
     try:
         removed_rows, touched_files = _replace_user_day_entries(TIME_ALLOCATION_DIR, user_login, full_name, entry_date)
-        load_time_allocation_exports.clear()
+        _invalidate_admin_export_tables()
         _store_window_override(entry_date, pd.DataFrame(columns=_WINDOW_OVERRIDE_COLUMNS))
         _invalidate_input_seed()
         LOGGER.info(
@@ -1808,116 +2416,202 @@ def _resolve_downloads_dir() -> Path:
     return Path.home() / "Downloads"
 
 
+def _filter_state_token(applied: dict | None) -> str:
+    """Stable token of the applied-filter state, used to remount widgets on change."""
+    if applied is None:
+        return "recent"
+    return "_".join(
+        str(applied.get(key, "")) for key in ("date_from", "date_to", "year", "period", "user", "dept")
+    )
+
+
+def _editor_seed_signature(df: pd.DataFrame) -> str:
+    """Short stable hash of the displayed rows' (Source File, within-file position)
+    identities. Folded into the data-editor key so the editor remounts whenever the
+    underlying row SET changes — including a delete-save where the top-100 view
+    backfills to the same row count — discarding any stale positional edit that would
+    otherwise re-target a different on-disk row. It is unchanged across autofill
+    reruns (same data), so in-progress edits are preserved."""
+    if df is None or df.empty or "Source File" not in df.columns or "_source_pos" not in df.columns:
+        return "empty"
+    pairs = "|".join(
+        f"{sf}:{sp}"
+        for sf, sp in zip(df["Source File"].astype(str), df["_source_pos"].astype(str))
+    )
+    return hashlib.md5(pairs.encode("utf-8")).hexdigest()[:12]
+
+
+def _apply_export_filters(df: pd.DataFrame, applied: dict) -> pd.DataFrame:
+    """Apply the in-memory date / fiscal-year / period / user / department refinements
+    to an already date-windowed frame."""
+    out = df.copy()
+    out["Entry Date"] = pd.to_datetime(out["Entry Date"], errors="coerce").dt.date
+    date_from = applied.get("date_from")
+    date_to = applied.get("date_to")
+    if date_from is not None and date_to is not None:
+        out = out[(out["Entry Date"] >= date_from) & (out["Entry Date"] <= date_to)]
+    if applied.get("year"):
+        out = out[pd.to_numeric(out["Fiscal Year"], errors="coerce").eq(int(applied["year"])).fillna(False)]
+    if applied.get("period"):
+        out = out[out["Fiscal Period"].fillna("").astype(str).str.strip().eq(applied["period"])]
+    if applied.get("user"):
+        out = out[out["Full Name"].fillna("").astype(str).str.strip().eq(applied["user"])]
+    if applied.get("dept"):
+        out = out[out["Department"].fillna("").astype(str).str.strip().eq(applied["dept"])]
+    return out
+
+
+def _export_filter_panel(prefix: str, base_dir: Path) -> tuple[pd.DataFrame, dict | None]:
+    """Shared admin-table data source + Apply-Filters form.
+
+    Returns ``(base_df, applied)``. ``applied`` is None until the user clicks Apply
+    Filters; while None, ``base_df`` is just the most-recent rows (``_load_recent_exports``)
+    so the table opens cheaply. After Apply, ``base_df`` is the date-windowed load for the
+    chosen range, shown with a progress bar while it reads (cached per session by the
+    window so unrelated reruns don't reload). Fiscal columns are attached. The caller
+    refines ``base_df`` with ``_apply_export_filters`` and renders its own table; in
+    recent mode it shows the "Top 100 entries - apply filters for more." caption.
+    """
+    applied = st.session_state.get(f"{prefix}_applied")
+
+    if applied is None:
+        base_df = _load_recent_exports(base_dir)
+    else:
+        sig = applied.get("sig")
+        if st.session_state.get(f"{prefix}_loaded_sig") != sig:
+            progress_bar = st.progress(0.0, text="Loading entries…")
+            try:
+                loaded = _load_exports_window(
+                    base_dir, applied["date_from"], applied["date_to"], progress_bar
+                )
+            finally:
+                progress_bar.empty()
+            st.session_state[f"{prefix}_loaded_df"] = loaded
+            st.session_state[f"{prefix}_loaded_sig"] = sig
+        base_df = st.session_state.get(f"{prefix}_loaded_df", pd.DataFrame())
+
+    base_df = _attach_fiscal_columns(base_df)
+
+    today = _today_eastern()
+    periods = utils.load_fiscal_periods()
+    if periods is not None and not periods.empty:
+        bound_min = min(periods["StartDate"].tolist())
+        bound_max = max(periods["EndDate"].tolist())
+    else:
+        bound_min = today
+        bound_max = today
+    entry_dates = (
+        pd.to_datetime(base_df["Entry Date"], errors="coerce").dropna()
+        if not base_df.empty
+        else pd.Series([], dtype="datetime64[ns]")
+    )
+    data_min = entry_dates.min().date() if not entry_dates.empty else today
+    data_max = entry_dates.max().date() if not entry_dates.empty else today
+    widget_min = min(bound_min, data_min, today)
+    widget_max = max(bound_max, data_max, today)
+    fiscal_year_start = _most_recent_fiscal_year_start()
+    default_from = max(widget_min, min(fiscal_year_start or widget_min, widget_max))
+    default_to = max(widget_min, min(today, widget_max))
+
+    # Drop a stored date the (possibly shifted) bounds no longer allow, so
+    # st.date_input doesn't raise on an out-of-range value.
+    for date_key in (f"{prefix}_from", f"{prefix}_to"):
+        stored_date = st.session_state.get(date_key)
+        if isinstance(stored_date, date) and not (widget_min <= stored_date <= widget_max):
+            st.session_state.pop(date_key, None)
+
+    def _opts(column: str) -> list[str]:
+        if base_df.empty or column not in base_df.columns:
+            return [""]
+        values = sorted(
+            {str(v).strip() for v in base_df[column].dropna().astype(str).tolist() if str(v).strip()}
+        )
+        return [""] + values
+
+    year_opts = (
+        [""]
+        + [
+            str(y)
+            for y in sorted(
+                {int(y) for y in pd.to_numeric(base_df["Fiscal Year"], errors="coerce").dropna().tolist()}
+            )
+        ]
+        if not base_df.empty
+        else [""]
+    )
+    period_opts = _opts("Fiscal Period")
+    user_opts = _opts("Full Name")
+    dept_opts = _opts("Department")
+
+    # Drop any stored selection that's no longer valid for the current data set.
+    for state_key, opts in (
+        (f"{prefix}_year", year_opts),
+        (f"{prefix}_period", period_opts),
+        (f"{prefix}_user", user_opts),
+        (f"{prefix}_dept", dept_opts),
+    ):
+        if st.session_state.get(state_key) not in opts:
+            st.session_state[state_key] = ""
+
+    with st.form(f"{prefix}_form"):
+        c1, c2, c3, c4 = st.columns(4)
+        date_from = c1.date_input(
+            "From", value=default_from, min_value=widget_min, max_value=widget_max, key=f"{prefix}_from"
+        )
+        date_to = c2.date_input(
+            "To", value=default_to, min_value=widget_min, max_value=widget_max, key=f"{prefix}_to"
+        )
+        sel_year = c3.selectbox("Fiscal Year", options=year_opts, key=f"{prefix}_year")
+        sel_period = c4.selectbox("Fiscal Period", options=period_opts, key=f"{prefix}_period")
+        c5, c6, _c7, _c8 = st.columns(4)
+        sel_user = c5.selectbox("User", options=user_opts, key=f"{prefix}_user")
+        sel_dept = c6.selectbox("Department", options=dept_opts, key=f"{prefix}_dept")
+        submitted = st.form_submit_button("Apply Filters", type="primary")
+
+    if submitted:
+        low, high = (date_from, date_to) if date_from <= date_to else (date_to, date_from)
+        st.session_state[f"{prefix}_applied"] = {
+            "date_from": low,
+            "date_to": high,
+            "year": sel_year,
+            "period": sel_period,
+            "user": sel_user,
+            "dept": sel_dept,
+            "sig": (low.isoformat(), high.isoformat()),
+        }
+        try:
+            st.rerun(scope="fragment")
+        except Exception:
+            st.rerun()
+
+    return base_df, applied
+
+
 @st.fragment
 def render_exports_view() -> None:
-    """Render admin export view with filters and CSV download."""
+    """Render admin export view: top 100 most-recent rows by default; the filter form is
+    applied (and only then is the matching window loaded) when Apply Filters is clicked."""
     if not utils.is_current_user_admin():
         st.info("Sorry, you don't have access to this section")
         return
 
-    exports_df = load_time_allocation_exports(TIME_ALLOCATION_DIR)
-    if exports_df.empty:
-        st.info("No time-allocation exports found.")
+    base_df, applied = _export_filter_panel("ta_export", TIME_ALLOCATION_DIR)
+    if base_df.empty:
+        st.info(
+            "No time-allocation exports found."
+            if applied is None
+            else "No entries match the current filters."
+        )
         return
 
-    exports_df = _attach_fiscal_columns(exports_df)
+    if applied is None:
+        filtered = base_df.copy()
+        st.caption("Top 100 entries - apply filters for more.")
+    else:
+        filtered = _apply_export_filters(base_df, applied)
 
-    entry_dt = pd.to_datetime(exports_df["Entry Date"], errors="coerce")
-    valid_dates = entry_dt.dropna()
-    today = _today_eastern()
-    min_date = valid_dates.min().date() if not valid_dates.empty else today
-    max_date = valid_dates.max().date() if not valid_dates.empty else min_date
-
-    # Default the window to the most recent fiscal year through today.
-    fiscal_year_start = _most_recent_fiscal_year_start()
-    default_from = fiscal_year_start if fiscal_year_start is not None else min_date
-    default_to = today
-    widget_min = min(min_date, default_from)
-    widget_max = max(max_date, default_to)
-    default_from = max(widget_min, min(default_from, widget_max))
-    default_to = max(widget_min, min(default_to, widget_max))
-
-    year_options = sorted(
-        {int(y) for y in pd.to_numeric(exports_df["Fiscal Year"], errors="coerce").dropna().tolist()}
-    )
-    year_choice_labels = [""] + [str(y) for y in year_options]
-
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        date_from = st.date_input(
-            "From", value=default_from, min_value=widget_min, max_value=widget_max, key="ta_export_from"
-        )
-    with f2:
-        date_to = st.date_input(
-            "To", value=default_to, min_value=widget_min, max_value=widget_max, key="ta_export_to"
-        )
-    with f3:
-        selected_year = st.selectbox(
-            "Fiscal Year",
-            options=year_choice_labels,
-            key="ta_export_fiscal_year",
-        )
-    with f4:
-        if selected_year:
-            scoped = exports_df[
-                pd.to_numeric(exports_df["Fiscal Year"], errors="coerce").eq(int(selected_year))
-            ]
-            period_pool = scoped["Fiscal Period"]
-        else:
-            period_pool = exports_df["Fiscal Period"]
-        period_options = sorted(
-            {p for p in period_pool.dropna().astype(str).str.strip().tolist() if p}
-        )
-        stored_period = st.session_state.get("ta_export_fiscal_period", "")
-        if stored_period and stored_period not in period_options:
-            st.session_state["ta_export_fiscal_period"] = ""
-        selected_period = st.selectbox(
-            "Fiscal Period",
-            options=[""] + period_options,
-            key="ta_export_fiscal_period",
-        )
-
-    g1, g2, _, _ = st.columns(4)
-    full_name_options = sorted(
-        name
-        for name in exports_df["Full Name"].dropna().astype(str).str.strip().unique().tolist()
-        if name
-    )
-    selected_full_name = g1.selectbox(
-        "User",
-        options=[""] + full_name_options,
-        key="ta_export_user_full_name",
-    )
-    department_options = sorted(
-        dept
-        for dept in exports_df["Department"].dropna().astype(str).str.strip().unique().tolist()
-        if dept
-    )
-    selected_department = g2.selectbox(
-        "Department",
-        options=[""] + department_options,
-        key="ta_export_department",
-    )
-
-    filtered = exports_df.copy()
+    filtered = filtered.copy()
     filtered["Entry Date"] = pd.to_datetime(filtered["Entry Date"], errors="coerce").dt.date
-    filtered = filtered[(filtered["Entry Date"] >= date_from) & (filtered["Entry Date"] <= date_to)]
-    if selected_year:
-        filtered = filtered[
-            pd.to_numeric(filtered["Fiscal Year"], errors="coerce").eq(int(selected_year)).fillna(False)
-        ]
-    if selected_period:
-        filtered = filtered[
-            filtered["Fiscal Period"].fillna("").astype(str).str.strip().eq(selected_period)
-        ]
-    if selected_full_name:
-        filtered = filtered[
-            filtered["Full Name"].fillna("").astype(str).str.strip().eq(selected_full_name)
-        ]
-    if selected_department:
-        filtered = filtered[
-            filtered["Department"].fillna("").astype(str).str.strip().eq(selected_department)
-        ]
 
     # Total Minutes mirrors the Time column (HH:MM[:SS]) converted to whole minutes.
     filtered["Total Minutes"] = (
@@ -2110,7 +2804,7 @@ def _apply_admin_editor_changes(original: pd.DataFrame, edited: pd.DataFrame) ->
         saved_files,
         failed_files,
     )
-    load_time_allocation_exports.clear()
+    _invalidate_admin_export_tables()
     load_time_allocation_user_window.clear()
     _invalidate_input_seed()
 
@@ -2195,122 +2889,27 @@ def render_admin_data_editor_view(account_lookup: dict) -> None:
             else:
                 st.info(message)
 
-    exports_df = load_time_allocation_exports(TIME_ALLOCATION_DIR)
-    if exports_df.empty:
-        st.info("No time-allocation entries found.")
+    base_df, applied = _export_filter_panel("ta_admin_editor", TIME_ALLOCATION_DIR)
+    if base_df.empty:
+        st.info(
+            "No time-allocation entries found."
+            if applied is None
+            else "No entries match the current filters."
+        )
         return
 
-    # Stable within-file position must be computed before filtering so rows
-    # outside the visible filter are not silently deleted on save.
-    exports_df = exports_df.copy()
-    exports_df["_source_pos"] = exports_df.groupby("Source File").cumcount()
-    exports_df = _attach_fiscal_columns(exports_df)
+    # Stable within-file position must be computed on the full loaded set (whole
+    # files) before filtering, so rows hidden by the filter are not silently
+    # deleted on save and edits target the right on-disk row. Fiscal columns were
+    # already attached by the filter panel.
+    base_df = base_df.copy()
+    base_df["_source_pos"] = base_df.groupby("Source File").cumcount()
 
-    today = utils.to_eastern(utils.now_utc()).date()
-    entry_dt = pd.to_datetime(exports_df["Entry Date"], errors="coerce")
-    valid_dates = entry_dt.dropna()
-    data_min = valid_dates.min().date() if not valid_dates.empty else today
-    data_max = valid_dates.max().date() if not valid_dates.empty else today
-
-    # Default the window to the most recent fiscal year through today.
-    fiscal_year_start = _most_recent_fiscal_year_start()
-    default_from = fiscal_year_start if fiscal_year_start is not None else data_min
-    default_to = today
-    widget_min = min(data_min, default_from)
-    widget_max = max(data_max, default_to)
-    default_from = max(widget_min, min(default_from, widget_max))
-    default_to = max(widget_min, min(default_to, widget_max))
-
-    year_options = sorted(
-        {int(y) for y in pd.to_numeric(exports_df["Fiscal Year"], errors="coerce").dropna().tolist()}
-    )
-    year_choice_labels = [""] + [str(y) for y in year_options]
-
-    f1, f2, f3, f4 = st.columns(4)
-    with f1:
-        date_from = st.date_input(
-            "From",
-            value=default_from,
-            min_value=widget_min,
-            max_value=widget_max,
-            key="ta_admin_editor_from",
-        )
-    with f2:
-        date_to = st.date_input(
-            "To",
-            value=default_to,
-            min_value=widget_min,
-            max_value=widget_max,
-            key="ta_admin_editor_to",
-        )
-    with f3:
-        selected_year = st.selectbox(
-            "Fiscal Year",
-            options=year_choice_labels,
-            key="ta_admin_editor_fiscal_year",
-        )
-    with f4:
-        if selected_year:
-            scoped = exports_df[
-                pd.to_numeric(exports_df["Fiscal Year"], errors="coerce").eq(int(selected_year))
-            ]
-            period_pool = scoped["Fiscal Period"]
-        else:
-            period_pool = exports_df["Fiscal Period"]
-        period_options = sorted(
-            {p for p in period_pool.dropna().astype(str).str.strip().tolist() if p}
-        )
-        stored_period = st.session_state.get("ta_admin_editor_fiscal_period", "")
-        if stored_period and stored_period not in period_options:
-            st.session_state["ta_admin_editor_fiscal_period"] = ""
-        selected_period = st.selectbox(
-            "Fiscal Period",
-            options=[""] + period_options,
-            key="ta_admin_editor_fiscal_period",
-        )
-
-    g1, g2, _, _ = st.columns(4)
-    full_name_options = sorted(
-        name
-        for name in exports_df["Full Name"].dropna().astype(str).str.strip().unique().tolist()
-        if name
-    )
-    selected_full_name = g1.selectbox(
-        "User",
-        options=[""] + full_name_options,
-        key="ta_admin_editor_user_full_name",
-    )
-
-    department_options = sorted(
-        dept
-        for dept in exports_df["Department"].dropna().astype(str).str.strip().unique().tolist()
-        if dept
-    )
-    selected_department = g2.selectbox(
-        "Department",
-        options=[""] + department_options,
-        key="ta_admin_editor_department",
-    )
-
-    filtered = exports_df.copy()
-    filtered["Entry Date"] = pd.to_datetime(filtered["Entry Date"], errors="coerce").dt.date
-    filtered = filtered[(filtered["Entry Date"] >= date_from) & (filtered["Entry Date"] <= date_to)]
-    if selected_year:
-        filtered = filtered[
-            pd.to_numeric(filtered["Fiscal Year"], errors="coerce").eq(int(selected_year)).fillna(False)
-        ]
-    if selected_period:
-        filtered = filtered[
-            filtered["Fiscal Period"].fillna("").astype(str).str.strip().eq(selected_period)
-        ]
-    if selected_full_name:
-        filtered = filtered[
-            filtered["Full Name"].fillna("").astype(str).str.strip().eq(selected_full_name)
-        ]
-    if selected_department:
-        filtered = filtered[
-            filtered["Department"].fillna("").astype(str).str.strip().eq(selected_department)
-        ]
+    if applied is None:
+        filtered = base_df
+        st.caption("Top 100 entries - apply filters for more.")
+    else:
+        filtered = _apply_export_filters(base_df, applied)
 
     if filtered.empty:
         st.info("No entries match the current filters.")
@@ -2349,7 +2948,7 @@ def render_admin_data_editor_view(account_lookup: dict) -> None:
     existing_channels = [
         c for c in filtered["Channel"].dropna().astype(str).str.strip().unique().tolist() if c
     ]
-    channel_choices = list(_ordered_channel_options()) + [
+    channel_choices = list(CHANNEL_OPTIONS) + [
         c for c in existing_channels if c not in CHANNEL_OPTIONS
     ]
 
@@ -2366,11 +2965,12 @@ def render_admin_data_editor_view(account_lookup: dict) -> None:
         "Delete": st.column_config.CheckboxColumn("Delete", default=False),
     }
 
-    # Remount the editor on filter change so stale pending edits don't bleed across views.
-    editor_key = (
-        f"ta_admin_editor_table_{date_from.isoformat()}_{date_to.isoformat()}"
-        f"_{selected_year}_{selected_period}_{selected_full_name}_{selected_department}_{len(filtered)}"
-    )
+    # Remount the editor whenever the displayed row SET changes — by filter AND by the
+    # row identities themselves — so a stale positional edit never reapplies to a
+    # different on-disk row. (After a delete-save the top-100 view backfills to the same
+    # row count, so keying on len alone would keep the editor mounted and re-target the
+    # wrong row.) The signature is stable across autofill reruns, preserving edits.
+    editor_key = f"ta_admin_editor_table_{_filter_state_token(applied)}_{_editor_seed_signature(filtered)}"
     edited = st.data_editor(
         editor_seed,
         column_config=column_config,
@@ -2612,7 +3212,7 @@ def _execute_entry_field_delete(field_id: str, field_name: str) -> None:
         except Exception as exc:
             LOGGER.exception("Failed to purge column '%s' from '%s': %s", col_name, path, exc)
 
-    load_time_allocation_exports.clear()
+    _invalidate_admin_export_tables()
     load_time_allocation_user_window.clear()
     _invalidate_input_seed()
 
@@ -2987,7 +3587,7 @@ def _save_admin_added_records(
             TIME_ALLOCATION_DIR, user_login, full_name, entry_date
         )
         utils.atomic_write_parquet(combined, output_path, schema=_current_time_allocation_schema())
-        load_time_allocation_exports.clear()
+        _invalidate_admin_export_tables()
         load_time_allocation_user_window.clear()
         _invalidate_input_seed()
         LOGGER.info(
@@ -3213,10 +3813,13 @@ def render_admin_add_entry_view(account_options: list[str], account_lookup: dict
                 )
             with c2:
                 custcode_key = f"ta_add_custcode_{idx}"
+                code_pool = _customer_code_pool_for_reporting_name(
+                    account_lookup, st.session_state.get(account_key, "")
+                )
                 customer_code = st.selectbox(
                     "Customer Code",
                     options=_customer_code_options_for_row(
-                        [""] + account_lookup["customer_codes"],
+                        [""] + code_pool,
                         st.session_state.get(custcode_key, ""),
                     ),
                     key=custcode_key,
@@ -3355,18 +3958,26 @@ full_name = utils.get_full_name_for_user(None, user_login)
 department = utils.get_user_department(user_login, full_name=full_name) or ""
 is_admin_user = utils.is_current_user_admin()
 
-account_lookup = _build_account_lookup(utils.load_account_lookup(str(PERSONNEL_DIR)))
+account_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
 account_options = [""] + account_lookup["reporting_names"]
 
 if is_admin_user:
+    # on_change="rerun" makes the tabs track state so only the *selected* tab's
+    # body executes (each TabContainer exposes `.open`). Without it Streamlit runs
+    # every tab's content on every load, which made an admin pay the Exports and
+    # Admin-Settings full-dataset reads even while sitting on the Input tab. The
+    # first tab (Input) is selected by default, so it renders on initial load.
     input_tab, exports_tab, settings_tab = st.tabs(
-        ["Input", "Exports", "Admin Settings"], width="stretch"
+        ["Input", "Exports", "Admin Settings"], width="stretch", on_change="rerun"
     )
-    with input_tab:
-        render_input_view(user_login, full_name, department, account_options, account_lookup)
-    with exports_tab:
-        render_exports_view()
-    with settings_tab:
-        render_admin_settings_view(account_lookup, account_options)
+    if input_tab.open:
+        with input_tab:
+            render_input_view(user_login, full_name, department, account_options, account_lookup)
+    if exports_tab.open:
+        with exports_tab:
+            render_exports_view()
+    if settings_tab.open:
+        with settings_tab:
+            render_admin_settings_view(account_lookup, account_options)
 else:
     render_input_view(user_login, full_name, department, account_options, account_lookup)
