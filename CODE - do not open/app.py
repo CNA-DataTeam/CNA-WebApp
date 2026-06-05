@@ -7,6 +7,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
@@ -21,7 +23,6 @@ import page_registry
 import utils
 
 UPDATE_FLAG = APP_DIR / ".update_available"
-UPDATE_CHECK_FILE = APP_DIR / ".last_update_check"
 
 # Preload third-party component once from the main script context.
 _AUTOREFRESH_PRELOAD_ERROR: Exception | None = None
@@ -212,6 +213,98 @@ def _launch_repair() -> None:
     # as a safety net for the parent launcher process.
     LOGGER.info("Launching Repair App; exiting Streamlit process.")
     os._exit(0)
+
+
+# -----------------------------------------------------------------
+# Mid-session update watcher + non-blocking "update available" banner
+# -----------------------------------------------------------------
+# The startup check (check_updates.py) handles updates present at launch. This
+# covers updates that land WHILE the app is open: a background watcher polls
+# origin on a timer and flips a flag; a dismissible banner then surfaces on the
+# user's next normal interaction — no modal, no forced refresh, never interrupts
+# active work. The disruptive pull+restart only happens if the user clicks it.
+_UPDATE_WATCH_INTERVAL_SECONDS = 900  # poll origin ~every 15 min while running
+
+
+@st.cache_resource(show_spinner=False)
+def _update_watcher() -> dict:
+    """Singleton background watcher (one daemon thread per server process).
+
+    Polls origin for a new commit via check_updates.remote_is_ahead() — a
+    read-only `git ls-remote`, no working-tree changes — and writes the result
+    into a shared dict the main script reads. The thread makes NO Streamlit calls
+    (only git + dict mutation), which is the rule for Streamlit background threads.
+    """
+    state = {"available": False}
+    try:
+        import check_updates
+    except Exception as exc:
+        LOGGER.warning("Update watcher could not import check_updates: %s", exc)
+        return state
+
+    def _loop() -> None:
+        while True:
+            time.sleep(_UPDATE_WATCH_INTERVAL_SECONDS)
+            try:
+                state["available"] = bool(check_updates.remote_is_ahead())
+            except Exception:
+                pass
+
+    threading.Thread(target=_loop, daemon=True, name="cna-update-watcher").start()
+    return state
+
+
+def _run_update_now() -> None:
+    """Download + stage the pending update (used by the soft banner).
+
+    _apply_update() pulls the new code to disk, refreshes deps, and clears the
+    flag — but Streamlit keeps running the already-loaded modules, so an st.rerun()
+    would NOT actually load the new code. The update therefore takes full effect on
+    the next launch (the every-launch startup check guarantees that). We tell the
+    user exactly that rather than claiming an in-place restart, hide the banner, and
+    rerun only to clear it."""
+    with st.spinner("Downloading update..."):
+        ok, err = _apply_update()
+    if ok:
+        _update_watcher()["available"] = False
+        st.session_state["_soft_update_dismissed"] = True
+        st.session_state["_post_update_notice"] = (
+            "Update installed — it takes full effect the next time you open the app."
+        )
+        st.rerun()
+    else:
+        LOGGER.error("Mid-session update failed: %s", err)
+        st.error(f"Update failed:\n\n```\n{err}\n```")
+
+
+def _render_soft_update_banner() -> None:
+    """Render the non-blocking mid-session update banner, when appropriate.
+
+    Shows ONLY when (a) the watcher has seen a new commit, (b) the blocking launch
+    flag .update_available is NOT set (that case is owned by the modal dialog
+    above, which st.stop()s before we reach here), and (c) the user hasn't
+    dismissed it this session. Calling this also starts the watcher on first run.
+    """
+    watcher = _update_watcher()
+    if UPDATE_FLAG.exists() or st.session_state.get("_soft_update_dismissed"):
+        return
+    if not watcher.get("available"):
+        return
+
+    with st.container(border=True):
+        message_col, update_col, later_col = st.columns([6, 1.7, 1.3])
+        message_col.markdown(
+            "🔄&nbsp;&nbsp;**A new version of CNA Console is available.** "
+            "Update when you're at a good stopping point.",
+            unsafe_allow_html=True,
+        )
+        if update_col.button(
+            "Update now", type="primary", width="stretch", key="_soft_update_now_btn"
+        ):
+            _run_update_now()
+        if later_col.button("Later", width="stretch", key="_soft_update_later_btn"):
+            st.session_state["_soft_update_dismissed"] = True
+            st.rerun()
 
 
 def _check_for_updates_manual():
@@ -681,4 +774,11 @@ if st.session_state.get("_show_repair_dialog"):
     _repair_dialog()
 
 LOGGER.info("Navigation initialized | current_page='%s'", navigation.title)
+# One-time confirmation after a mid-session "Update now" (set just before its rerun).
+_post_update_notice = st.session_state.pop("_post_update_notice", None)
+if _post_update_notice:
+    st.toast(_post_update_notice, icon=":material/check_circle:")
+# Non-blocking banner if a new version landed while the app was open (appears on
+# the user's next interaction; never forces an update or refreshes their work).
+_render_soft_update_banner()
 navigation.run()

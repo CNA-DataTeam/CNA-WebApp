@@ -1,20 +1,25 @@
 """
-Background update checker — called by StartApp.bat at startup.
+Background update checker — called by StartApp.bat at startup (synchronously,
+before the app boots).
 
-Once per day:
-  1. git fetch
-  2. If local branch is behind origin, attempt a clean fast-forward pull
-     after discarding local modifications to known-regenerated build
-     artifacts (legacy holdover from when the exe/spec were tracked).
+On EVERY launch (lightweight, so a no-update launch is near-seamless):
+  1. A quick `git ls-remote` of origin/main, compared to local HEAD. When they
+     match — the common case — that's a single small round-trip and we're done.
+  2. If origin/main has a new commit, attempt a clean fast-forward pull after
+     discarding local modifications to known-regenerated build artifacts (legacy
+     holdover from when the exe/spec were tracked).
   3. After pull success, run `uv pip install -r requirements.txt` so any
      dependency changes in the new commits land before the app boots.
-  4. After pull success, if the launcher exe is missing (because the
-     pull deleted a previously-tracked copy), run setup.bat /silent to
-     rebuild it before the app continues.
-  5. On pull success, clear .update_available so the in-app dialog is
-     skipped — the new code is already on disk before Streamlit boots.
-  6. On pull failure, set .update_available so the in-app dialog (with
+  4. After pull success, if the launcher exe is missing (because the pull deleted
+     a previously-tracked copy), run setup.bat /silent to rebuild it.
+  5. On pull success, clear .update_available so the in-app dialog is skipped —
+     the new code is already on disk before Streamlit boots.
+  6. On pull failure, set .update_available so the blocking in-app dialog (with
      its surfaced error message) reaches the user on next render.
+
+The running app also watches origin for commits that land mid-session (see
+app.py's _update_watcher / soft banner) and reuses remote_is_ahead() below — the
+shared read-only "is there a new commit?" check.
 """
 
 import os
@@ -26,7 +31,6 @@ from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
-CHECK_FILE = APP_DIR / ".last_update_check"
 UPDATE_FLAG = APP_DIR / ".update_available"
 LAUNCHER_EXE = ROOT_DIR / "CNA Web App.exe"
 SETUP_BAT = ROOT_DIR / "setup.bat"
@@ -43,13 +47,61 @@ REGENERATED_TRACKED_ARTIFACTS = (
 )
 
 
-def already_checked_today() -> bool:
-    if not CHECK_FILE.exists():
+def _low_speed_env() -> dict:
+    """Env that makes git abort a stalled transfer quickly and never block on a
+    credential/terminal prompt (the running app's watcher thread has no TTY, so a
+    prompt would hang it). Reads on a public repo are anonymous anyway."""
+    return {
+        **os.environ,
+        "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
+        "GIT_HTTP_LOW_SPEED_TIME": "10",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+
+
+def remote_is_ahead() -> bool:
+    """True only when origin/main has a commit we don't have AND we can cleanly
+    fast-forward to it (i.e. we're strictly behind on the main branch).
+
+    The common case — already up to date — is a single small `git ls-remote`
+    round-trip (no object download), so this is cheap to run on every launch and
+    from the running app's background watcher. Only when the remote SHA actually
+    differs do we confirm it's a real fast-forward: a SHA difference ALONE would
+    also fire for a local-ahead / diverged / detached / off-main checkout, and
+    auto-pulling those would fail and wedge the user behind the blocking update
+    dialog. Read-only throughout (ls-remote + an objects-only fetch when needed) —
+    never touches the working tree. Returns False on any error/offline."""
+    git_dir = ROOT_DIR / ".git"
+    if not git_dir.exists():
         return False
     try:
-        return CHECK_FILE.read_text().strip() == date.today().isoformat()
-    except Exception:
+        ls = _git(["ls-remote", "origin", "refs/heads/main"], timeout=15, env=_low_speed_env())
+        local = _git(["rev-parse", "HEAD"], timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False
+    if ls.returncode != 0 or local.returncode != 0:
+        return False
+    remote_sha = ls.stdout.split()[0].strip() if ls.stdout.strip() else ""
+    local_sha = local.stdout.strip()
+    if not remote_sha or not local_sha or remote_sha == local_sha:
+        return False  # up to date (or can't tell) — the cheap, common fast path
+
+    # The remote SHA differs. Only report an update when we're cleanly BEHIND
+    # origin/main on the main branch (a fast-forward is possible) — not when the
+    # local checkout is ahead / diverged / detached / on another branch.
+    try:
+        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
+        if branch.returncode != 0 or branch.stdout.strip() != "main":
+            return False
+        # ls-remote didn't download the object, so fetch main (objects/refs only —
+        # no working-tree change) before testing ancestry.
+        fetch = _git(["fetch", "origin", "main", "--quiet"], timeout=30, env=_low_speed_env())
+        if fetch.returncode != 0:
+            return False
+        ancestor = _git(["merge-base", "--is-ancestor", "HEAD", remote_sha], timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+    return ancestor.returncode == 0
 
 
 def _git(args: list[str], timeout: int = 30, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -155,43 +207,23 @@ def _rebuild_launcher_if_missing() -> None:
 
 
 def run_check() -> None:
-    if already_checked_today():
-        return
-
     git_dir = ROOT_DIR / ".git"
     if not git_dir.exists():
         return
 
-    full_env = {
-        **os.environ,
-        "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
-        "GIT_HTTP_LOW_SPEED_TIME": "10",
-    }
-
-    try:
-        fetch = _git(["fetch", "--prune"], timeout=30, env=full_env)
-        if fetch.returncode != 0:
-            return
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return
-
-    try:
-        status = _git(["status", "-uno"], timeout=10)
-    except Exception:
-        return
-
-    if "behind" not in status.stdout:
+    # Lightweight, every-launch check: a quick ls-remote tells us whether
+    # origin/main has a commit we don't have. When it doesn't (the common case)
+    # we're done in one small round-trip, so running this on every launch stays
+    # near-seamless. Only when behind do we do the heavier pull + dependency
+    # refresh — and only then, before the app boots.
+    if not remote_is_ahead():
         UPDATE_FLAG.unlink(missing_ok=True)
-        try:
-            CHECK_FILE.write_text(date.today().isoformat())
-        except Exception:
-            pass
         return
 
     _discard_regenerated_artifacts()
 
     try:
-        pull = _git(["pull", "--ff-only"], timeout=60, env=full_env)
+        pull = _git(["pull", "--ff-only"], timeout=60, env=_low_speed_env())
     except Exception:
         UPDATE_FLAG.write_text(date.today().isoformat())
         return
@@ -202,11 +234,6 @@ def run_check() -> None:
         UPDATE_FLAG.unlink(missing_ok=True)
     else:
         UPDATE_FLAG.write_text(date.today().isoformat())
-
-    try:
-        CHECK_FILE.write_text(date.today().isoformat())
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":

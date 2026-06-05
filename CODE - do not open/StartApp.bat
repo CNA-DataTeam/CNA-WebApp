@@ -131,14 +131,14 @@ if not exist "%LOCAL_CONFIG%" (
 )
 
 REM ============================================================
-REM GIT UPDATE CHECK + PULL (synchronous — once per day)
+REM GIT UPDATE CHECK + PULL (synchronous — lightweight, every launch)
 REM ============================================================
 REM Running this synchronously (rather than backgrounded) is important: the
 REM check now performs the actual `git pull` itself when an update is
 REM available, so it must finish before Streamlit imports the app modules.
-REM The check is gated by .last_update_check and is a no-op on subsequent
-REM launches the same day, so this only adds latency on the day's first
-REM launch.
+REM It runs on EVERY launch but is lightweight: a single `git ls-remote` vs.
+REM local HEAD, so when there's no update it's one small round-trip and adds
+REM almost no startup latency. The heavier pull only happens when behind.
 call :LOG "Running update check..."
 "%VENV_DIR%\Scripts\python.exe" "%CODE_DIR%\check_updates.py" >> "%LOG_FILE%" 2>&1
 
