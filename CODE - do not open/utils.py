@@ -1025,16 +1025,19 @@ def get_global_css() -> str:
     [data-testid="stTabs"] [data-baseweb="tab-highlight"] {
         background-color: var(--cna-green) !important;
     }
-    /* Primary (green) buttons — white label, branded hover polish */
-    [data-testid="stBaseButton-primary"],
-    [data-testid="stBaseButton-primary"] * {
+    /* Primary (green) buttons — white label, branded hover polish.
+       The ^= prefix also matches form-submit primary buttons
+       (data-testid "stBaseButton-primaryFormSubmit", e.g. "Apply Filters"),
+       so their text is white-on-green like every other primary button. */
+    [data-testid^="stBaseButton-primary"],
+    [data-testid^="stBaseButton-primary"] * {
         color: var(--cna-white) !important;
     }
-    [data-testid="stBaseButton-primary"] {
+    [data-testid^="stBaseButton-primary"] {
         transition: background-color 0.15s ease-in-out,
                     box-shadow 0.15s ease-in-out;
     }
-    [data-testid="stBaseButton-primary"]:hover {
+    [data-testid^="stBaseButton-primary"]:hover {
         background-color: var(--cna-green-dark) !important;
         border-color: var(--cna-green-dark) !important;
         box-shadow: 0 4px 12px rgba(0, 177, 154, 0.28);

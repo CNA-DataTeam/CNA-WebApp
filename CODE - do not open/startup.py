@@ -281,10 +281,16 @@ def load_users_excel(path: Path) -> pd.DataFrame:
     return out
 
 def save_parquet(df: pd.DataFrame, output_dir: Path, filename: str) -> Path:
-    """Save DataFrame to Parquet file with given filename in output_dir."""
+    """Save DataFrame to Parquet atomically (write a temp file, then os.replace).
+
+    The atomic swap means a reader on the share never sees a half-written file: the
+    final filename always points at either the previous complete file or the new one.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / filename
-    df.to_parquet(output_path, index=False)
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, output_path)
     return output_path
 
 def regenerate_accounts_parquet(
@@ -294,16 +300,16 @@ def regenerate_accounts_parquet(
 ) -> Path:
     """Refresh the daily accounts parquet from the source Excel.
 
-    This is the exact accounts step ``main()`` runs, factored out so the in-app
-    "Refresh Account Data" button can rebuild the parquet via the SAME method the
-    app uses at startup. With ``force=False`` it keeps startup's daily behavior
-    (skip when today's file already exists and has the required columns); with
-    ``force=True`` it always rebuilds from the Excel source — the button's
-    behavior, so an updated source is pulled immediately instead of on the next
-    calendar day. ``output_dir`` / ``accounts_xlsx`` are resolved via
-    ``get_paths()`` when not supplied. Returns the path to the current accounts
-    parquet. Raises on failure (e.g. SharePoint not synced, Excel unreadable) so
-    callers can surface the error.
+    This is the exact accounts step ``main()`` runs (per launch, ``force=False``),
+    factored out so the centralized producer ``refresh_data.py`` can force a fresh
+    rebuild on a schedule (``force=True``). With ``force=False`` it keeps startup's
+    daily behavior (skip when today's file already exists and has the required
+    columns); with ``force=True`` it always rebuilds from the Excel source so an
+    updated source is pulled immediately instead of on the next calendar day. If the
+    source reads back empty (e.g. open/locked mid-edit) the existing parquet is kept.
+    ``output_dir`` / ``accounts_xlsx`` are resolved via ``get_paths()`` when not
+    supplied. Returns the path to the current accounts parquet. Raises only if the
+    Excel cannot be read at all, so callers can log and skip.
     """
     if output_dir is None or accounts_xlsx is None:
         resolved_output_dir, _tracker_xlsx, resolved_accounts_xlsx = get_paths()
@@ -315,9 +321,22 @@ def regenerate_accounts_parquet(
         return output_dir / get_todays_filename("accounts")
 
     LOGGER.info("Preparing accounts data (force=%s)...", force)
-    delete_old_parquet_files(output_dir, "accounts")
     accounts_df = load_accounts_excel(accounts_xlsx)
+    if accounts_df.empty:
+        # Don't overwrite a good parquet with an empty read (e.g. the source was open
+        # or locked mid-edit). Keep the last good file so consumers and the in-app
+        # refresh never see empty account data.
+        LOGGER.warning("Accounts source produced no rows; keeping existing accounts parquet.")
+        return output_dir / get_todays_filename("accounts")
     output_path = save_parquet(accounts_df, output_dir, get_todays_filename("accounts"))
+    # Delete older-dated accounts files only AFTER the new one is safely written, so
+    # there's never a window with no accounts_*.parquet on the share. Keep today's.
+    for old_file in output_dir.glob("accounts_*.parquet"):
+        if old_file.name != output_path.name:
+            try:
+                old_file.unlink()
+            except Exception as exc:
+                LOGGER.error("Error deleting old accounts file %s: %s", old_file.name, exc)
     LOGGER.info("Saved accounts data: %s", output_path)
     return output_path
 
@@ -334,7 +353,7 @@ def main() -> None:
     LOGGER.info("Output directory: %s", output_dir)
     LOGGER.info("Users source Excel: %s", tracker_xlsx)
     LOGGER.info("Accounts Excel: %s", accounts_xlsx)
-    # Handle accounts data (same routine the in-app Refresh Account Data button reuses)
+    # Handle accounts data (same routine refresh_data.py reuses on a schedule)
     try:
         regenerate_accounts_parquet(force=False, output_dir=output_dir, accounts_xlsx=accounts_xlsx)
     except Exception as e:

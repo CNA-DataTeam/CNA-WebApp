@@ -19,6 +19,7 @@ Output schema:
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 import uuid
 from collections import Counter
@@ -121,21 +122,31 @@ st.markdown(_TA_COMPACT_CSS, unsafe_allow_html=True)
 #
 # Why this exists: streamlit_calendar calls Streamlit.setFrameHeight() only once on
 # mount, so the iframe height is locked to the calendar's initial height. FullCalendar's
-# default "+X more" popover is position:absolute with no max-height, so on a day with
-# many entries it grows past that fixed iframe boundary, gets clipped, and — not being
-# scrollable — the hidden entries are unreachable. Pin the popover to the iframe's own
-# viewport (position:fixed → relative to the iframe), cap it to the visible area, and let
-# its body scroll so every entry for the day is reachable no matter which cell was clicked.
+# default "+X more" popover is position:absolute aligned to the clicked cell with no
+# max-height, so on a day with many entries it grows past that fixed iframe boundary, gets
+# clipped, and — not being scrollable — the hidden entries are unreachable.
+#
+# IMPORTANT: do NOT switch this to position:fixed. A fixed popover has offsetParent === null,
+# and FullCalendar's popover updateSize() does `this.offsetParent.getBoundingClientRect()`
+# in componentDidMount — with a null offsetParent that throws, which corrupts the popover's
+# mount and silently kills its close affordances (the X button, click-outside, and Escape all
+# stop working, so the popover can't be dismissed). See the close-button bug fixed here.
+#
+# Instead keep position:absolute but pin the popover to the top of the calendar's
+# .fc-view-harness (its offsetParent, which spans the full grid height) via top/left/right
+# with !important, and size it with % (relative to that harness) so it always fits inside the
+# locked-height iframe no matter which day — top row or bottom row — was clicked. Its body
+# scrolls so every entry is reachable, and the native close button keeps working.
 _CALENDAR_MORE_POPOVER_CSS = """
 .fc .fc-popover.fc-more-popover {
-    position: fixed !important;
+    position: absolute !important;
     top: 8px !important;
     left: 8px !important;
     right: 8px !important;
     bottom: auto !important;
     width: auto !important;
-    max-width: calc(100vw - 16px) !important;
-    max-height: calc(100vh - 16px) !important;
+    max-width: calc(100% - 16px) !important;
+    max-height: calc(100% - 16px) !important;
     display: flex !important;
     flex-direction: column !important;
     overflow: hidden !important;
@@ -150,8 +161,8 @@ _CALENDAR_MORE_POPOVER_CSS = """
 }
 .fc .fc-popover.fc-more-popover .fc-popover-body {
     flex: 1 1 auto !important;
+    min-height: 0 !important;
     overflow-y: auto !important;
-    max-height: calc(100vh - 52px) !important;
     padding: 6px 8px !important;
 }
 .fc .fc-popover.fc-more-popover .fc-daygrid-event {
@@ -161,6 +172,11 @@ _CALENDAR_MORE_POPOVER_CSS = """
 
 TIME_ALLOCATION_DIR = config.TIME_ALLOCATION_DIR
 PERSONNEL_DIR = config.PERSONNEL_DIR
+# Machine-local, shared-by-all-users favorites for the Reporting Name dropdown.
+# Lives next to app.py's page favorites (the "CODE - do not open" app dir, one
+# level up from pages/). Deliberately NOT on the network share: favorites are a
+# convenience, and keeping them local keeps every dropdown rerun off the network.
+ACCOUNT_FAVORITES_FILE = Path(__file__).resolve().parent.parent / "ta_account_favorites.json"
 # The canonical channel set, in a fixed display order shown verbatim in every
 # Channel dropdown. (Previously the dropdown re-sorted by usage frequency once
 # enough history existed, which required a full scan of every saved file on each
@@ -703,6 +719,75 @@ def _customer_code_pool_for_reporting_name(account_lookup: dict, reporting_name:
     return list(account_lookup["customer_codes"])
 
 
+# -----------------------------------------------------------------
+# Reporting Name favorites (machine-local, shared by all users)
+# -----------------------------------------------------------------
+def _load_account_favorites() -> list[str]:
+    """Load the machine-local list of favorited Reporting Names (empty on any error)."""
+    try:
+        if ACCOUNT_FAVORITES_FILE.exists():
+            data = json.loads(ACCOUNT_FAVORITES_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [str(x or "").strip() for x in data if str(x or "").strip()]
+    except Exception:
+        LOGGER.warning("Could not read account favorites file", exc_info=True)
+    return []
+
+
+def _save_account_favorites(favs: list[str]) -> None:
+    """Persist the favorited Reporting Names list (best-effort; never raises to UI)."""
+    try:
+        ACCOUNT_FAVORITES_FILE.write_text(json.dumps(favs, indent=2), encoding="utf-8")
+    except Exception:
+        LOGGER.warning("Could not write account favorites file", exc_info=True)
+
+
+def _account_favorites_list() -> list[str]:
+    """Favorited Reporting Names, read from disk once per session into session_state.
+
+    Caching the list in session_state keeps the per-rerun dropdown reorder off the
+    filesystem entirely; the star toggle keeps this copy and the file in sync.
+    """
+    favs = st.session_state.get("ta_account_favorites")
+    if favs is None:
+        favs = _load_account_favorites()
+        st.session_state["ta_account_favorites"] = favs
+    return favs
+
+
+def _toggle_account_favorite(name: str) -> None:
+    """Star/unstar a Reporting Name, persisting to disk and the session copy."""
+    name = str(name or "").strip()
+    if not name:
+        return
+    favs = list(_account_favorites_list())
+    if name in favs:
+        favs.remove(name)
+    else:
+        favs.append(name)
+    _save_account_favorites(favs)
+    st.session_state["ta_account_favorites"] = favs
+
+
+def _favorites_first(options: list[str], favorites: set[str]) -> list[str]:
+    """Pull favorited values to the top of a blank-first option list.
+
+    The leading blank ("" = no selection) stays first; favorited options follow,
+    then the rest. Order *within* each group is preserved, so the base alphabetical
+    sort still holds inside favorites and inside the remainder. Favorites no longer
+    present in ``options`` simply don't appear, so stale stars drop off silently.
+    Pure list ops; runs once per rerun for the shared option list (not per row).
+    """
+    if not favorites:
+        return options
+    favs = [o for o in options if o != "" and o in favorites]
+    if not favs:
+        return options
+    blank = [o for o in options if o == ""]
+    rest = [o for o in options if o != "" and o not in favorites]
+    return blank + favs + rest
+
+
 def _build_account_lookup(lookup_df: pd.DataFrame) -> dict:
     """
     Build the Customer Code <-> Reporting Name lookup structures from the
@@ -782,8 +867,8 @@ def _account_lookup_for_dir(accounts_dir: str) -> dict:
     lookup = _build_account_lookup(utils.load_account_lookup(accounts_dir))
     # Stamp when this lookup was actually (re)built. Because the value is cached,
     # this is the true data-load time: it survives full page reloads (the cache
-    # is server-side) and advances only when the cache is cleared (Refresh Account
-    # Data) or the TTL expires — so the "time since last refresh" line reflects
+    # is server-side) and advances only when the cache is cleared (the Refresh Account
+    # Data button) or the TTL expires, so the "time since last refresh" line reflects
     # real staleness instead of resetting to "just now" on every rerun.
     lookup["loaded_at"] = utils.now_utc()
     return lookup
@@ -864,35 +949,6 @@ def _today_eastern() -> date:
 def _get_current_period() -> dict | None:
     """Return the fiscal period containing today (Eastern), or None if not configured."""
     return utils.get_fiscal_period_for_date(_today_eastern())
-
-
-def _most_recent_fiscal_year_start() -> date | None:
-    """
-    Return the start date of the most recent fiscal year.
-
-    "Most recent" is the fiscal year containing today, or — when today falls
-    outside every configured period — the latest fiscal year that has started.
-    Returns None if no fiscal periods are configured.
-    """
-    periods = utils.load_fiscal_periods()
-    if periods.empty:
-        return None
-
-    today = _today_eastern()
-    current = _get_current_period()
-    if current is not None:
-        target_year = int(current["Year"])
-    else:
-        started = periods[periods["StartDate"] <= today]
-        if started.empty:
-            target_year = int(periods["Year"].min())
-        else:
-            target_year = int(started["Year"].max())
-
-    year_periods = periods[periods["Year"].astype("Int64") == target_year]
-    if year_periods.empty:
-        return None
-    return min(year_periods["StartDate"].tolist())
 
 
 def _work_week_bounds(reference: date) -> tuple[date, date]:
@@ -1256,51 +1312,53 @@ def _rerun_input_fragment() -> None:
 
 
 def _refresh_account_data(number_of_accounts: int) -> None:
-    """Rebuild the accounts parquet from source, then reload the in-app lookup.
+    """Refresh the in-app account lookup by reloading the latest parquet on the share.
 
-    Two steps, in order:
-      1. Regenerate the accounts parquet from the source Excel via the SAME method
-         the app runs at startup (``startup.regenerate_accounts_parquet(force=True)``)
-         so a freshly-updated source is pulled now rather than on the next daily
-         rebuild. ``force=True`` rebuilds even when today's file already exists.
-      2. Clear the cached account lookup (both the parquet read and the derived
-         dicts) so the next render re-reads the just-written parquet — which
-         restamps the cached ``loaded_at`` and so advances the "time since last
-         refresh" line — and rerun only this fragment (no full-page reload).
+    The "Refresh Account Data" button keeps its name, but it no longer rebuilds from
+    the SharePoint source. The accounts/users parquet is produced centrally (the daily
+    startup step on synced machines, plus a twice-daily scheduled task running
+    ``refresh_data.py``), so end users never need to read the source directly. This
+    button drops the cached lookups and re-reads the latest parquet from
+    ``config.PERSONNEL_DIR``, which works for every user whether or not they have
+    SharePoint synced locally.
 
-    If step 1 fails (e.g. SharePoint not synced or the Excel is open/locked), the
-    parquet is left untouched and an error is surfaced, but step 2 still runs so
-    the lookup is re-read from whatever parquet currently exists. Nothing the user
-    entered is touched, with one exception honored by the caller: a row whose
-    Reporting Name / Customer Code was valid before but is no longer supported by
-    the refreshed data is queued to reset to blank, because the source changed
-    under the user's choice. Time, channel, custom fields, and still-valid rows
-    are always preserved.
+    Clearing the caches restamps the cached ``loaded_at`` (so the "time since last
+    refresh" line resets) and reruns only this fragment (no full-page reload). Nothing
+    the user entered is touched, with one exception honored by the caller: a row whose
+    Reporting Name / Customer Code was valid before but is no longer present in the
+    refreshed data is queued to reset to blank, because the data changed under the
+    user's choice. Time, channel, custom fields, and still-valid rows are preserved.
 
     Field resets are *queued* (not applied here) because this runs from a button
-    below the row widgets, which are already instantiated this run — Streamlit
-    forbids mutating an instantiated widget's state, so the blanking is deferred
-    to the top of the next fragment run.
+    below the row widgets, which are already instantiated this run; Streamlit forbids
+    mutating an instantiated widget's state, so the blanking is deferred to the top of
+    the next fragment run.
     """
     previous_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
 
-    # Step 1: rebuild the accounts parquet from the Excel source, exactly as startup
-    # does. Imported lazily so the page's normal load path never triggers startup's
-    # module-level sys.path setup.
-    rebuild_failed = False
-    try:
-        import startup
+    # Drop every cache layer that feeds account selections so the reload actually hits
+    # disk: the parquet read (load_account_lookup), the derived dropdown lookup
+    # (_account_lookup_for_dir), and the task-tracker account list (load_accounts).
+    with st.spinner("Refreshing account data..."):
+        utils.load_account_lookup.clear()
+        _account_lookup_for_dir.clear()
+        utils.load_accounts.clear()
+        refreshed_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
 
-        with st.spinner("Refreshing account data from source..."):
-            startup.regenerate_accounts_parquet(force=True)
-    except Exception as exc:
-        rebuild_failed = True
-        LOGGER.exception("Refresh Account Data: failed to rebuild accounts parquet: %s", exc)
-
-    # Step 2: clear both cache layers so the reload actually hits disk, then read fresh.
-    utils.load_account_lookup.clear()
-    _account_lookup_for_dir.clear()
-    refreshed_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
+    # Guard against a transient empty read (a UNC hiccup, or the producer's brief
+    # delete/rewrite window): if the refreshed lookup came back empty but we DID have
+    # data a moment ago, treat it as a failed refresh — surface an error and keep every
+    # current selection rather than blanking valid rows against an empty list.
+    prev_had_data = bool(previous_lookup.get("reporting_names") or previous_lookup.get("customer_codes"))
+    refreshed_empty = not (refreshed_lookup.get("reporting_names") or refreshed_lookup.get("customer_codes"))
+    if refreshed_empty and prev_had_data:
+        _queue_input_status(
+            "error",
+            "Couldn't reach the latest account data just now, so your current selections "
+            "were kept. Please try again in a moment.",
+        )
+        _rerun_input_fragment()
+        return
 
     reset_idxs: list[int] = []
     for idx in range(int(max(1, number_of_accounts))):
@@ -1316,21 +1374,13 @@ def _refresh_account_data(number_of_accounts: int) -> None:
     if reset_idxs:
         st.session_state["ta_account_refresh_reset_idxs"] = reset_idxs
 
-    if rebuild_failed:
-        _queue_input_status(
-            "error",
-            "Couldn't rebuild account data from the source file (is SharePoint "
-            "synced and the Excel closed?). Reloaded the latest saved account data "
-            "instead.",
-        )
-    else:
-        _queue_input_status("success", "Account data rebuilt from source and reloaded.")
+    _queue_input_status("success", "Account data refreshed.")
 
     _rerun_input_fragment()
 
 
 def _render_last_refresh_caption() -> None:
-    """Render the auto-ticking "time since last refresh" line under Refresh Account Data.
+    """Render the auto-ticking "time since last refresh" line under the Refresh Account Data button.
 
     The line only surfaces once the account data is 6+ hours stale; below that the JS
     returns an empty string so nothing shows. Its 20px slot stays reserved either way,
@@ -1644,7 +1694,11 @@ def render_input_view(
     # the Refresh Account Data button surface freshly-reloaded Reporting Names /
     # Customer Codes after it clears the cache, all without a full-page reload.
     account_lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
-    account_options = [""] + account_lookup["reporting_names"]
+    # Favorited Reporting Names float to the top of every row's dropdown (after the
+    # blank). Computed once here for the shared option list, so row count and the
+    # number of favorites don't add per-row cost. Values are unchanged — only order.
+    favorite_names = set(_account_favorites_list())
+    account_options = _favorites_first([""] + account_lookup["reporting_names"], favorite_names)
     # Mirror the cached data-load time into session state so the auto-ticking
     # caption fragment can read it cheaply (without re-copying the whole lookup).
     st.session_state["ta_account_loaded_at"] = account_lookup.get("loaded_at")
@@ -1684,8 +1738,8 @@ def render_input_view(
     if refresh_reset_idxs:
         count = len(refresh_reset_idxs)
         st.toast(
-            f"Account data changed — cleared {count} selection{'s' if count != 1 else ''} "
-            "that no longer exist in the source.",
+            f"Cleared {count} selection{'s' if count != 1 else ''} no longer present "
+            "in the latest account data.",
             icon=":material/info:",
         )
 
@@ -1761,15 +1815,38 @@ def render_input_view(
             c1, c2, c3, c4, c5 = st.columns([3.2, 2.3, 2.6, 2, 1])
             with c1:
                 account_key = f"ta_detailed_account_{idx}"
-                account = st.selectbox(
-                    "Reporting Name",
-                    options=_account_options_for_row(account_options, st.session_state.get(account_key, "")),
-                    key=account_key,
-                    disabled=editing_locked,
-                    label_visibility="collapsed",
-                    on_change=_on_reporting_name_change,
-                    args=(idx, account_lookup),
-                )
+                name_col, star_col = st.columns([7, 1], vertical_alignment="center")
+                with name_col:
+                    account = st.selectbox(
+                        "Reporting Name",
+                        options=_account_options_for_row(account_options, st.session_state.get(account_key, "")),
+                        key=account_key,
+                        disabled=editing_locked,
+                        label_visibility="collapsed",
+                        on_change=_on_reporting_name_change,
+                        args=(idx, account_lookup),
+                        # Favorited names display a star; the stored value is unchanged.
+                        format_func=lambda n: (f"⭐ {n}" if n in favorite_names else n),
+                    )
+                with star_col:
+                    selected_name = str(st.session_state.get(account_key, "") or "").strip()
+                    is_fav = selected_name in favorite_names
+                    if st.button(
+                        "★" if is_fav else "☆",
+                        key=f"ta_detailed_fav_btn_{idx}",
+                        help=(
+                            "Remove this Reporting Name from favorites"
+                            if is_fav
+                            else "Pin this Reporting Name to the top of the dropdown"
+                        ),
+                        # Favoriting is a personal preference, not a data edit, so it
+                        # stays available even on read-only days (only needs a name).
+                        disabled=not selected_name,
+                        type="tertiary",
+                        width="content",
+                    ):
+                        _toggle_account_favorite(selected_name)
+                        _rerun_input_fragment()
             with c2:
                 custcode_key = f"ta_detailed_custcode_{idx}"
                 code_pool = _customer_code_pool_for_reporting_name(
@@ -1880,8 +1957,8 @@ def render_input_view(
 
     with refresh_col:
         # Right-aligned (fills this rightmost column so its edge lines up with the
-        # input fields above). Independent of the day-edit lock — refreshing the
-        # account source is always allowed; it never touches saved allocations.
+        # input fields above). Independent of the day-edit lock; reloading the
+        # account data is always allowed; it never touches saved allocations.
         if st.button(
             "Refresh Account Data",
             key="ta_refresh_accounts_btn",
@@ -2461,34 +2538,87 @@ def _apply_export_filters(df: pd.DataFrame, applied: dict) -> pd.DataFrame:
     return out
 
 
-def _export_filter_panel(prefix: str, base_dir: Path) -> tuple[pd.DataFrame, dict | None]:
-    """Shared admin-table data source + Apply-Filters form.
+def _export_data_date_bounds(base_dir: Path) -> tuple[date, date] | None:
+    """Min/max entry date across ALL saved files, parsed from filenames only (no
+    parquet reads, so it's cheap). Each file's name date IS the entry date of every
+    row in it. Returns None when there are no dated files."""
+    dates: list[date] = []
+    for path in _iter_time_allocation_files(base_dir):
+        day = _date_from_ta_filename(path)
+        if day is not None:
+            dates.append(day)
+    if not dates:
+        return None
+    return min(dates), max(dates)
 
-    Returns ``(base_df, applied)``. ``applied`` is None until the user clicks Apply
-    Filters; while None, ``base_df`` is just the most-recent rows (``_load_recent_exports``)
-    so the table opens cheaply. After Apply, ``base_df`` is the date-windowed load for the
-    chosen range, shown with a progress bar while it reads (cached per session by the
-    window so unrelated reruns don't reload). Fiscal columns are attached. The caller
-    refines ``base_df`` with ``_apply_export_filters`` and renders its own table; in
-    recent mode it shows the "Top 100 entries - apply filters for more." caption.
+
+def _enter_full_export_load(prefix: str, base_dir: Path) -> None:
+    """Switch an admin table from the collapsed top-100 view to the full-history view:
+    set ``applied`` to the full data date range, which on the next run loads every entry
+    and reveals the filter form (whose date inputs then default to that full range — see
+    ``_export_filter_panel``). Triggered by the Load All Data button."""
+    bounds = _export_data_date_bounds(base_dir)
+    if bounds is None:
+        low = high = _today_eastern()
+    else:
+        low, high = bounds
+    st.session_state[f"{prefix}_applied"] = {
+        "date_from": low,
+        "date_to": high,
+        "year": "",
+        "period": "",
+        "user": "",
+        "dept": "",
+        "sig": (low.isoformat(), high.isoformat()),
+    }
+    try:
+        st.rerun(scope="fragment")
+    except Exception:
+        st.rerun()
+
+
+def _export_filter_panel(prefix: str, base_dir: Path) -> tuple[pd.DataFrame, dict | None]:
+    """Shared admin-table data source + collapsed/expanded gating.
+
+    Returns ``(base_df, applied)``. ``applied`` is None until the user clicks **Load
+    All Data**; while None the table is *collapsed*: ``base_df`` is just the most-recent
+    rows (``_load_recent_exports``) so the table opens cheaply, NO filter form is shown,
+    and a Load All Data button (rendered here) plus a "showing 100 most-recent" caption
+    invite the user to load everything. Clicking it sets ``applied`` to the full data date
+    range, which *expands* the table: ``base_df`` becomes the date-windowed load for the
+    chosen range (shown with a progress bar, cached per session by the window so unrelated
+    reruns don't reload) and the filter form is rendered. Fiscal columns are attached. The
+    caller refines ``base_df`` with ``_apply_export_filters`` and renders its own table.
     """
     applied = st.session_state.get(f"{prefix}_applied")
 
+    # Collapsed initial view: only the most-recent rows, no filter form. The Load All
+    # Data button loads the full history and reveals the filters on the next run.
     if applied is None:
-        base_df = _load_recent_exports(base_dir)
-    else:
-        sig = applied.get("sig")
-        if st.session_state.get(f"{prefix}_loaded_sig") != sig:
-            progress_bar = st.progress(0.0, text="Loading entries…")
-            try:
-                loaded = _load_exports_window(
-                    base_dir, applied["date_from"], applied["date_to"], progress_bar
-                )
-            finally:
-                progress_bar.empty()
-            st.session_state[f"{prefix}_loaded_df"] = loaded
-            st.session_state[f"{prefix}_loaded_sig"] = sig
-        base_df = st.session_state.get(f"{prefix}_loaded_df", pd.DataFrame())
+        base_df = _attach_fiscal_columns(_load_recent_exports(base_dir))
+        if not base_df.empty:
+            st.caption(
+                "Showing the 100 most-recent entries only. "
+                "To view all entries and use filters, click **Load All Data**."
+            )
+            if st.button("Load All Data", type="primary", key=f"{prefix}_load_all_btn"):
+                _enter_full_export_load(prefix, base_dir)
+        return base_df, applied
+
+    # Expanded view: load the chosen window (cached per session by its date range so
+    # unrelated reruns don't reload) and render the filter form below.
+    sig = applied.get("sig")
+    if st.session_state.get(f"{prefix}_loaded_sig") != sig:
+        progress_bar = st.progress(0.0, text="Loading entries…")
+        try:
+            loaded = _load_exports_window(
+                base_dir, applied["date_from"], applied["date_to"], progress_bar
+            )
+        finally:
+            progress_bar.empty()
+        st.session_state[f"{prefix}_loaded_df"] = loaded
+        st.session_state[f"{prefix}_loaded_sig"] = sig
+    base_df = st.session_state.get(f"{prefix}_loaded_df", pd.DataFrame())
 
     base_df = _attach_fiscal_columns(base_df)
 
@@ -2509,9 +2639,13 @@ def _export_filter_panel(prefix: str, base_dir: Path) -> tuple[pd.DataFrame, dic
     data_max = entry_dates.max().date() if not entry_dates.empty else today
     widget_min = min(bound_min, data_min, today)
     widget_max = max(bound_max, data_max, today)
-    fiscal_year_start = _most_recent_fiscal_year_start()
-    default_from = max(widget_min, min(fiscal_year_start or widget_min, widget_max))
-    default_to = max(widget_min, min(today, widget_max))
+    # The filter form only appears after Load All Data (the full history is already
+    # loaded), so seed the date inputs to the full data extent — the table and the inputs
+    # both read "everything" until the admin narrows the range. This seeds the FIRST
+    # render only; the date widget owns its value (persisted under {prefix}_from/_to)
+    # afterward, so subsequent Apply Filters / saves keep the admin's chosen range.
+    default_from = data_min
+    default_to = data_max
 
     # Drop a stored date the (possibly shifted) bounds no longer allow, so
     # st.date_input doesn't raise on an out-of-range value.
@@ -2589,8 +2723,8 @@ def _export_filter_panel(prefix: str, base_dir: Path) -> tuple[pd.DataFrame, dic
 
 @st.fragment
 def render_exports_view() -> None:
-    """Render admin export view: top 100 most-recent rows by default; the filter form is
-    applied (and only then is the matching window loaded) when Apply Filters is clicked."""
+    """Render admin export view: top 100 most-recent rows by default with a Load All Data
+    button; the filter form appears (and the full history loads) once it is clicked."""
     if not utils.is_current_user_admin():
         st.info("Sorry, you don't have access to this section")
         return
@@ -2606,7 +2740,6 @@ def render_exports_view() -> None:
 
     if applied is None:
         filtered = base_df.copy()
-        st.caption("Top 100 entries - apply filters for more.")
     else:
         filtered = _apply_export_filters(base_df, applied)
 
@@ -2907,7 +3040,6 @@ def render_admin_data_editor_view(account_lookup: dict) -> None:
 
     if applied is None:
         filtered = base_df
-        st.caption("Top 100 entries - apply filters for more.")
     else:
         filtered = _apply_export_filters(base_df, applied)
 
