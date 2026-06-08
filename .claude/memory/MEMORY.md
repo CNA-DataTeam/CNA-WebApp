@@ -32,7 +32,7 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 - [FedEx validator gotchas](gotchas_fedex_validator.md) — "Mark as Disputed" acts on all visible rows; `__source_row_id`; email fallback chain
 - [Packaging estimator config mismatch](gotchas_packaging_estimator_config.md) — page reads `shipping_calculator_api`; config.py defines `PACKAGING_CONFIG["api"]`
 - [Time allocation editing rules](gotchas_time_allocation_editing.md) — strict This Week/Last Week window; channel dropdown is a fixed manual order (frequency-sort removed)
-- [Time allocation input fragment](gotchas_time_allocation_input_fragment.md) — input area is an st.fragment; nested run_every fragments blank the page — tick UI client-side instead
+- [Time allocation input fragment](gotchas_time_allocation_input_fragment.md) — input st.fragment; two white-screen traps: nested run_every AND row add/delete need a full st.rerun (not fragment-scoped)
 - [Task tracker LS vs DA differences](gotchas_task_tracker_ls_vs_da.md) — shared file, separate state keys, separate dirs, LS-only `sync_tasks_parquet_targets()` call
 - [Task Log editor relocation](gotchas_task_log_editing.md) — editable columns, Start/End/Duration precedence, partition move on user/date change
 

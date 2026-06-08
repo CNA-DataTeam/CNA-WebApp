@@ -113,6 +113,24 @@ _TA_COMPACT_CSS = """
     background-color: rgba(0, 177, 158, 0.16) !important;
     border: 2px solid rgba(0, 177, 158, 0.55) !important;
 }
+/* Minimal timeframe-total line under the calendar (per-day totals live in the
+   calendar squares themselves, as ::after badges built in render_input_day_selector) */
+.ta-hours-summary {
+    display: flex;
+    align-items: center;
+    font-size: 0.74rem;
+    color: rgba(49, 51, 63, 0.7);
+    margin: 0.15rem 0 0.45rem;
+    padding: 0 0.15rem;
+}
+.ta-hours-total {
+    color: var(--cna-green);
+    font-weight: 600;
+}
+.ta-hours-total b {
+    color: var(--cna-green);
+    font-weight: 700;
+}
 </style>
 """
 st.markdown(_TA_COMPACT_CSS, unsafe_allow_html=True)
@@ -1457,6 +1475,71 @@ def _compute_calendar_window(view_mode: str, today: date) -> tuple[date, date]:
     return _work_week_bounds(today)
 
 
+def _format_hours_label(seconds: object) -> str:
+    """Compact decimal-hours label for the summary line (e.g. 0h, 7.5h, 6.25h).
+
+    Matches the calendar's decimal-hours convention; trailing zeros are trimmed so
+    whole hours read as "8h" rather than "8.00h".
+    """
+    hours = max(0, int(seconds or 0)) / 3600.0
+    text = f"{hours:.2f}".rstrip("0").rstrip(".")
+    return f"{text or '0'}h"
+
+
+def _build_day_total_badge_css(day_total_seconds: dict[str, int]) -> str:
+    """Build per-day ``::after`` badge CSS that prints each day's total hours in the
+    top-left corner of its calendar square.
+
+    FullCalendar tags every day CELL (the ``<td>.fc-daygrid-day``) with
+    ``data-date="YYYY-MM-DD"``. The badge ``::after`` is anchored to that td (made
+    ``position: relative`` in the base CSS) — NOT the inner day frame, which FC forces
+    ``position: static`` in its fixed-height layout, causing a frame-anchored badge to
+    trail the last entry instead of pinning to the corner. The td always spans the full
+    cell height, so ``bottom``/``right`` lock the badge to the bottom-right corner. The
+    day NUMBER sits top-right and events render full-width from near the top, so the
+    bottom-right corner is the reliably-empty one. Days with no hours get no badge.
+    Colors are literal (the calendar iframe doesn't see the parent app's ``--cna-green``
+    variable).
+    """
+    parts: list[str] = []
+    for entry_day_iso, seconds in day_total_seconds.items():
+        if seconds <= 0:
+            continue
+        label = _format_hours_label(seconds)
+        parts.append(
+            f'.fc .fc-daygrid-day[data-date="{entry_day_iso}"]::after {{'
+            f' content: "{label}";'
+            " position: absolute !important; bottom: 3px; right: 4px;"
+            " font-size: 0.64rem; font-weight: 700; color: #007A6C;"
+            " background: #ffffff; border: 1px solid rgba(0, 177, 158, 0.6);"
+            " box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);"
+            " padding: 0 5px; border-radius: 8px; line-height: 1.5;"
+            " pointer-events: none; z-index: 6; }"
+        )
+    return "\n".join(parts)
+
+
+def _render_window_hours_summary(window_df: pd.DataFrame, view_mode: str) -> None:
+    """Render a minimal info line with the total hours for the viewed timeframe.
+
+    Per-day totals are shown as badges inside the calendar squares (see
+    ``_build_day_total_badge_css``); this line carries only the timeframe sum
+    (This Week / Last Week / This Period) so the two don't duplicate each other.
+    """
+    total_seconds = 0
+    for _, row in window_df.iterrows():
+        if isinstance(row.get("Entry Date"), date):
+            total_seconds += max(0, int(row.get("seconds", 0)))
+
+    total_label = f"{view_mode} total" if view_mode else "Total"
+    st.markdown(
+        f'<div class="ta-hours-summary">'
+        f'<span class="ta-hours-total">{total_label} <b>{_format_hours_label(total_seconds)}</b></span>'
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd.DataFrame]:
     """Render clickable calendar and return selected day + selected day rows."""
     header_col, toggle_col = st.columns([2, 3])
@@ -1510,6 +1593,12 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         window_rows.append((entry_day.isoformat(), account_name, seconds))
     calendar_events = _build_calendar_events(tuple(window_rows))
 
+    # Per-day hours total, keyed by ISO date, to paint a corner badge on each day cell.
+    day_total_seconds: dict[str, int] = {}
+    for entry_day_iso, _account_name, seconds in window_rows:
+        day_total_seconds[entry_day_iso] = day_total_seconds.get(entry_day_iso, 0) + max(0, int(seconds))
+    day_total_badge_css = _build_day_total_badge_css(day_total_seconds)
+
     num_days = (window_end - window_start).days + 1
     calendar_initial_date = window_start.isoformat()
     valid_range: dict[str, str] | None = None
@@ -1522,8 +1611,12 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         grid_end = window_end + timedelta(days=saturday_offset)
         weeks_in_view = max(1, ((grid_end - grid_start).days + 1) // 7)
         initial_view = "dayGridPeriod"
-        # Roomier rows for the multi-week period grid so day cells aren't squished.
-        calendar_height = 90 + weeks_in_view * 120
+        # Size the multi-week period grid to its CONTENT (height "auto" + expandRows
+        # False, set below) so each day cell hugs its own entries. A fixed pixel height
+        # made FullCalendar stretch every week row to fill it, leaving a large empty gap
+        # below the entries — with the bottom-pinned daily-total badge marooned at the
+        # far cell bottom instead of sitting just under the entries.
+        calendar_height = "auto"
         views_config = {
             "dayGridPeriod": {
                 "type": "dayGrid",
@@ -1562,6 +1655,10 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
     }
     if valid_range is not None:
         calendar_options["validRange"] = valid_range
+    if view_mode == "This Period":
+        # With height "auto", don't let rows expand to fill — keep them content-sized so
+        # the bottom-right total badge sits directly under each day's entries (no gap).
+        calendar_options["expandRows"] = False
     height_rules = "\n".join(
         f".fc .ta-hu-{unit} {{ min-height: {16 + ((unit - 1) * 3)}px; }}"
         for unit in range(1, 25)
@@ -1596,6 +1693,15 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         min-height: 48px;
         cursor: pointer;
     }
+    /* Anchor each day's corner total badge to the day CELL (the <td>), which always
+       spans the full cell height. In FullCalendar's fixed-height (liquid-hack) layout
+       the <td> is already position:relative and the day FRAME is forced position:static,
+       so anchoring the badge to the frame makes it trail the last entry instead of
+       pinning to the cell's bottom-right. Setting the td relative here also covers the
+       non-liquid layout (where FC doesn't set it). */
+    .fc .fc-daygrid-day {
+        position: relative;
+    }
     .fc .fc-daygrid-day,
     .fc .fc-daygrid-day-top,
     .fc .fc-daygrid-day-number,
@@ -1620,7 +1726,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         line-height: 1.15;
         font-size: 0.68rem;
     }
-    """ + "\n" + height_rules + "\n" + selected_day_css + "\n" + _CALENDAR_MORE_POPOVER_CSS
+    """ + "\n" + height_rules + "\n" + selected_day_css + "\n" + day_total_badge_css + "\n" + _CALENDAR_MORE_POPOVER_CSS
     calendar_widget_key = f"ta_input_calendar_{view_mode}_{num_days}"
     calendar_state = st_calendar(
         events=calendar_events,
@@ -1661,6 +1767,8 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
                 selected_day = clicked_day
                 st.session_state["ta_input_selected_day"] = selected_day
                 _rerun_input_fragment()
+
+    _render_window_hours_summary(window_df, view_mode)
 
     selected_day_df = window_df[window_df["Entry Date"].eq(selected_day)].copy()
     return selected_day, selected_day_df
@@ -1913,7 +2021,13 @@ def render_input_view(
                         st.rerun()
                     else:
                         st.session_state["ta_detailed_delete_idx"] = idx
-                        _rerun_input_fragment()
+                        # Deleting a row changes the element count — use a full rerun,
+                        # not a fragment-scoped one, so the browser rebuilds the tree
+                        # cleanly. A partial delta against the now-shorter row list (with
+                        # the re-mounting st_calendar in the same subtree) is what blanks
+                        # the whole app. The queued delete is applied at the fragment top,
+                        # which still runs on a full rerun.
+                        st.rerun()
 
             custom_values: dict[str, object] = {}
             for chunk_start in range(0, len(entry_fields), 4):
@@ -1945,7 +2059,13 @@ def render_input_view(
             disabled=editing_locked,
         ):
             st.session_state["ta_detailed_count"] = number_of_accounts + 1
-            _rerun_input_fragment()
+            # Adding a row changes the fragment's element count. A fragment-scoped
+            # rerun sends the browser a PARTIAL delta for the changed subtree — which
+            # also contains the st_calendar component that re-mounts on every render —
+            # and the frontend intermittently fails to reconcile it, blanking the whole
+            # app (sidebar and all). A full rerun rebuilds the tree from scratch (the
+            # same robust path Save uses), so it can't hit that mismatch.
+            st.rerun()
 
     with save_col:
         save_detailed_clicked = st.button(
