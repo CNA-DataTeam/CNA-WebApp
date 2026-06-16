@@ -61,17 +61,26 @@ _VENV_DIR = ROOT_DIR / ".venv"
 
 
 def _find_uv() -> str | None:
-    """Locate the uv executable. Mirrors setup.bat's search order:
-    PATH first, then the standard per-user install locations.
+    """Locate the uv executable. Mirrors setup.bat's :LOCATE_UV search order:
+    PATH first, then every known on-disk install location.
+
+    uv's standalone-installer default has drifted across versions: current
+    0.11.x installs to %USERPROFILE%\\.local\\bin, older builds used
+    %LOCALAPPDATA%\\uv\\bin. setup.bat also pins fresh installs to
+    ROOT_DIR\\.uv\\bin via UV_INSTALL_DIR, so we check that first.
     """
     found = shutil.which("uv")
     if found:
         return found
-    for env_var in ("LOCALAPPDATA", "APPDATA"):
+    candidates = [
+        ROOT_DIR / ".uv" / "bin" / "uv.exe",        # pinned by setup.bat (UV_INSTALL_DIR)
+        Path.home() / ".local" / "bin" / "uv.exe",  # modern uv default (~/.local/bin)
+    ]
+    for env_var in ("LOCALAPPDATA", "APPDATA"):      # legacy uv locations
         base = os.environ.get(env_var)
-        if not base:
-            continue
-        candidate = Path(base) / "uv" / "bin" / "uv.exe"
+        if base:
+            candidates.append(Path(base) / "uv" / "bin" / "uv.exe")
+    for candidate in candidates:
         if candidate.exists():
             return str(candidate)
     return None

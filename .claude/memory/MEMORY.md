@@ -23,6 +23,7 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 
 - [Installer fresh install flow](project_installer_flow.md) — how `_internal/` gets built on fresh installs
 - [Installer untrusted-mount (error 448)](gotchas_installer_untrusted_mount.md) — detect via functional junction probe, not reparse-point attributes (FSLogix)
+- [uv install location drift](gotchas_uv_install_location.md) — "uv could not be located": uv now installs to ~/.local/bin; fixed uv+git detection in setup/repair/app/check_updates
 - [Accounts parquet daily regen lag](project_accounts_parquet_daily_regen.md) — new accounts columns appear only after the daily parquet rebuilds
 - [Accounts source SharePoint constraints](project_accounts_source_sharepoint_constraints.md) — refreshing without per-user sync: file stays in SP, org-only links, no Azure app; options + tradeoffs
 - [Time allocation load perf](project_time_allocation_load_perf.md) — cold-load fixes (vectorized lookup, fixed channel order, lazy admin tabs, column projection) + pyarrow.dataset fast path for the exports/edit tables

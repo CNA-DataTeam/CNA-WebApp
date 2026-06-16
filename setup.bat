@@ -36,6 +36,16 @@ REM uv's directories follow it out of the untrusted mount.
 set "UV_PYTHON_INSTALL_DIR=%ROOT_DIR%\.uv\python"
 set "UV_CACHE_DIR=%ROOT_DIR%\.uv\cache"
 
+REM Pin WHERE the uv binary itself gets installed. uv's standalone installer
+REM honors UV_INSTALL_DIR; its default has drifted across versions (older
+REM builds landed in %LOCALAPPDATA%\uv\bin, current 0.11.x installs to
+REM %USERPROFILE%\.local\bin). Pinning it here means a fresh auto-install
+REM lands in a deterministic, redirection-safe spot we control and look in
+REM directly — instead of guessing the version's default and then relying on
+REM a freshly-edited PATH (which this already-running cmd.exe won't see) or a
+REM slow, unreliable recursive scan of a OneDrive-redirected user profile.
+set "UV_INSTALL_DIR=%ROOT_DIR%\.uv\bin"
+
 REM ============================================================
 REM SELF-HEAL: discard local modifications to regenerated tracked
 REM artifacts. These (the launcher exe and PyInstaller spec) are
@@ -52,24 +62,16 @@ if not errorlevel 1 (
 
 REM ============================================================
 REM FIND OR INSTALL UV
+REM
+REM :LOCATE_UV checks every known uv location (PATH, the pinned
+REM UV_INSTALL_DIR, the modern %USERPROFILE%\.local\bin default, and the
+REM legacy LOCALAPPDATA / APPDATA dirs) so we never depend on a PATH this
+REM running session can't see, nor on a recursive profile scan. We call it
+REM once before installing and again afterward.
 REM ============================================================
 set "UV_EXE="
-
-where uv >nul 2>&1
-if not errorlevel 1 (
-  set "UV_EXE=uv"
-  goto UV_FOUND
-)
-
-if exist "%LOCALAPPDATA%\uv\bin\uv.exe" (
-  set "UV_EXE=%LOCALAPPDATA%\uv\bin\uv.exe"
-  goto UV_FOUND
-)
-
-if exist "%APPDATA%\uv\bin\uv.exe" (
-  set "UV_EXE=%APPDATA%\uv\bin\uv.exe"
-  goto UV_FOUND
-)
+call :LOCATE_UV
+if defined UV_EXE goto UV_FOUND
 
 echo uv not found. Installing automatically...
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -79,29 +81,14 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Refresh PATH from registry so the installer's changes take effect in this session
+REM Refresh PATH from the user registry so a `where uv` can also succeed in
+REM this session. The on-disk checks in :LOCATE_UV are the primary mechanism;
+REM this just lets the PATH-based lookup work too.
 for /f "tokens=2*" %%a in ('reg query "HKCU\Environment" /v PATH 2^>nul') do set "USER_PATH=%%b"
 if defined USER_PATH set "PATH=%PATH%;%USER_PATH%"
 
-if exist "%LOCALAPPDATA%\uv\bin\uv.exe" (
-  set "UV_EXE=%LOCALAPPDATA%\uv\bin\uv.exe"
-  goto UV_FOUND
-)
-if exist "%APPDATA%\uv\bin\uv.exe" (
-  set "UV_EXE=%APPDATA%\uv\bin\uv.exe"
-  goto UV_FOUND
-)
-
-where uv >nul 2>&1
-if not errorlevel 1 (
-  set "UV_EXE=uv"
-  goto UV_FOUND
-)
-
-for /f "delims=" %%i in ('where /R "%USERPROFILE%" uv.exe 2^>nul') do (
-  set "UV_EXE=%%i"
-  goto UV_FOUND
-)
+call :LOCATE_UV
+if defined UV_EXE goto UV_FOUND
 
 echo ERROR: uv was installed but could not be located. Please restart this script.
 if "%SILENT%"=="0" pause
@@ -306,4 +293,35 @@ echo Setup complete.
 echo Run StartApp.vbs to launch the application.
 echo ============================================
 if "%SILENT%"=="0" timeout /t 5 >nul
+exit /b 0
+
+REM ============================================================
+REM :LOCATE_UV -- set UV_EXE to the first uv we can find, checking
+REM PATH then every known on-disk install location. Leaves UV_EXE
+REM empty if none found. Order: PATH, pinned UV_INSTALL_DIR, modern
+REM %USERPROFILE%\.local\bin, legacy LOCALAPPDATA / APPDATA dirs.
+REM ============================================================
+:LOCATE_UV
+set "UV_EXE="
+where uv >nul 2>&1
+if not errorlevel 1 (
+  set "UV_EXE=uv"
+  exit /b 0
+)
+if exist "%UV_INSTALL_DIR%\uv.exe" (
+  set "UV_EXE=%UV_INSTALL_DIR%\uv.exe"
+  exit /b 0
+)
+if exist "%USERPROFILE%\.local\bin\uv.exe" (
+  set "UV_EXE=%USERPROFILE%\.local\bin\uv.exe"
+  exit /b 0
+)
+if exist "%LOCALAPPDATA%\uv\bin\uv.exe" (
+  set "UV_EXE=%LOCALAPPDATA%\uv\bin\uv.exe"
+  exit /b 0
+)
+if exist "%APPDATA%\uv\bin\uv.exe" (
+  set "UV_EXE=%APPDATA%\uv\bin\uv.exe"
+  exit /b 0
+)
 exit /b 0

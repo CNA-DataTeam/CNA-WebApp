@@ -39,14 +39,20 @@ if not exist "%ROOT%\.git" (
   pause
   exit /b 1
 )
-where git >nul 2>&1
-if errorlevel 1 (
-  call :STEP "ERROR: 'git' was not found on PATH."
+REM Locate git ON DISK, not just on PATH. The installer installs Git via
+REM `winget --scope user` (into %LOCALAPPDATA%\Programs\Git) and the user PATH
+REM edit isn't visible to the process that launched this script — so a bare
+REM `where git` reports "not installed" even though Git is right there. Mirrors
+REM the installer's FindGitExe (see CNA-Console-Installer.iss).
+call :FIND_GIT
+if not defined GIT_EXE (
+  call :STEP "ERROR: git could not be located on PATH or in any standard install location."
   call :STEP "Install Git from https://git-scm.com or re-run the installer."
   echo.
   pause
   exit /b 1
 )
+call :STEP "Using git: !GIT_EXE!"
 
 REM ------------------------------------------------------------
 REM Close the running app so the launcher exe is unlocked. No-op
@@ -76,13 +82,13 @@ REM   - origin/main when online (most-fixed version)
 REM   - HEAD when offline (last-known-good local commit)
 REM ------------------------------------------------------------
 call :STEP "Fetching latest from GitHub..."
-git -C "%ROOT%" fetch --prune >> "%LOG%" 2>&1
+"!GIT_EXE!" -C "%ROOT%" fetch --prune >> "%LOG%" 2>&1
 if errorlevel 1 (
   call :STEP "(offline -- resetting working tree to last known good commit)"
-  git -C "%ROOT%" reset --hard HEAD >> "%LOG%" 2>&1
+  "!GIT_EXE!" -C "%ROOT%" reset --hard HEAD >> "%LOG%" 2>&1
 ) else (
   call :STEP "Resetting working tree to origin/main..."
-  git -C "%ROOT%" reset --hard origin/main >> "%LOG%" 2>&1
+  "!GIT_EXE!" -C "%ROOT%" reset --hard origin/main >> "%LOG%" 2>&1
 )
 
 REM ------------------------------------------------------------
@@ -101,6 +107,12 @@ REM   - PyInstaller rebuild of CNA Web App.exe + _internal/ when
 REM     either is missing (per the SKIP_BUILD condition)
 REM   - launcher artifact verification
 REM ------------------------------------------------------------
+REM If git was found on disk (not via PATH), prepend its folder to PATH so
+REM setup.bat's own best-effort `where git` self-heal can find it too.
+if /i not "!GIT_EXE!"=="git" (
+  for %%G in ("!GIT_EXE!") do set "PATH=%%~dpG;!PATH!"
+)
+
 call :STEP "Running setup (rebuilds launcher + venv as needed)..."
 echo. >> "%LOG%"
 echo === setup.bat output === >> "%LOG%"
@@ -132,4 +144,22 @@ REM ------------------------------------------------------------
 :STEP
 echo %~1
 echo [%date% %time%] %~1 >> "%LOG%"
+exit /b 0
+
+REM ------------------------------------------------------------
+REM :FIND_GIT -- set GIT_EXE to git.exe found on disk at any known
+REM install location, falling back to PATH. Leaves GIT_EXE empty if
+REM git is genuinely absent. Order matches the installer's FindGitExe:
+REM system-wide, 32-bit, then user-scope (winget's unelevated default).
+REM ------------------------------------------------------------
+:FIND_GIT
+set "GIT_EXE="
+if exist "%ProgramFiles%\Git\cmd\git.exe" set "GIT_EXE=%ProgramFiles%\Git\cmd\git.exe"
+if defined GIT_EXE exit /b 0
+if exist "%ProgramFiles(x86)%\Git\cmd\git.exe" set "GIT_EXE=%ProgramFiles(x86)%\Git\cmd\git.exe"
+if defined GIT_EXE exit /b 0
+if exist "%LOCALAPPDATA%\Programs\Git\cmd\git.exe" set "GIT_EXE=%LOCALAPPDATA%\Programs\Git\cmd\git.exe"
+if defined GIT_EXE exit /b 0
+where git >nul 2>&1
+if not errorlevel 1 set "GIT_EXE=git"
 exit /b 0
