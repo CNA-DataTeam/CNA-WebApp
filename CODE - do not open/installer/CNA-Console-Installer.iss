@@ -33,10 +33,12 @@ DisableProgramGroupPage=yes
 ; when this installer carries Mark-of-the-Web, the mitigation is inherited by
 ; every child process and blocks uv from traversing the junction to its
 ; managed Python (error 448) during "uv pip install". To avoid it, setup.bat
-; is run via a one-shot scheduled task — spawned by the Task Scheduler
-; service, so it runs OUTSIDE this installer's (mitigated) process tree. See
-; RunSetupViaScheduledTask in [Code]. If the install still can't finish, a
-; guided manual-finish dialog walks the user through running setup by hand.
+; is run OUTSIDE this installer's (mitigated) process tree — first via a
+; one-shot scheduled task, then (if task execution is policy-blocked) via the
+; Windows shell (explorer.exe), each with a ~90s start-heartbeat so a dead
+; method fails over fast instead of hanging. See TrySetupViaScheduledTask /
+; TrySetupViaExplorer in [Code]. If setup still can't finish, a guided dialog
+; walks the user through unblocking the installer or running setup by hand.
 DisableDirPage=no
 OutputDir=..\..\installer-output
 OutputBaseFilename=CNA-Console-Installer
@@ -187,40 +189,88 @@ end;
 // When the downloaded installer carries Mark-of-the-Web, Windows applies the
 // RedirectionGuard mitigation to it, and that mitigation is INHERITED by every
 // child process. Under it, uv cannot traverse the junction to its managed
-// Python and fails with error 448 during "uv pip install". A one-shot
-// scheduled task is spawned by the Task Scheduler service (not by us), so the
-// task — and the uv it runs — execute WITHOUT the inherited mitigation.
+// Python and fails with error 448 during "uv pip install". The escape is to
+// have setup.bat spawned by something that is NOT a child of this installer:
+//   1. A one-shot scheduled task (spawned by the Task Scheduler service).
+//   2. The Windows shell via explorer.exe (the already-running desktop shell
+//      launches it — also not our child). More reliable than scheduled tasks
+//      on locked-down standard-user machines where task EXECUTION is blocked
+//      by policy even though /create + /run report success.
+//   3. Direct in-process run as a last resort (works only if the installer
+//      itself isn't MOTW-mitigated — e.g. it was Unblocked or run from an
+//      intranet share).
 //
-// The wrapper .bat lives under {commonappdata} (C:\ProgramData\...), a path
-// with no spaces, so schtasks /tr needs no fragile quoting. It always writes a
-// completion marker (with setup's exit code) so we can tell when the task has
-// finished, success or failure.
+// FIELD-LEARNED FAILURE (June 2026): on locked-down profiles the scheduled
+// task is created and /run succeeds, but the task never actually executes, so
+// the old single-method version dead-waited the full 20-minute completion
+// timeout before failing. The wrapper now writes a START heartbeat the moment
+// it launches; WaitForSetup gives up after ~90s if that heartbeat never
+// appears (the task didn't run) and the caller fails over to the next method
+// immediately — instead of staring at a hidden process for 20 minutes.
 //
-// Returns True if the task ran to completion; False if it could not be
-// created/started (e.g. scheduled tasks blocked by policy) so the caller can
-// fall back to running setup directly in-process.
+// The wrapper .bat + markers live under {commonappdata} (C:\ProgramData\...),
+// a path with no spaces, so schtasks /tr needs no fragile quoting.
 // -------------------------------------------------------
-function RunSetupViaScheduledTask(const InstallDir, SetupBat, SetupLog: String): Boolean;
-var
-  WorkDir, Wrapper, Marker: String;
-  ResultCode, Waited: Integer;
-begin
-  Result := False;
-  WorkDir := ExpandConstant('{commonappdata}') + '\CNAConsoleSetup';
-  ForceDirectories(WorkDir);
-  Wrapper := WorkDir + '\run_setup.bat';
-  Marker := WorkDir + '\setup_done.marker';
-  DeleteFile(Marker);
 
-  // Self-contained wrapper: cd to the install dir, run setup silently with the
-  // log captured, then ALWAYS record a completion marker with the exit code.
+// Write the self-contained setup wrapper: announce it started, cd to the
+// install dir, run setup silently with the log captured, then ALWAYS record a
+// completion marker with the exit code (so we can tell finished-vs-still-going
+// and success-vs-failure).
+procedure WriteSetupWrapper(const Wrapper, InstallDir, SetupBat, SetupLog, StartMarker, DoneMarker: String);
+begin
   SaveStringToFile(Wrapper,
     '@echo off' + #13#10 +
+    'echo STARTED>"' + StartMarker + '"' + #13#10 +
     'cd /d "' + InstallDir + '"' + #13#10 +
     'call "' + SetupBat + '" /silent > "' + SetupLog + '" 2>&1' + #13#10 +
-    'echo DONE_%errorlevel%>"' + Marker + '"' + #13#10, False);
+    'echo DONE_%errorlevel%>"' + DoneMarker + '"' + #13#10, False);
+end;
 
-  // Replace any stale task, then create + run a one-shot task as the current user.
+// Wait for a launched wrapper. Returns:
+//   True  — setup completed (DoneMarker present).
+//   False — either the wrapper never started (no StartMarker within
+//           StartTimeoutSecs → caller should try the next launch method) or it
+//           started but didn't finish within DoneTimeoutSecs.
+function WaitForSetup(const StartMarker, DoneMarker: String;
+                      StartTimeoutSecs, DoneTimeoutSecs: Integer): Boolean;
+var
+  Waited: Integer;
+begin
+  Result := False;
+
+  // Phase 1 — fast failover: prove the wrapper actually launched.
+  Waited := 0;
+  while (not FileExists(StartMarker)) and (Waited < StartTimeoutSecs) do
+  begin
+    Sleep(1000);
+    Waited := Waited + 1;
+  end;
+  if not FileExists(StartMarker) then
+    Exit;  // never started — bail now so the caller can try another method
+
+  // Phase 2 — it's genuinely running; wait (longer) for completion and keep
+  // the status line moving so a multi-minute build never looks frozen.
+  Waited := 0;
+  while (not FileExists(DoneMarker)) and (Waited < DoneTimeoutSecs) do
+  begin
+    UpdateStatus('Installing Python, dependencies and building the app... ('
+                 + IntToStr(Waited) + 's elapsed)');
+    Sleep(2000);
+    Waited := Waited + 2;
+  end;
+
+  Result := FileExists(DoneMarker);
+end;
+
+// Attempt 1: one-shot scheduled task. Returns True only if setup completed.
+function TrySetupViaScheduledTask(const Wrapper, StartMarker, DoneMarker: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  DeleteFile(StartMarker);
+  DeleteFile(DoneMarker);
+
   Exec('schtasks.exe', '/delete /tn "CNAConsoleSetup" /f', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if (not Exec('schtasks.exe',
         '/create /tn "CNAConsoleSetup" /tr "' + Wrapper + '" /sc ONCE /st 23:59 /f',
@@ -233,17 +283,28 @@ begin
     Exit;
   end;
 
-  // Wait for the marker. setup.bat can take several minutes (uv Python
-  // download, venv, pip install, PyInstaller build); cap at ~20 minutes.
-  Waited := 0;
-  while (not FileExists(Marker)) and (Waited < 1200) do
-  begin
-    Sleep(1000);
-    Waited := Waited + 1;
-  end;
-
+  // 90s to start (generous; a task normally starts in <2s) then up to 20 min
+  // to finish once it has proven it's running.
+  Result := WaitForSetup(StartMarker, DoneMarker, 90, 1200);
   Exec('schtasks.exe', '/delete /tn "CNAConsoleSetup" /f', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Result := FileExists(Marker);
+end;
+
+// Attempt 2: launch via the Windows shell. explorer.exe hands the wrapper to
+// the already-running desktop shell, which is NOT a child of this installer —
+// so the setup it launches escapes the inherited RedirectionGuard mitigation,
+// same as the scheduled task, but works even where task execution is policy-
+// blocked. The wrapper runs in a visible console, which also gives the user
+// real progress. Returns True only if setup completed.
+function TrySetupViaExplorer(const Wrapper, StartMarker, DoneMarker: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := False;
+  DeleteFile(StartMarker);
+  DeleteFile(DoneMarker);
+  if not Exec('explorer.exe', '"' + Wrapper + '"', '', SW_SHOWNORMAL, ewNoWait, ResultCode) then
+    Exit;
+  Result := WaitForSetup(StartMarker, DoneMarker, 90, 1200);
 end;
 
 // -------------------------------------------------------
@@ -284,17 +345,18 @@ begin
     Steps.Height := ScaleY(280);
     Steps.WordWrap := True;
     Steps.Caption :=
-      'Please retry running this installer again.' + #13#10#13#10 +
-      'If you see this error message again, the app is installed but one final' + #13#10 +
-      'setup step needs to be run by hand. It only takes a minute:' + #13#10#13#10 +
-      '    1.  Click the "Open Install Folder" button below.' + #13#10#13#10 +
-      '    2.  In the window that opens, double-click the file named  setup' + #13#10 +
-      '         (it may show as "setup.bat").' + #13#10#13#10 +
-      '    3.  A black window will appear and run for a few minutes.' + #13#10 +
-      '         Wait for it to finish — it closes by itself when done.' + #13#10#13#10 +
-      '    4.  Open "CNA Console" by searching from your task bar or Start Menu.' + #13#10#13#10 +
-      'Stuck on any of these steps? Contact Jordan Ramsey at' + #13#10 +
-      'jramsey@clarknationalaccounts.com.';
+      'Setup could not finish automatically — but this is quick to fix.' + #13#10#13#10 +
+      'MOST LIKELY FIX — unblock the installer, then run it again:' + #13#10 +
+      '    1.  Find the CNA-Console-Installer file you downloaded.' + #13#10 +
+      '    2.  Right-click it  >  Properties.' + #13#10 +
+      '    3.  Check the "Unblock" box (bottom-right)  >  OK.' + #13#10 +
+      '    4.  Run the installer again.' + #13#10#13#10 +
+      'IF THAT DOESN''T WORK — finish the last step by hand:' + #13#10 +
+      '    1.  Click "Open Install Folder" below.' + #13#10 +
+      '    2.  Double-click the file named  setup  (may show as "setup.bat").' + #13#10 +
+      '    3.  A black window runs for a few minutes, then closes itself.' + #13#10 +
+      '    4.  Open "CNA Console" from your taskbar or Start Menu.' + #13#10#13#10 +
+      'Stuck? Contact Jordan Ramsey at jramsey@clarknationalaccounts.com.';
 
     DetailBox := TNewMemo.Create(Form);
     DetailBox.Parent := Form;
@@ -386,6 +448,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   InstallDir, ConfigSrc, ConfigDst, SetupBat, GitExePath, CloneLog, SetupLog: String;
   PythonDll, VenvPython, MissingArtifacts, LogTail: String;
+  SetupWorkDir, Wrapper, StartMarker, DoneMarker: String;
   CloneLogContent, SetupLogContent: AnsiString;
   ResultCode, WingetCode, LogLen: Integer;
   SetupRan: Boolean;
@@ -521,14 +584,33 @@ begin
   SaveStringToFile(SetupLog, '', False);
 
   // Run setup OUT of this installer's (possibly Mark-of-the-Web-mitigated)
-  // process tree via a scheduled task, so uv can traverse its Python junction.
-  // If the task can't be created (policy-locked machine), fall back to running
-  // setup directly in-process — that still works on machines without the
-  // RedirectionGuard mitigation. Either way, validation below is the backstop.
-  SetupRan := RunSetupViaScheduledTask(InstallDir, SetupBat, SetupLog);
+  // process tree so uv can traverse its Python junction. Try, in order:
+  //   1. a one-shot scheduled task (Task Scheduler service spawns it);
+  //   2. the Windows shell via explorer.exe (more reliable when task execution
+  //      is policy-blocked — the failure we saw in the field);
+  //   3. a direct in-process run as a last resort (works only if this
+  //      installer isn't itself mitigated, e.g. it was Unblocked / run from an
+  //      intranet share).
+  // Each writes a START heartbeat so a method that can't actually run is
+  // detected in ~90s and we move on, instead of dead-waiting the full
+  // completion timeout. Validation below is the backstop for all paths.
+  SetupWorkDir := ExpandConstant('{commonappdata}') + '\CNAConsoleSetup';
+  ForceDirectories(SetupWorkDir);
+  Wrapper := SetupWorkDir + '\run_setup.bat';
+  StartMarker := SetupWorkDir + '\setup_started.marker';
+  DoneMarker := SetupWorkDir + '\setup_done.marker';
+  WriteSetupWrapper(Wrapper, InstallDir, SetupBat, SetupLog, StartMarker, DoneMarker);
+
+  SetupRan := TrySetupViaScheduledTask(Wrapper, StartMarker, DoneMarker);
   if not SetupRan then
   begin
-    Log('Scheduled-task setup unavailable; running setup directly in-process.');
+    Log('Scheduled task did not run setup; trying via the Windows shell (explorer).');
+    UpdateStatus('Running setup (alternate method)...');
+    SetupRan := TrySetupViaExplorer(Wrapper, StartMarker, DoneMarker);
+  end;
+  if not SetupRan then
+  begin
+    Log('Out-of-process setup unavailable; running setup directly in-process.');
     Exec('cmd.exe',
          '/c cd /d "' + InstallDir + '" && call "' + SetupBat + '" /silent > "' + SetupLog + '" 2>&1',
          InstallDir, SW_HIDE, ewWaitUntilTerminated, ResultCode);
