@@ -2,6 +2,13 @@
 setlocal EnableDelayedExpansion
 title CNA Console - Repair
 
+REM Some locked-down / corporate machines have a PATH missing the default
+REM Windows directories, so core tools (findstr, where, reg, powershell,
+REM timeout, taskkill, tasklist) fail with "is not recognized". Put the
+REM canonical Windows dirs back on PATH for this session so repair never
+REM depends on the inherited PATH being sane.
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0;%PATH%"
+
 REM ============================================================
 REM CNA Console -- Repair App
 REM

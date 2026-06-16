@@ -3,6 +3,16 @@ setlocal EnableDelayedExpansion
 title Logistics Support App Setup
 
 REM ============================================================
+REM HARDEN PATH
+REM Some locked-down / corporate machines have a PATH that is missing the
+REM default Windows directories, so core tools like findstr, where, reg,
+REM powershell, timeout and xcopy fail with "is not recognized" and setup
+REM dies mid-run. Put the canonical Windows dirs back on PATH for this
+REM session so the script never depends on the inherited PATH being sane.
+REM ============================================================
+set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0;%PATH%"
+
+REM ============================================================
 REM SILENT MODE (skip pause commands — used by installer)
 REM ============================================================
 set "SILENT=0"
