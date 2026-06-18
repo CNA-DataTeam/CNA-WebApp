@@ -10,3 +10,27 @@ streamlit-autorefresh
 pyadomd
 cryptography
 pywebview
+pyodbc
+requests
+plotly
+pgeocode
+
+# Sourcing Matrix engine: the standalone package lives on the UNC path.
+# It is NOT automatically installed into the CNA app environment. To make
+# the engine available to the app, install it into the app virtualenv,
+# for example from PowerShell on the host machine:
+#
+#   pip install -e "\\\\therestaurantstore.com\\920\\Data\\Reporting\\Python Directory\\Projects\\Sourcing Matrix\\sourcing_matrix_v4"
+#
+# The app requirements above now include the Sourcing Matrix runtime
+# dependencies used by the console page:
+#
+#   pandas
+#   openpyxl
+#   pyodbc
+#   requests
+#   plotly
+#   pgeocode
+#
+# The app already uses pandas/openpyxl. Make sure the runtime environment
+# also has the appropriate ODBC SQL Server driver installed for pyodbc.

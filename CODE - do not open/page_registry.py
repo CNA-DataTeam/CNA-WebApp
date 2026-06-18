@@ -121,6 +121,14 @@ SECTION_PAGES: dict[str, dict[str, list[PageEntry]]] = {
                 quote="Match items to shipping and package estimates.",
                 beta=True,
             ),
+            PageEntry(
+                path="pages/sourcing-matrix.py",
+                title="Sourcing Matrix",
+                icon="📊",
+                caption="Run the Sourcing Matrix engine and export plan workbooks.",
+                quote="Generate sourcing plans from the live SharePoint workbook.",
+                beta=True,
+            ),
         ],
         "Sales": [
             PageEntry(

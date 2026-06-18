@@ -39,6 +39,15 @@ App updates are pulled automatically from GitHub each time `StartApp.bat` runs. 
 - Main source code lives in `CODE - do not open/`
 - AI context and project rules live in `CLAUDE.md`
 
+## Sourcing Matrix integration
+- A new `Sourcing Matrix` page has been added under **Tools → Logistics**.
+- It discovers the live workbook at:
+  `C:\Users\<user>\clarkinc.biz\Clark National Accounts - Resources\Sourcing Matrix Export File.xlsx`
+- The standalone engine package is expected at the UNC path:
+  `\\therestaurantstore.com\920\Data\Reporting\Python Directory\Projects\Sourcing Matrix\sourcing_matrix_v4`
+- For the page to run, the app environment must be able to import the `sourcing_matrix` package and have `pyodbc`/`requests` installed.
+- Test the page by launching the app and navigating to **Tools → Logistics → Sourcing Matrix**. If the page cannot import the engine, it will show a clear error.
+
 ## Important Notes
 *This section is only relevant to team members working with AI in this project. AI in general can disregard*
 
