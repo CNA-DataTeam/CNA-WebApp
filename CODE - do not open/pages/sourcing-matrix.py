@@ -18,6 +18,7 @@ from html import escape
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
+from textwrap import dedent
 from typing import Any
 
 import pandas as pd
@@ -30,7 +31,112 @@ import utils
 ENGINE_ROOT = Path(
     r"\\therestaurantstore.com\920\Data\Reporting\Python Directory\Projects\Sourcing Matrix\sourcing_matrix_v4"
 )
-WORKBOOK_PATH = Path.home() / "clarkinc.biz" / "Clark National Accounts - Resources" / "Sourcing Matrix Export File.xlsx"
+WORKBOOK_NAME = "Sourcing Matrix Export File.xlsx"
+DEFAULT_WORKBOOK_PATH = Path.home() / "clarkinc.biz" / "Clark National Accounts - Resources" / WORKBOOK_NAME
+KNOWN_WORKBOOK_PATHS = (
+    DEFAULT_WORKBOOK_PATH,
+    Path.home() / "clarkinc.biz" / "Clark National Accounts - Documents" / "Data and Analytics" / "Resources" / WORKBOOK_NAME,
+)
+
+
+def find_workbook_path() -> Path:
+    """Find the SharePoint-synced Sourcing Matrix workbook on the current machine.
+
+    Users may sync either the Resources folder directly or a higher-level SharePoint
+    Documents folder, which creates different local folder structures. Prefer known
+    paths first, then search under the current user's clarkinc.biz sync root.
+    """
+    env_path = os.environ.get("SOURCING_MATRIX_WORKBOOK_PATH")
+    if env_path:
+        candidate = Path(env_path).expanduser()
+        if candidate.is_file():
+            return candidate
+
+    for candidate in KNOWN_WORKBOOK_PATHS:
+        if candidate.is_file():
+            return candidate
+
+    search_root = Path.home() / "clarkinc.biz"
+    if search_root.exists():
+        try:
+            matches = sorted(
+                (path for path in search_root.rglob(WORKBOOK_NAME) if path.is_file()),
+                key=lambda path: (len(path.parts), str(path).lower()),
+            )
+        except OSError:
+            matches = []
+
+        if matches:
+            return matches[0]
+
+    return DEFAULT_WORKBOOK_PATH
+
+
+def render_workbook_missing_message() -> None:
+    """Show actionable troubleshooting steps when the live workbook cannot be found."""
+    st.warning(
+        dedent(
+            f"""
+            Live Sourcing Matrix workbook not found.
+
+            Open the **Troubleshooting guide** below and follow the **Workbook not found** steps.
+            The most common fix is to sync the SharePoint Resources folder, open
+            **{WORKBOOK_NAME}** once so it downloads locally, then rerun the tool.
+            """
+        ).strip()
+    )
+
+
+def render_troubleshooting_guide() -> None:
+    """Render user-facing troubleshooting guidance for common Sourcing Matrix issues."""
+    workbook_status = "Found" if WORKBOOK_PATH.exists() else "Missing"
+    status_icon = "✅" if WORKBOOK_PATH.exists() else "⚠️"
+
+    with st.expander("Troubleshooting guide", expanded=not WORKBOOK_PATH.exists()):
+        st.markdown(
+            dedent(
+                f"""
+                Use this section when the Sourcing Matrix page shows an error or warning.
+
+                **Current workbook status:** {status_icon} {workbook_status}\
+                **Detected workbook path:** `{WORKBOOK_PATH}`
+
+                **Workbook not found / yellow workbook warning**
+
+                1. Open the Clark National Accounts SharePoint folder.
+                2. Navigate to **Documents > Data and Analytics > Resources**.
+                3. Click **Sync** if the folder is not already synced.
+                4. Open the synced folder in File Explorer.
+                5. Open **{WORKBOOK_NAME}** once to make sure it is downloaded locally, then close it.
+                6. Reopen or refresh the CNA Console and try again.
+                7. If the warning still appears, right-click **{WORKBOOK_NAME}**, select **Copy as path**,
+                   and compare that path to the detected workbook path above. If they are different, send
+                   the copied path to marrocha@clarknationalaccounts.com along with any error message you are seeing.
+
+                **Web order number not found**
+
+                - Confirm the web order number was entered correctly.
+                - Confirm the order was placed within the last 30 days. The live SharePoint workbook currently
+                  only includes recent orders from that 30-day window.
+                - Refresh/sync the SharePoint workbook if the order was placed recently and may not have been
+                  pulled into the export file yet.
+
+                **Workbook is open or locked**
+
+                - Close **{WORKBOOK_NAME}** in Excel.
+                - Wait a few seconds for OneDrive/SharePoint to finish syncing.
+                - Run the Sourcing Matrix again.
+
+                **Other issue**
+
+                - Send the exact error message, the web order number used, and the detected workbook path above
+                  to Mario Rocha.
+                """
+            ).strip()
+        )
+
+
+WORKBOOK_PATH = find_workbook_path()
 LOGGER = utils.get_page_logger("Sourcing Matrix")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Sourcing Matrix")
 
@@ -610,12 +716,25 @@ def _build_flow_detail(file_bytes: bytes, selected_staging: str) -> pd.DataFrame
         "DestinationWarehouse",
         "SelectedMethod",
         "AppliedSourcingCost",
+        "FreeTransferTruckApplied",
         "TransferTruckCostRemoved",
         "ProductLineCount",
         "TotalQuantity",
     ]
     existing = [col for col in cols if col in rows.columns]
     rows = rows[existing].copy()
+
+    if "FreeTransferTruckApplied" in rows.columns:
+        free_transfer = rows["FreeTransferTruckApplied"].apply(
+            lambda value: str(value).strip().lower() in {"true", "1", "yes", "y"}
+            if isinstance(value, str)
+            else bool(value) if not pd.isna(value) else False
+        )
+        if "SelectedMethod" in rows.columns:
+            rows.loc[free_transfer, "SelectedMethod"] = "Waived Transfer Truck"
+        if "AppliedSourcingCost" in rows.columns:
+            rows.loc[free_transfer, "AppliedSourcingCost"] = 0
+
     rows = rows.rename(columns={
         "LegType": "Leg Type",
         "SourceWarehouse": "Source WH",
@@ -637,8 +756,761 @@ def _build_flow_detail(file_bytes: bytes, selected_staging: str) -> pd.DataFrame
     for col in ["Product Lines", "Total Qty"]:
         if col in rows.columns:
             rows[col] = rows[col].apply(lambda value: "N/A" if _to_int(value) is None else _to_int(value))
+    if "FreeTransferTruckApplied" in rows.columns:
+        rows = rows.drop(columns=["FreeTransferTruckApplied"])
     return rows
 
+
+def _is_fee_or_nonphysical_item(item_number: Any) -> bool:
+    """Identify known non-physical staging/service fee items that should not drive transfers."""
+    if item_number is None or pd.isna(item_number):
+        return False
+    normalized = str(item_number).strip().upper()
+    if not normalized:
+        return False
+    # STG1T / STG5T style fee lines have no product dimensions and should not be
+    # interpreted as physical inventory that needs to move through the staging plan.
+    return normalized.endswith(("1T", "5T")) or "1T" in normalized or "5T" in normalized
+
+
+def _normalize_column_name(value: Any) -> str:
+    """Normalize generated/live workbook column names for resilient matching."""
+    text = "" if value is None else str(value).strip()
+    if "[" in text and "]" in text:
+        text = text[text.rfind("[") + 1:text.rfind("]")]
+    text = text.strip("[]")
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def _find_column_by_normalized_name(df_or_columns: Any, candidates: list[str]) -> str | None:
+    """Find a dataframe column by comparing normalized names."""
+    columns = list(getattr(df_or_columns, "columns", df_or_columns))
+    candidate_keys = {_normalize_column_name(candidate) for candidate in candidates}
+    for col in columns:
+        if _normalize_column_name(col) in candidate_keys:
+            return col
+    return None
+
+
+def _description_lookup_from_sheet(df: pd.DataFrame) -> dict[str, str]:
+    """Return ItemNumber -> description when a sheet includes an item description column."""
+    if df.empty:
+        return {}
+
+    item_col = _find_column_by_normalized_name(
+        df,
+        [
+            "ItemNumber",
+            "Item Number",
+            "Item",
+            "ProductNumber",
+            "Product Number",
+        ],
+    )
+    description_col = _find_column_by_normalized_name(
+        df,
+        [
+            "ItemDescription",
+            "Item Description",
+            "Description",
+            "ProductDescription",
+            "Product Description",
+            "ItemName",
+            "Item Name",
+            "ItemDesc",
+            "Item Desc",
+            "ProductName",
+            "Product Name",
+            "ProductTitle",
+            "Product Title",
+            "ItemTitle",
+            "Item Title",
+            "Name",
+            "ShortDescription",
+            "Short Description",
+            "LongDescription",
+            "Long Description",
+            "Item Description USE",
+            "ItemDescriptionUSE",
+            "Title",
+            "Product Display Name",
+            "Display Name",
+        ],
+    )
+    if not item_col or not description_col:
+        return {}
+
+    rows = df[[item_col, description_col]].copy()
+    rows[item_col] = rows[item_col].astype(str).str.strip()
+    rows[description_col] = rows[description_col].fillna("").astype(str).str.strip()
+    rows = rows[rows[item_col].ne("") & rows[description_col].ne("")]
+    if rows.empty:
+        return {}
+
+    return rows.drop_duplicates(subset=[item_col]).set_index(item_col)[description_col].to_dict()
+
+
+@st.cache_data(show_spinner=False)
+def _description_lookup_from_workbook_path(workbook_path_text: str, modified_at: float | None) -> dict[str, str]:
+    """Return ItemNumber -> description from the live SharePoint export workbook when available.
+
+    Power BI connected-table sheets often have title/blank rows above the actual
+    header row. This reader scans the first rows of each sheet to find the row
+    containing ItemNumber and ItemDescription instead of assuming row 1 headers.
+    """
+    workbook_path = Path(workbook_path_text)
+    if not workbook_path.is_file():
+        return {}
+
+    preferred_sheets = [
+        "ItemShippingDimensions",
+        "SourcingMatrixBase",
+        "sourcingmatrixbase",
+        "SourcingMatrixBase30d",
+        "sourcingmatrixbase30d",
+        "OrderedItems",
+        "Ordered Items",
+        "CNA Orders",
+    ]
+
+    lookup: dict[str, str] = {}
+    try:
+        excel_file = pd.ExcelFile(workbook_path)
+    except Exception:
+        return lookup
+
+    sheet_names = list(excel_file.sheet_names)
+    ordered_sheet_names = [sheet for sheet in preferred_sheets if sheet in sheet_names]
+    ordered_sheet_names.extend([sheet for sheet in sheet_names if sheet not in ordered_sheet_names])
+
+    item_candidates = ["ItemNumber", "Item Number", "Item", "ProductNumber", "Product Number"]
+    description_candidates = [
+        "ItemDescription",
+        "Item Description",
+        "Description",
+        "ProductDescription",
+        "Product Description",
+        "ItemName",
+        "Item Name",
+        "ItemDesc",
+        "Item Desc",
+        "ProductName",
+        "Product Name",
+        "ProductTitle",
+        "Product Title",
+        "ItemTitle",
+        "Item Title",
+        "Name",
+        "ShortDescription",
+        "Short Description",
+        "LongDescription",
+        "Long Description",
+        "Item Description USE",
+        "ItemDescriptionUSE",
+        "Title",
+        "Product Display Name",
+        "Display Name",
+    ]
+
+    for sheet_name in ordered_sheet_names:
+        header_row_index: int | None = None
+        try:
+            preview = pd.read_excel(workbook_path, sheet_name=sheet_name, header=None, nrows=25)
+        except Exception:
+            continue
+
+        for idx, row in preview.iterrows():
+            candidate_columns = [_normalize_column_name(value) for value in row.tolist()]
+            if not any(candidate_columns):
+                continue
+            if (
+                _find_column_by_normalized_name(candidate_columns, item_candidates) is not None
+                and _find_column_by_normalized_name(candidate_columns, description_candidates) is not None
+            ):
+                header_row_index = int(idx)
+                break
+
+        if header_row_index is None:
+            continue
+
+        try:
+            rows = pd.read_excel(workbook_path, sheet_name=sheet_name, header=header_row_index)
+        except Exception:
+            continue
+
+        lookup.update(_description_lookup_from_sheet(rows))
+        if lookup:
+            # Stop at the first useful source so a less specific sheet does not overwrite descriptions.
+            break
+
+    return lookup
+
+def _description_lookup_from_live_workbook() -> dict[str, str]:
+    """Return ItemNumber -> description from the current live workbook path."""
+    try:
+        modified_at = WORKBOOK_PATH.stat().st_mtime if WORKBOOK_PATH.is_file() else None
+    except Exception:
+        modified_at = None
+    return _description_lookup_from_workbook_path(str(WORKBOOK_PATH), modified_at)
+
+
+EXCLUDED_MOVEMENT_TYPE = "Unavailable / Not Included / Excluded"
+
+
+def _normalize_transfer_movement_type(value: Any) -> str:
+    """Group non-movement lines together for a simpler transfer outline."""
+    text = "" if value is None or pd.isna(value) else str(value).strip()
+    if text in {"Unavailable / Not Included", "Fee / Excluded", "Kit / Excluded"}:
+        return EXCLUDED_MOVEMENT_TYPE
+    return text or EXCLUDED_MOVEMENT_TYPE
+
+
+def _reason_for_not_available(item_number: Any, movement_type: str, missing_reason: str | None = None) -> str:
+    """Return a short user-facing reason for non-available / excluded rows."""
+    item_text = "" if item_number is None or pd.isna(item_number) else str(item_number).strip().upper()
+    movement_text = "" if movement_type is None else str(movement_type).strip()
+
+    if _is_fee_or_nonphysical_item(item_text):
+        return (
+            "No weight for item. Expected for item numbers representing service fees, "
+            "custom items, or other non-physical lines."
+        )
+    if movement_text == "Kit / Excluded":
+        return "Kit line excluded from item-level transfer movement."
+    if missing_reason:
+        return missing_reason
+    return "Not enough stock available at eligible source warehouses."
+
+
+def _build_transfer_cost_lookup(cost_detail: pd.DataFrame, selected_staging: str) -> dict[tuple[str, str], float | None]:
+    """Return (source WH, staging WH) -> estimated transfer cost for the selected scenario."""
+    if cost_detail.empty or "ScenarioStagingWarehouse" not in cost_detail.columns or "LegType" not in cost_detail.columns:
+        return {}
+
+    rows = cost_detail.copy()
+    rows["ScenarioStagingWarehouse"] = rows["ScenarioStagingWarehouse"].apply(_format_warehouse_value)
+    rows["LegType"] = rows["LegType"].astype(str).str.strip()
+    rows = rows[
+        rows["ScenarioStagingWarehouse"].eq(str(selected_staging).strip())
+        & rows["LegType"].eq("SourceToStaging")
+    ].copy()
+    if rows.empty or "SourceWarehouse" not in rows.columns:
+        return {}
+
+    rows["Source WH"] = rows["SourceWarehouse"].apply(_format_warehouse_value)
+    if "DestinationWarehouse" in rows.columns:
+        rows["Staging WH"] = rows["DestinationWarehouse"].apply(_format_warehouse_value)
+    else:
+        rows["Staging WH"] = str(selected_staging).strip()
+
+    def row_transfer_cost(row: pd.Series) -> float | None:
+        free_value = row.get("FreeTransferTruckApplied") if "FreeTransferTruckApplied" in row.index else False
+        is_free = (
+            str(free_value).strip().lower() in {"true", "1", "yes", "y"}
+            if isinstance(free_value, str)
+            else bool(free_value) if not pd.isna(free_value) else False
+        )
+        if is_free:
+            return 0.0
+        for cost_col in ["AppliedSourcingCost", "SelectedCost"]:
+            if cost_col in row.index:
+                cost = _to_float(row.get(cost_col))
+                if cost is not None:
+                    return cost
+        return None
+
+    costs_by_key: dict[tuple[str, str], list[float | None]] = {}
+    for _, row in rows.iterrows():
+        key = (str(row.get("Source WH", "")).strip(), str(row.get("Staging WH", "")).strip())
+        costs_by_key.setdefault(key, []).append(row_transfer_cost(row))
+
+    result: dict[tuple[str, str], float | None] = {}
+    for key, values in costs_by_key.items():
+        numeric_values = [value for value in values if value is not None]
+        result[key] = sum(numeric_values) if numeric_values else None
+    return result
+
+
+def _build_transfer_outline(file_bytes: bytes, selected_staging: str) -> pd.DataFrame:
+    """Build a selected-scenario item movement table from generated workbook sheets.
+
+    ScenarioPayloadPreview provides scenario-specific source-to-staging item
+    movements and the final staging-to-destination item list. ItemLevel identifies
+    unavailable and kit rows, while ProductDimensionValidation provides requested
+    quantities and missing-dimension status for all ordered items.
+    """
+    if not file_bytes:
+        return pd.DataFrame()
+
+    payload_preview = _read_sheet(file_bytes, "ScenarioPayloadPreview")
+    scenario_items = _read_sheet(file_bytes, "ScenarioItemWarehouses")
+    item_level = _read_sheet(file_bytes, "ItemLevel")
+    product_validation = _read_sheet(file_bytes, "ProductDimensionValidation")
+    scenario_cost_detail = _read_sheet(file_bytes, "ScenarioCostDetail")
+
+    if product_validation.empty and payload_preview.empty and scenario_items.empty and item_level.empty:
+        return pd.DataFrame()
+
+    selected_staging_text = str(selected_staging).strip()
+    transfer_cost_lookup = _build_transfer_cost_lookup(scenario_cost_detail, selected_staging_text)
+
+    quantity_lookup: dict[str, Any] = {}
+    dimension_status_lookup: dict[str, str] = {}
+    exclusion_reason_lookup: dict[str, str] = {}
+    description_lookup: dict[str, str] = _description_lookup_from_live_workbook()
+
+    for candidate_sheet in [product_validation, payload_preview, scenario_items, item_level]:
+        description_lookup.update(_description_lookup_from_sheet(candidate_sheet))
+
+    if not product_validation.empty and "ItemNumber" in product_validation.columns:
+        products = product_validation.copy()
+        products["ItemNumber"] = products["ItemNumber"].astype(str).str.strip()
+        if "TotalQuantity" in products.columns:
+            quantity_lookup = products.set_index("ItemNumber")["TotalQuantity"].to_dict()
+
+        for _, row in products.iterrows():
+            item_number = str(row.get("ItemNumber", "")).strip()
+            if not item_number:
+                continue
+
+            missing_critical_value = row.get("MissingCriticalProductFields") if "MissingCriticalProductFields" in products.columns else False
+            missing_critical = False if pd.isna(missing_critical_value) else bool(missing_critical_value)
+            status = "" if pd.isna(row.get("Status")) else str(row.get("Status")).strip()
+            missing_fields = "" if pd.isna(row.get("MissingFieldList")) else str(row.get("MissingFieldList")).strip()
+
+            if missing_critical or status.lower().startswith("missing"):
+                if _is_fee_or_nonphysical_item(item_number):
+                    dimension_status_lookup[item_number] = "Fee / Excluded"
+                    exclusion_reason_lookup[item_number] = _reason_for_not_available(item_number, "Fee / Excluded")
+                elif missing_fields:
+                    dimension_status_lookup[item_number] = f"Needs Review - missing {missing_fields}"
+                    exclusion_reason_lookup[item_number] = f"Missing product information: {missing_fields}"
+                else:
+                    dimension_status_lookup[item_number] = "Needs Review - missing product dimensions"
+                    exclusion_reason_lookup[item_number] = "Missing product dimensions needed by the shipping calculator."
+
+    unavailable_items: set[str] = set()
+    kit_items: set[str] = set()
+    if not item_level.empty and {"Warehouse", "ItemNumber"}.issubset(item_level.columns):
+        item_rows = item_level.copy()
+        item_rows["Warehouse"] = item_rows["Warehouse"].astype(str).str.strip()
+        item_rows["ItemNumber"] = item_rows["ItemNumber"].astype(str).str.strip()
+        unavailable_items = set(
+            item_rows.loc[item_rows["Warehouse"].eq("Unavailable Items"), "ItemNumber"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        kit_items = set(
+            item_rows.loc[item_rows["Warehouse"].eq("Kits"), "ItemNumber"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+
+    outline_rows: list[dict[str, Any]] = []
+    transferred_items: set[str] = set()
+    final_item_quantities: dict[str, Any] = {}
+    nonphysical_quantities: dict[str, Any] = {}
+
+    def add_outline_row(
+        movement_type: str,
+        source_wh: str,
+        item_number: str,
+        qty: Any,
+        estimated_transfer_cost: Any = None,
+        reason: str | None = None,
+    ) -> None:
+        normalized_movement_type = _normalize_transfer_movement_type(movement_type)
+        row: dict[str, Any] = {
+            "Movement Type": normalized_movement_type,
+            "Source WH": source_wh,
+            "Staging WH": selected_staging_text,
+            "Item Number": item_number,
+            "Item Description": description_lookup.get(item_number, "N/A"),
+            "Qty": qty,
+        }
+        if estimated_transfer_cost is not None:
+            row["Estimated Transfer Cost"] = estimated_transfer_cost
+        if normalized_movement_type == EXCLUDED_MOVEMENT_TYPE:
+            row["Reason for Not Available"] = reason or _reason_for_not_available(item_number, movement_type)
+        outline_rows.append(row)
+
+
+    if not payload_preview.empty and {"ScenarioStagingWarehouse", "LegType", "ItemNumber", "Quantity"}.issubset(payload_preview.columns):
+        payload_rows = payload_preview.copy()
+        payload_rows["ScenarioStagingWarehouse"] = payload_rows["ScenarioStagingWarehouse"].apply(_format_warehouse_value)
+        payload_rows["LegType"] = payload_rows["LegType"].astype(str).str.strip()
+        payload_rows["ItemNumber"] = payload_rows["ItemNumber"].astype(str).str.strip()
+        payload_rows = payload_rows[payload_rows["ScenarioStagingWarehouse"].eq(selected_staging_text)].copy()
+
+        if not payload_rows.empty:
+            fee_rows = payload_rows[payload_rows["ItemNumber"].apply(_is_fee_or_nonphysical_item)].copy()
+            if not fee_rows.empty:
+                nonphysical_quantities = fee_rows.groupby("ItemNumber")["Quantity"].max().to_dict()
+
+        physical_payload_rows = payload_rows[~payload_rows["ItemNumber"].apply(_is_fee_or_nonphysical_item)].copy()
+
+        final_rows = physical_payload_rows[physical_payload_rows["LegType"].eq("StagingToDestination")].copy()
+        if not final_rows.empty:
+            final_item_quantities = final_rows.groupby("ItemNumber")["Quantity"].sum().to_dict()
+
+        transfer_rows = physical_payload_rows[physical_payload_rows["LegType"].eq("SourceToStaging")].copy()
+        if not transfer_rows.empty:
+            transfer_rows["Source WH"] = transfer_rows.get("SourceWarehouse", "").apply(_format_warehouse_value)
+            grouped_transfers = (
+                transfer_rows
+                .groupby(["Source WH", "ItemNumber"], as_index=False)
+                .agg({"Quantity": "sum"})
+            )
+
+            for _, row in grouped_transfers.iterrows():
+                item_number = str(row.get("ItemNumber", "")).strip()
+                if not item_number:
+                    continue
+                transferred_items.add(item_number)
+                movement_type = dimension_status_lookup.get(item_number, "Transfer To Staging")
+                if movement_type == "Fee / Excluded":
+                    nonphysical_quantities[item_number] = quantity_lookup.get(item_number, row.get("Quantity"))
+                    continue
+                if movement_type.startswith("Needs Review"):
+                    movement_type = "Needs Review"
+                source_wh_text = str(row.get("Source WH", ""))
+                transfer_cost = transfer_cost_lookup.get((source_wh_text, selected_staging_text))
+                add_outline_row(
+                    movement_type="Transfer To Staging" if movement_type == "Transfer To Staging" else movement_type,
+                    source_wh=source_wh_text,
+                    item_number=item_number,
+                    qty=row.get("Quantity"),
+                    estimated_transfer_cost=transfer_cost,
+                )
+
+    # Fallback for older exports that do not include ScenarioPayloadPreview.
+    if not transferred_items and not scenario_items.empty and {"OrderID", "ItemNumber", "WarehouseNumber"}.issubset(scenario_items.columns):
+        scenario_rows = scenario_items.copy()
+        scenario_rows["OrderID"] = scenario_rows["OrderID"].astype(str)
+        scenario_rows["ScenarioStagingWarehouse"] = scenario_rows["OrderID"].str.extract(r"^\d+_(\d+)_", expand=False).fillna("")
+        scenario_rows = scenario_rows[scenario_rows["ScenarioStagingWarehouse"].astype(str).str.strip().eq(selected_staging_text)].copy()
+
+        if not scenario_rows.empty:
+            scenario_rows["ItemNumber"] = scenario_rows["ItemNumber"].astype(str).str.strip()
+            scenario_rows["Source WH"] = scenario_rows["WarehouseNumber"].apply(_format_warehouse_value)
+            qty_col = "TotalQuantityFromWarehouse" if "TotalQuantityFromWarehouse" in scenario_rows.columns else None
+
+            for _, row in scenario_rows.iterrows():
+                item_number = str(row.get("ItemNumber", "")).strip()
+                if not item_number:
+                    continue
+                qty = quantity_lookup.get(item_number, row.get(qty_col) if qty_col else None)
+                if _is_fee_or_nonphysical_item(item_number):
+                    nonphysical_quantities[item_number] = qty
+                    continue
+                transferred_items.add(item_number)
+                source_wh_text = str(row.get("Source WH", ""))
+                transfer_cost = transfer_cost_lookup.get((source_wh_text, selected_staging_text))
+                add_outline_row(
+                    movement_type="Transfer To Staging",
+                    source_wh=source_wh_text,
+                    item_number=item_number,
+                    qty=qty,
+                    estimated_transfer_cost=transfer_cost,
+                )
+
+    all_item_numbers: set[str] = set()
+    if final_item_quantities:
+        all_item_numbers = set(final_item_quantities.keys())
+    elif quantity_lookup:
+        all_item_numbers = set(quantity_lookup.keys())
+    elif not item_level.empty and "ItemNumber" in item_level.columns:
+        all_item_numbers = set(item_level["ItemNumber"].dropna().astype(str).str.strip())
+
+    for item_number in sorted(all_item_numbers):
+        if item_number in transferred_items or item_number in unavailable_items or item_number in kit_items:
+            continue
+        if _is_fee_or_nonphysical_item(item_number):
+            nonphysical_quantities[item_number] = quantity_lookup.get(item_number, final_item_quantities.get(item_number))
+            continue
+
+        qty = final_item_quantities.get(item_number, quantity_lookup.get(item_number))
+        movement_type = "Needs Review" if item_number in dimension_status_lookup else "Sourced From Staging"
+        add_outline_row(
+            movement_type=movement_type,
+            source_wh=selected_staging_text,
+            item_number=item_number,
+            qty=qty,
+        )
+
+    for item_number in sorted(unavailable_items):
+        add_outline_row(
+            movement_type="Unavailable / Not Included",
+            source_wh="N/A",
+            item_number=item_number,
+            qty=quantity_lookup.get(item_number, "N/A"),
+            reason=exclusion_reason_lookup.get(
+                item_number,
+                _reason_for_not_available(item_number, "Unavailable / Not Included"),
+            ),
+        )
+
+    for item_number in sorted(nonphysical_quantities):
+        add_outline_row(
+            movement_type="Fee / Excluded",
+            source_wh="N/A",
+            item_number=item_number,
+            qty=quantity_lookup.get(item_number, nonphysical_quantities.get(item_number, "N/A")),
+            reason=exclusion_reason_lookup.get(
+                item_number,
+                _reason_for_not_available(item_number, "Fee / Excluded"),
+            ),
+        )
+
+    for item_number in sorted(kit_items):
+        add_outline_row(
+            movement_type="Kit / Excluded",
+            source_wh="N/A",
+            item_number=item_number,
+            qty=quantity_lookup.get(item_number, "N/A"),
+            reason=exclusion_reason_lookup.get(
+                item_number,
+                _reason_for_not_available(item_number, "Kit / Excluded"),
+            ),
+        )
+
+    if not outline_rows:
+        return pd.DataFrame()
+
+    display = pd.DataFrame(outline_rows)
+
+    movement_order = {
+        "Transfer To Staging": 1,
+        "Sourced From Staging": 2,
+        "Needs Review": 3,
+        EXCLUDED_MOVEMENT_TYPE: 4,
+    }
+    display["_MovementSort"] = display["Movement Type"].map(movement_order).fillna(99)
+
+    if "Qty" in display.columns:
+        display["Qty"] = display["Qty"].apply(lambda value: "N/A" if _to_int(value) is None else _to_int(value))
+    if "Estimated Transfer Cost" in display.columns:
+        display["Estimated Transfer Cost"] = display["Estimated Transfer Cost"].apply(_to_float)
+
+    display = display.sort_values(["_MovementSort", "Source WH", "Item Number"]).drop(columns=["_MovementSort"])
+    desired_columns = [
+        "Movement Type",
+        "Source WH",
+        "Staging WH",
+        "Item Number",
+        "Item Description",
+        "Qty",
+        "Estimated Transfer Cost",
+        "Reason for Not Available",
+    ]
+    return display[[col for col in desired_columns if col in display.columns]]
+
+
+def _build_transfer_outline_summary(transfer_outline: pd.DataFrame) -> pd.DataFrame:
+    """Summarize item-level movements into one row per transfer/source group."""
+    if transfer_outline.empty:
+        return pd.DataFrame()
+
+    rows = transfer_outline.copy()
+    rows["_QtyNumeric"] = rows["Qty"].apply(_to_float).fillna(0)
+    if "Estimated Transfer Cost" in rows.columns:
+        rows["_TransferCostNumeric"] = rows["Estimated Transfer Cost"].apply(_to_float)
+    else:
+        rows["_TransferCostNumeric"] = None
+
+    summary = (
+        rows
+        .groupby(["Movement Type", "Source WH", "Staging WH"], as_index=False)
+        .agg(
+            **{
+                "Item Lines": ("Item Number", "nunique"),
+                "Total Qty": ("_QtyNumeric", "sum"),
+                "Estimated Transfer Cost": ("_TransferCostNumeric", "max"),
+            }
+        )
+    )
+
+    movement_order = {
+        "Transfer To Staging": 1,
+        "Sourced From Staging": 2,
+        "Needs Review": 3,
+        EXCLUDED_MOVEMENT_TYPE: 4,
+    }
+    summary["_MovementSort"] = summary["Movement Type"].map(movement_order).fillna(99)
+    summary["Total Qty"] = summary["Total Qty"].apply(lambda value: int(round(float(value))) if pd.notna(value) else "N/A")
+    summary["Estimated Transfer Cost"] = summary.apply(
+        lambda row: _format_money(row["Estimated Transfer Cost"])
+        if row["Movement Type"] == "Transfer To Staging" and _to_float(row["Estimated Transfer Cost"]) is not None
+        else "N/A",
+        axis=1,
+    )
+    return summary.sort_values(["_MovementSort", "Source WH"]).drop(columns=["_MovementSort"])
+
+
+def _render_scrollable_detail_table(df: pd.DataFrame) -> None:
+    """Render centered item details with scrolling so long item lists are not cut off."""
+    if df.empty:
+        return
+
+    display = df.reset_index(drop=True).fillna("N/A").copy()
+    for col in ["Estimated Transfer Cost"]:
+        if col in display.columns:
+            display[col] = display[col].apply(lambda value: "N/A" if _to_float(value) is None else _format_money(value))
+
+    height = min(max(96 + len(display.index) * 34, 170), 500)
+    html = display.to_html(index=False, escape=True, classes="sm-detail-table")
+    components.html(
+        f"""
+        <html>
+        <head>
+        <style>
+          html, body {{
+            margin: 0;
+            padding: 0;
+            font-family: 'Aptos', 'Segoe UI', Arial, sans-serif;
+            color: #0F172A;
+            background: transparent;
+            overflow: hidden;
+          }}
+          .detail-wrap {{
+            width: 100%;
+            max-height: {height - 24}px;
+            overflow: auto;
+            border: 1px solid #BFE8EA;
+            border-radius: 6px;
+          }}
+          table.sm-detail-table {{
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: auto;
+            font-size: 14px;
+          }}
+          table.sm-detail-table thead th {{
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            background: #D9F0F2;
+            color: #334E68;
+            font-weight: 700;
+            text-align: center !important;
+            vertical-align: middle !important;
+            border: 1px solid #BFE8EA;
+            padding: 8px 8px;
+            white-space: nowrap;
+          }}
+          table.sm-detail-table tbody td {{
+            text-align: center !important;
+            vertical-align: middle !important;
+            border: 1px solid #BFE8EA;
+            padding: 8px 8px;
+          }}
+          table.sm-detail-table tbody tr:nth-child(even) {{
+            background: #FBFEFF;
+          }}
+          table.sm-detail-table tbody tr:hover {{
+            background: #F1FBFC;
+          }}
+        </style>
+        </head>
+        <body>
+          <div class="detail-wrap">{html}</div>
+        </body>
+        </html>
+        """,
+        height=height,
+        scrolling=False,
+    )
+
+
+def render_transfer_outline(transfer_outline: pd.DataFrame) -> None:
+    """Render a grouped transfer outline with expandable item-level details."""
+    if transfer_outline.empty:
+        return
+
+    st.markdown("#### Transfer outline")
+    st.caption(
+        "This view summarizes each source-to-staging movement and lets you expand a movement group "
+        "to see the specific items, descriptions, and quantities. Unavailable, not-included, and "
+        "excluded fee/service lines such as STG1T or STG5T are grouped together because they are "
+        "not physical inventory movements."
+    )
+
+    summary = _build_transfer_outline_summary(transfer_outline)
+    if summary.empty:
+        return
+
+    _render_centered_table(summary)
+    st.caption("Open a movement group below to review the item-level detail.")
+
+    base_detail_columns = ["Item Number", "Item Description", "Qty"]
+
+    for _, group_row in summary.iterrows():
+        movement_type = str(group_row.get("Movement Type", "")).strip()
+        source_wh = str(group_row.get("Source WH", "")).strip()
+        staging_wh = str(group_row.get("Staging WH", "")).strip()
+        item_lines = _to_int(group_row.get("Item Lines"))
+        total_qty = _to_int(group_row.get("Total Qty"))
+
+        detail_rows = transfer_outline[
+            transfer_outline["Movement Type"].astype(str).eq(movement_type)
+            & transfer_outline["Source WH"].astype(str).eq(source_wh)
+            & transfer_outline["Staging WH"].astype(str).eq(staging_wh)
+        ].copy()
+        if detail_rows.empty:
+            continue
+
+        if source_wh and source_wh != "N/A":
+            movement_label = f"{movement_type}: {source_wh} → {staging_wh}"
+        else:
+            movement_label = f"{movement_type}: {staging_wh}"
+
+        item_text = "N/A" if item_lines is None else f"{item_lines} item(s)"
+        qty_text = "N/A" if total_qty is None else f"Qty {total_qty}"
+        detail_columns = list(base_detail_columns)
+        if movement_type == EXCLUDED_MOVEMENT_TYPE:
+            detail_columns.append("Reason for Not Available")
+
+        with st.expander(f"{movement_label} • {item_text} • {qty_text}"):
+            _render_scrollable_detail_table(detail_rows[[col for col in detail_columns if col in detail_rows.columns]])
+
+
+def _render_selected_scenario_cost_warning(selected: pd.Series) -> None:
+    """Show a neutral note when some rows do not return shipping-calculator costs."""
+    complete_value = selected.get("CompleteCostScenario") if "CompleteCostScenario" in selected.index else None
+    missing_payloads = _to_int(selected.get("PayloadsMissingAppliedCost")) if "PayloadsMissingAppliedCost" in selected.index else None
+    issue_list = "" if pd.isna(selected.get("IssueList")) else str(selected.get("IssueList")).strip()
+
+    complete = True
+    if complete_value is not None and not pd.isna(complete_value):
+        if isinstance(complete_value, str):
+            complete = complete_value.strip().lower() in {"true", "1", "yes", "y"}
+        else:
+            complete = bool(complete_value)
+
+    if complete and not missing_payloads and not issue_list:
+        return
+
+    missing_text = f" {missing_payloads} payload(s) did not return an applied shipping cost." if missing_payloads else ""
+    issue_text = ""
+    if issue_list:
+        issue_preview = issue_list if len(issue_list) <= 240 else f"{issue_list[:237]}..."
+        issue_text = f" Calculator note: {issue_preview}"
+
+    note_html = (
+        "<div style='border-left: 4px solid #94A3B8; background: #F8FAFC; "
+        "padding: 0.75rem 0.9rem; margin: 0.65rem 0 1rem 0; "
+        "color: #334155; font-size: 0.88rem; line-height: 1.45;'>"
+        "<strong>Note:</strong> Some item rows did not return a shipping-calculator cost."
+        f"{escape(missing_text + issue_text)} "
+        "This is expected when non-physical fee/service items such as <strong>STG1T</strong> "
+        "or <strong>STG5T</strong> are included. Those rows are shown under "
+        f"<strong>{escape(EXCLUDED_MOVEMENT_TYPE)}</strong> in the Transfer outline and are not "
+        "treated as physical inventory movements."
+        "</div>"
+    )
+    st.markdown(note_html, unsafe_allow_html=True)
 
 
 def _normalize_location_key(value: Any) -> str:
@@ -1308,7 +2180,12 @@ def render_console_summary(summary_payload: dict[str, Any]) -> None:
     with sub_col3:
         _render_metric_card("Transfer Truck Savings", escape(_format_money(selected.get("TransferTruckCostRemoved"))))
 
+    _render_selected_scenario_cost_warning(selected)
+
     render_scenario_map(summary_payload, str(selected_staging))
+
+    transfer_outline = _build_transfer_outline(summary_payload.get("file_bytes"), str(selected_staging))
+    render_transfer_outline(transfer_outline)
 
     ranking = summary_payload.get("ranking")
     if isinstance(ranking, pd.DataFrame) and not ranking.empty:
@@ -1337,9 +2214,7 @@ render_data_availability_note()
 engine_available, engine_error = ensure_engine_importable()
 
 if not WORKBOOK_PATH.exists():
-    st.warning(
-        "Live Sourcing Matrix workbook not found. Ensure the SharePoint-synced Sourcing Matrix Export File is available on this machine."
-    )
+    render_workbook_missing_message()
 
 if not ENGINE_ROOT.exists():
     st.warning(
@@ -1377,22 +2252,7 @@ staging_warehouse = st.selectbox(
     format_func=lambda value: "(Compare all staging warehouses)" if value == "" else value,
 )
 
-# Advanced: override API URL and timeout if needed
-api_url_override = None
-with st.expander("🔧 Advanced Options"):
-    api_url_override = st.text_input(
-    "Shipping Calculator API URL (leave empty to use the same engine default as the standalone tool)",
-    value="",
-    placeholder=DEFAULT_SHIPPING_CALC_API_URL,
-)
-    api_timeout_seconds = st.number_input(
-        "Shipping Calculator Timeout (seconds)",
-        min_value=30.0,
-        max_value=600.0,
-        value=180.0,
-        step=30.0,
-        help="Increase this for larger orders that may take longer for the API to respond.",
-    )
+render_troubleshooting_guide()
 
 with st.expander("Engine and deployment notes"):
     st.markdown(
@@ -1400,6 +2260,23 @@ with st.expander("Engine and deployment notes"):
         - The live workbook is discovered from the current Windows user's synced SharePoint folder.
         - This page reads product shipping/dimensions from `ItemShippingDimensions` and warehouse addresses from `WarehouseInfo` in the workbook. Runtime SQL/database permissions are not required for the normal Sourcing Matrix run.
         """
+    )
+
+# Advanced: override API URL and timeout if needed
+api_url_override = None
+with st.expander("Advanced Options"):
+    api_url_override = st.text_input(
+        "Shipping Calculator API URL (leave empty to use the same engine default as the standalone tool)",
+        value="",
+        placeholder=DEFAULT_SHIPPING_CALC_API_URL,
+    )
+    api_timeout_seconds = st.number_input(
+        "Shipping Calculator Timeout (seconds)",
+        min_value=30.0,
+        max_value=600.0,
+        value=180.0,
+        step=30.0,
+        help="Increase this for larger orders that may take longer for the API to respond.",
     )
 
 selected_api_url = api_url_override.strip() if api_url_override and api_url_override.strip() else None
@@ -1417,7 +2294,7 @@ if run_button:
     if not order_number.strip():
         st.error("Enter a Primary Web Order Number before running the sourcing export.")
     elif not WORKBOOK_PATH.exists():
-        st.error("Live workbook is missing. Please sync the SharePoint workbook first.")
+        render_workbook_missing_message()
     elif not engine_available:
         st.error("Cannot run the sourcing engine because the package is unavailable or not importable.")
     else:
