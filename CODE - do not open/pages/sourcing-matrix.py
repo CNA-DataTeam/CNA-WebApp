@@ -2210,7 +2210,6 @@ st.markdown(utils.get_global_css(), unsafe_allow_html=True)
 render_sourcing_matrix_page_header()
 render_data_availability_note()
 
-
 engine_available, engine_error = ensure_engine_importable()
 
 if not WORKBOOK_PATH.exists():
@@ -2245,7 +2244,8 @@ st.caption(
     "Additional orders contribute item demand only. The primary web order number's destination address "
     "is used for the combined sourcing plan and final shipment."
 )
-staging_options = ["", "851", "853", "854", "857", "872", "875"]
+staging_options = ["", "851", "853", "854", "857", "872", "875", "876"]
+
 staging_warehouse = st.selectbox(
     "Preferred Staging Warehouse",
     staging_options,
