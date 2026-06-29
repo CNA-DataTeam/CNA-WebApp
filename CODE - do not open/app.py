@@ -511,6 +511,12 @@ if "settings_action" in st.query_params:
         st.session_state["_settings_toast"] = "Cache cleared"
     elif _action == "repair":
         st.session_state["_show_repair_dialog"] = True
+    elif _action in ("view_as_admin", "view_as_developer"):
+        _role = _action[len("view_as_"):]
+        utils.set_view_as_role(_role)
+        st.session_state["_settings_toast"] = f"Viewing as {_role}"
+    elif _action == "view_as_user_picker":
+        st.session_state["_show_view_as_user_dialog"] = True
     # "refresh" is implicit — the rerun below IS the refresh.
     st.rerun()
 # Note: dept dropdowns now use native HTML <details>/<summary>, so toggling
@@ -727,6 +733,39 @@ with st.sidebar:
     # Settings dropdown — HTML <details> styled the same way as the dept
     # dropdowns. Each action is an <a> link to ?settings_action=NAME,
     # handled at the top of this file.
+    #
+    # Developer-only "View as" rows let an actual developer preview the app as a
+    # regular user / admin / developer. Gated on the REAL developer flag (not the
+    # effective role) so a developer previewing as "user" can still switch back.
+    view_as_html = ""
+    if utils.is_actual_developer():
+        current_view = utils.effective_role()
+        impersonated_login = utils.view_as_user_login()
+        if impersonated_login:
+            impersonated_name = utils.load_user_fullname_map().get(impersonated_login, impersonated_login)
+            user_row_label = f"View as User: {impersonated_name} &#10003;"
+        else:
+            user_row_label = "View as User…"
+        admin_active = (not impersonated_login) and current_view == "admin"
+        dev_active = (not impersonated_login) and current_view == "developer"
+        view_as_rows = (
+            f'<a class="cna-action-row" href="?settings_action=view_as_user_picker" target="_self">'
+            f'{user_row_label}</a>'
+            '<div class="cna-row-divider"></div>'
+            f'<a class="cna-action-row" href="?settings_action=view_as_admin" target="_self">'
+            f'View as Admin{" &#10003;" if admin_active else ""}</a>'
+            '<div class="cna-row-divider"></div>'
+            f'<a class="cna-action-row" href="?settings_action=view_as_developer" target="_self">'
+            f'View as Developer{" &#10003;" if dev_active else ""}</a>'
+        )
+        view_as_html = (
+            '<div class="cna-row-divider"></div>'
+            '<div class="cna-action-row" style="opacity:0.55;font-size:0.7rem;'
+            'text-transform:uppercase;letter-spacing:0.04em;pointer-events:none;">View As</div>'
+            '<div class="cna-row-divider"></div>'
+            + view_as_rows
+        )
+
     st.markdown(
         '<details class="cna-dept cna-settings-dept">'
         '<summary class="cna-dept-header">'
@@ -745,6 +784,7 @@ with st.sidebar:
         '<div class="cna-row-divider"></div>'
         '<a class="cna-action-row" href="?settings_action=repair" target="_self">'
         'Repair App</a>'
+        + view_as_html +
         '</div>'
         '</details>',
         unsafe_allow_html=True,
@@ -752,6 +792,16 @@ with st.sidebar:
     # Surface any queued message from a settings action via st.toast.
     if "_settings_toast" in st.session_state:
         st.toast(st.session_state.pop("_settings_toast"))
+
+    # --- Network-drive connection indicator (pinned bottom-left) ---
+    # Rendered last and wrapped in a keyed container so the CSS hook
+    # (.st-key-cna_conn_status_wrap, margin-top:auto) pins it to the
+    # bottom-left corner of the sidebar. Re-checks reachability on each page
+    # load/reload and on navigation to a different page (keyed by the active
+    # page title); reused across same-page reruns so widget interactions don't
+    # repeat the probe.
+    with st.container(key="cna_conn_status_wrap"):
+        utils.render_sidebar_connection_status(page_key=navigation.title)
 
 if st.session_state.get("_show_repair_dialog"):
     @st.dialog("Repair App", width="small")
@@ -781,6 +831,55 @@ if st.session_state.get("_show_repair_dialog"):
                 st.session_state["_show_repair_dialog"] = False
                 st.rerun()
     _repair_dialog()
+
+if st.session_state.get("_show_view_as_user_dialog"):
+    @st.dialog("View as User", width="small")
+    def _view_as_user_dialog():
+        st.caption("Preview the site with another user's permissions (developer only).")
+        users = utils.list_user_logins()  # [(login, full_name), ...]
+        if not users:
+            st.info("No users found in users.parquet.")
+            if st.button("Close", use_container_width=True, key="_vau_close_empty"):
+                st.session_state["_show_view_as_user_dialog"] = False
+                st.rerun()
+            return
+
+        logins = [login for login, _ in users]
+        names = {login: name for login, name in users}
+        current = utils.view_as_user_login()
+        index = logins.index(current) if current in logins else 0
+        selected = st.selectbox(
+            "Select a user",
+            options=logins,
+            index=index,
+            format_func=lambda login: f"{names.get(login, login)} ({login})",
+        )
+        if utils.is_user_developer(selected):
+            sel_role = "developer"
+        elif utils.is_user_admin(selected):
+            sel_role = "admin"
+        else:
+            sel_role = "user"
+        st.caption(f"This user's permissions: **{sel_role}**")
+
+        col_apply, col_cancel = st.columns(2)
+        with col_apply:
+            if st.button("Apply", type="primary", use_container_width=True, key="_vau_apply"):
+                utils.set_view_as_user(selected)
+                st.session_state["_show_view_as_user_dialog"] = False
+                st.session_state["_settings_toast"] = f"Viewing as {names.get(selected, selected)}"
+                st.rerun()
+        with col_cancel:
+            if st.button("Cancel", use_container_width=True, key="_vau_cancel"):
+                st.session_state["_show_view_as_user_dialog"] = False
+                st.rerun()
+        if utils.view_as_user_login():
+            if st.button("Reset to my own role", use_container_width=True, key="_vau_reset"):
+                utils.set_view_as_role("developer")
+                st.session_state["_show_view_as_user_dialog"] = False
+                st.session_state["_settings_toast"] = "Back to your own role"
+                st.rerun()
+    _view_as_user_dialog()
 
 LOGGER.info("Navigation initialized | current_page='%s'", navigation.title)
 # One-time confirmation after a mid-session "Update now" (set just before its rerun).

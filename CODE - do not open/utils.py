@@ -53,6 +53,7 @@ import inspect
 import json
 import logging
 import re
+import socket
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -67,6 +68,11 @@ import pyarrow.parquet as pq
 import streamlit as st
 import app_logging
 import config
+
+try:
+    import user_profile_cache
+except Exception:  # defensive: the offline cache is additive, never block app load
+    user_profile_cache = None
 
 # Timezone for Eastern Time
 EASTERN_TZ = ZoneInfo("America/New_York")
@@ -195,6 +201,119 @@ def format_time_ago(dt: datetime) -> str:
         return f"{hours} hr ago"
     days = seconds // 86400
     return f"{days} day{'s' if days > 1 else ''} ago"
+
+
+# -----------------------------------------------------------------
+# Network drive connectivity
+# -----------------------------------------------------------------
+# Most app data lives on the \\therestaurantstore.com\920 UNC share, which is
+# only reachable on the company VPN or a Clark/CNA office network. The sidebar
+# shows a connected/disconnected indicator so users know whether the data they
+# see is current. We test reachability with a short, bounded TCP connect to the
+# file server's SMB port rather than touching the share directly: an
+# os.path.exists() on an unreachable UNC path can block for many seconds, which
+# would stall every page load. A socket with an explicit timeout never hangs and
+# never leaves a zombie thread.
+_SMB_PORT = 445
+_CONNECT_TIMEOUT_SECONDS = 1.5
+
+NETWORK_DRIVE_TOOLTIP_ONLINE = (
+    "You are connected to the network drive. All app data loaded."
+)
+NETWORK_DRIVE_TOOLTIP_OFFLINE = (
+    "You are not connected to the network drive. Some app data may be outdated "
+    "or inconsistent, it is recommended to fix this before using the app. To "
+    "connect to the network drive, turn on your VPN or connect to a Clark/CNA "
+    "hosted network at an office."
+)
+
+
+@lru_cache(maxsize=1)
+def get_network_drive_host() -> str | None:
+    """Return the UNC server host backing the shared data drive (cached).
+
+    Derived from the configured network paths so it follows config.py rather
+    than hardcoding the hostname here. Returns None if no UNC path is found.
+    """
+    for attr in ("COMPLETED_TASKS_DIR", "TIME_ALLOCATION_DIR", "LOGS_ROOT_DIR", "PERSONNEL_DIR"):
+        value = getattr(config, attr, None)
+        if not value:
+            continue
+        text = str(value)
+        if text.startswith("\\\\"):
+            host = text[2:].split("\\", 1)[0].strip()
+            if host:
+                return host
+    return None
+
+
+def is_network_drive_connected(timeout: float = _CONNECT_TIMEOUT_SECONDS) -> bool:
+    """Return True if the shared network drive's file server is reachable.
+
+    Tests a TCP connection to the SMB port with a hard timeout — fast when
+    online, bounded (never hangs the UI) when offline. This is a reachability
+    proxy: on the VPN or an office network the server answers, off it doesn't,
+    which is exactly the online/offline distinction the indicator needs. Never
+    raises — any failure is treated as "disconnected".
+    """
+    host = get_network_drive_host()
+    if not host:
+        return False
+    try:
+        with socket.create_connection((host, _SMB_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def render_sidebar_connection_status(*, page_key: str | None = None) -> None:
+    """Render the connected/disconnected network-drive indicator in the sidebar.
+
+    Rendered last inside `with st.sidebar:` (wrapped in a keyed container) so it
+    pins to the bottom-left corner via CSS. A green dot + "Connected" means the
+    shared drive is reachable; a red dot + warning + "Disconnected" means it
+    isn't. Hover shows guidance via the element's `title` tooltip (same
+    native-tooltip pattern as the sidebar pin links).
+
+    The check is re-run on each page load/reload and whenever the user
+    navigates to a different page (pass the current page's title as `page_key`),
+    but is reused across same-page reruns so widget interactions don't repeat
+    the socket probe — and so an offline user isn't charged the connect timeout
+    on every interaction. Pass `page_key=None` to force a fresh check.
+    """
+    cache = st.session_state.get("_conn_status_cache")
+    if (
+        page_key is None
+        or not isinstance(cache, dict)
+        or cache.get("page") != page_key
+    ):
+        connected = is_network_drive_connected()
+        cache = {"page": page_key, "connected": connected}
+        st.session_state["_conn_status_cache"] = cache
+
+    connected = bool(cache["connected"])
+    if connected:
+        cls = "cna-conn-online"
+        label = "Connected"
+        tooltip = NETWORK_DRIVE_TOOLTIP_ONLINE
+        warn = ""
+    else:
+        cls = "cna-conn-offline"
+        label = "Disconnected"
+        tooltip = NETWORK_DRIVE_TOOLTIP_OFFLINE
+        warn = '<span class="cna-conn-warn">&#9888;</span>'
+
+    st.markdown(
+        f'<div class="cna-conn-status {cls}" title="{html.escape(tooltip)}">'
+        f'<span class="cna-conn-dot"></span>'
+        f'<span class="cna-conn-label">{label}</span>'
+        f"{warn}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
 
 @st.cache_data
 def get_global_css() -> str:
@@ -642,6 +761,75 @@ def get_global_css() -> str:
         [data-testid="stPageLink"] a[aria-current="page"] p {
         color: var(--cna-teal-dark) !important;
         font-weight: 600 !important;
+    }
+
+    /* Network-drive connection indicator — small pill pinned to the very
+       bottom-left corner of the sidebar. Green dot + "Connected" when the
+       shared drive is reachable; red dot + warning + "Disconnected" when it
+       isn't. Native `title` tooltip carries the guidance text (same pattern as
+       the sidebar pin links).
+
+       Pinned with position:fixed rather than flex tricks: fixed escapes the
+       sidebar's content scroll/overflow and rides the sidebar's own transform
+       (so it hides with the sidebar when collapsed and stays put in the corner
+       regardless of how much nav content sits above it). We reserve a little
+       padding at the bottom of the scroll area so a long nav list never hides
+       behind the pill. */
+    [data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {
+        padding-bottom: 2.25rem;
+    }
+    [data-testid="stSidebar"] .st-key-cna_conn_status_wrap {
+        position: fixed;
+        left: 1.4rem;
+        bottom: 1.6rem;
+        z-index: 6;
+        margin: 0 !important;
+        width: auto !important;
+        min-width: 0 !important;
+    }
+    [data-testid="stSidebar"] .cna-conn-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.28rem 0.6rem;
+        margin: 0;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        font-family: var(--cna-body);
+        font-weight: 600;
+        font-size: 0.78rem;
+        line-height: 1;
+        cursor: default;
+        user-select: none;
+    }
+    [data-testid="stSidebar"] .cna-conn-status .cna-conn-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        flex: 0 0 auto;
+    }
+    [data-testid="stSidebar"] .cna-conn-online {
+        color: var(--cna-green-dark);
+        background: var(--cna-sky-lite);
+        border-color: var(--cna-rule-soft);
+    }
+    [data-testid="stSidebar"] .cna-conn-online .cna-conn-dot {
+        background: var(--cna-green);
+        box-shadow: 0 0 0 3px rgba(0, 177, 154, 0.18);
+    }
+    [data-testid="stSidebar"] .cna-conn-offline {
+        color: var(--cna-danger-dark);
+        background: #FBECEE;
+        border-color: #F2C7CC;
+    }
+    [data-testid="stSidebar"] .cna-conn-offline .cna-conn-dot {
+        background: var(--cna-danger);
+        box-shadow: 0 0 0 3px rgba(214, 69, 80, 0.18);
+    }
+    [data-testid="stSidebar"] .cna-conn-status .cna-conn-warn {
+        font-size: 0.9rem;
+        line-height: 1;
+        margin-left: -0.05rem;
     }
 
     /* ===================================================================
@@ -2069,9 +2257,20 @@ def load_user_fullname_map(tasks_xlsx_path: str | None = None) -> dict[str, str]
     return mapping
 
 def get_full_name_for_user(tasks_xlsx_path: str | None, user_login: str) -> str:
-    """Get the full name for a given user login. If not found, return the login."""
+    """Get the full name for a given user login.
+
+    Resolution order: the network full-name map, then the locally-cached profile
+    row (offline fallback for the current user), then the raw login as a last
+    resort. The cache fallback stops a disconnected user's entries from being
+    saved under their Windows username instead of their name."""
     mapping = load_user_fullname_map(tasks_xlsx_path)
-    return mapping.get(str(user_login).strip().lower(), user_login)
+    name = mapping.get(str(user_login).strip().lower())
+    if name:
+        return name
+    cached = _cached_profile_value(user_login, "Full Name", "FullName", "Name")
+    if cached:
+        return str(cached)
+    return user_login
 
 @st.cache_data(ttl=3600)
 def load_all_user_full_names(
@@ -2155,6 +2354,36 @@ def _normalize_login_key(value: object) -> str:
     if "@" in text:
         text = text.split("@")[0]
     return text.strip()
+
+
+def _cached_profile_value(user_login: str, *field_aliases: str):
+    """Offline fallback: return a field from the locally-cached current-user row.
+
+    The local cache (written by startup when connected — see user_profile_cache)
+    holds only the CURRENT OS user's row, so this resolves only when `user_login`
+    is the current user and only matches by normalized login. Returns the first
+    non-empty aliased field, or None when there's no usable cached value.
+
+    This is what keeps a disconnected user's identity (full name, department,
+    admin/developer flags) resolving to their real values instead of the raw
+    Windows login when the network users.parquet can't be read.
+    """
+    if user_profile_cache is None:
+        return None
+    if _normalize_login_key(user_login) != _normalize_login_key(get_os_user()):
+        return None
+    try:
+        row = user_profile_cache.load_current_user_profile()
+    except Exception:
+        return None
+    if not row:
+        return None
+    normalized = {_normalize_column_name(str(k)): v for k, v in row.items()}
+    for alias in field_aliases:
+        value = normalized.get(_normalize_column_name(alias))
+        if value is not None and str(value).strip() != "":
+            return value
+    return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -2247,9 +2476,17 @@ def get_user_department(
             users_parquet = Path(config.PERSONNEL_DIR) / "users.parquet"
             if users_parquet.exists():
                 fresh_df = pd.read_parquet(users_parquet)
-                return _resolve(fresh_df)
+                resolved = _resolve(fresh_df)
+                if resolved:
+                    return resolved
         except Exception:
             pass
+
+    # Offline fallback: when the network table couldn't resolve a department,
+    # use the current user's last-known department from the local cache.
+    cached_dept = _cached_profile_value(user_login, "Department", "Dept")
+    if cached_dept:
+        return str(cached_dept)
 
     return ""
 
@@ -2263,7 +2500,10 @@ def is_user_admin(user_login: str, users_df: pd.DataFrame | None = None) -> bool
 
     df = users_df.copy() if isinstance(users_df, pd.DataFrame) else load_users_table()
     if df.empty:
-        return False
+        # Offline fallback: network table unavailable — trust the current user's
+        # last-known admin flag from the local cache.
+        cached = _cached_profile_value(user_login, "isAdmin", "Admin", "IsAdministrator")
+        return _coerce_bool_like(cached) if cached is not None else False
 
     user_col = _find_column_by_alias(
         df,
@@ -2301,8 +2541,167 @@ def is_user_admin(user_login: str, users_df: pd.DataFrame | None = None) -> bool
 
 
 def is_current_user_admin() -> bool:
-    """Return True when the current OS user is marked admin in users.parquet."""
-    return is_user_admin(get_os_user())
+    """Return True when the current user's EFFECTIVE role is admin or developer.
+
+    Honors the developer-only 'view as' override (see effective_role)."""
+    return effective_role() in {"admin", "developer"}
+
+
+def is_user_developer(user_login: str, users_df: pd.DataFrame | None = None) -> bool:
+    """Return True when the user is marked as a developer in users.parquet.
+
+    Developer is a separate flag from admin (a Tasks/Users-sheet "Developer?" column).
+    Used to gate developer-only controls (e.g. the auto-email pilot/test settings).
+    """
+    lookup_user = str(user_login).strip().lower()
+    lookup_key = _normalize_login_key(user_login)
+    if not lookup_user:
+        return False
+
+    df = users_df.copy() if isinstance(users_df, pd.DataFrame) else load_users_table()
+    if df.empty:
+        # Offline fallback: network table unavailable — trust the current user's
+        # last-known developer flag from the local cache.
+        cached = _cached_profile_value(user_login, "Developer", "IsDeveloper", "Dev")
+        return _coerce_bool_like(cached) if cached is not None else False
+
+    user_col = _find_column_by_alias(
+        df,
+        ["User", "UserLogin", "Login", "Username", "User Name", "NetworkLogin", "SamAccountName"],
+    )
+    if not user_col:
+        return False
+
+    user_series = df[user_col].astype(str).str.strip().str.lower()
+    user_key_series = user_series.map(_normalize_login_key)
+    matched = df[(user_series == lookup_user) | (user_key_series == lookup_key)]
+    if matched.empty:
+        return False
+
+    dev_col = _find_column_by_alias(matched, ["Developer", "IsDeveloper", "Is Developer", "Dev"])
+    if not dev_col:
+        return False
+    return bool(matched[dev_col].map(_coerce_bool_like).any())
+
+
+def is_current_user_developer() -> bool:
+    """Return True when the current user's EFFECTIVE role is developer.
+
+    Honors the developer-only 'view as' override (see effective_role)."""
+    return effective_role() == "developer"
+
+
+def is_actual_developer() -> bool:
+    """Return True when the OS user is flagged developer in users.parquet, IGNORING
+    any 'view as' override. Gate the developer-only view-as control with this so a
+    developer previewing as 'user' can always switch back."""
+    return is_user_developer(get_os_user())
+
+
+def _view_as_override() -> str | None:
+    """Return the developer 'view as' role from session state, or None.
+
+    Safe to call outside a Streamlit runtime (returns None)."""
+    try:
+        value = st.session_state.get("_dev_view_as_role")
+    except Exception:
+        return None
+    return value if value in {"user", "admin", "developer"} else None
+
+
+def _role_for_login(login: str) -> str:
+    """Resolve a specific user's role from their users.parquet flags."""
+    if is_user_developer(login):
+        return "developer"
+    if is_user_admin(login):
+        return "admin"
+    return "user"
+
+
+def effective_role() -> str:
+    """Return the current user's effective role: 'user' | 'admin' | 'developer'.
+
+    The actual role is the highest flag set (developer > admin > user). A developer
+    may temporarily 'view as' a plain role OR impersonate a specific user via
+    Settings; those overrides are honored ONLY for an actual developer, so a
+    non-developer can never escalate through session state. A specific-user
+    impersonation takes precedence over a plain role override."""
+    login = get_os_user()
+    if not is_user_developer(login):
+        return _role_for_login(login)
+    impersonated = _view_as_user_override()
+    if impersonated:
+        return _role_for_login(impersonated)
+    return _view_as_override() or "developer"
+
+
+def set_view_as_role(role: str) -> None:
+    """Set the developer role 'view as' override (clears any specific-user
+    impersonation). No-op unless the OS user is an actual developer."""
+    if not is_actual_developer():
+        return
+    try:
+        if role in {"user", "admin", "developer"}:
+            st.session_state["_dev_view_as_role"] = role
+            st.session_state.pop("_dev_view_as_user", None)
+    except Exception:
+        pass
+
+
+def _view_as_user_override() -> str | None:
+    """Return the impersonated user login from session state, or None. Safe headless."""
+    try:
+        value = st.session_state.get("_dev_view_as_user")
+    except Exception:
+        return None
+    value = str(value).strip() if value else ""
+    return value or None
+
+
+def view_as_user_login() -> str | None:
+    """Return the login the developer is currently impersonating, or None.
+
+    Only meaningful for an actual developer (else None)."""
+    if not is_actual_developer():
+        return None
+    return _view_as_user_override()
+
+
+def set_view_as_user(login: str) -> None:
+    """Impersonate a specific user (inherit their permissions), clearing any plain
+    role override. No-op unless the OS user is an actual developer."""
+    if not is_actual_developer():
+        return
+    try:
+        login = str(login or "").strip()
+        if login:
+            st.session_state["_dev_view_as_user"] = login
+            st.session_state.pop("_dev_view_as_role", None)
+    except Exception:
+        pass
+
+
+def list_user_logins() -> list[tuple[str, str]]:
+    """Return [(login, full_name), ...] for all users in users.parquet, sorted by name."""
+    df = load_users_table()
+    if df.empty:
+        return []
+    user_col = _find_column_by_alias(
+        df,
+        ["User", "UserLogin", "Login", "Username", "User Name", "NetworkLogin", "SamAccountName"],
+    )
+    if not user_col:
+        return []
+    name_col = _find_column_by_alias(df, ["Full Name", "FullName", "Name"])
+    out: list[tuple[str, str]] = []
+    for _, row in df.iterrows():
+        login = str(row.get(user_col) or "").strip()
+        if not login:
+            continue
+        name = str(row.get(name_col) or "").strip() if name_col else ""
+        out.append((login, name or login))
+    out.sort(key=lambda item: item[1].lower())
+    return out
 
 
 @st.cache_data(ttl=3600)
@@ -2670,3 +3069,72 @@ def save_time_allocation_settings(settings: dict) -> Path:
     tmp.replace(path)
     load_time_allocation_settings.clear()
     return path
+
+
+# ---------------------------------------------------------------------------
+# Automated Time Allocation reminder emails
+#
+# Per-department opt-in settings for the scheduled "you have weekdays with no
+# time entries" reminder (sent by CODE - do not open/notify_missing_time.py).
+# Stored as an "auto_email" block inside time_allocation_settings.json so it
+# rides the same atomic-write + cache-clear path as the rest of the Time
+# Allocation Tool admin settings. Every department defaults to OFF — managers
+# opt a department in from the Time Allocation > Admin Settings tab.
+# ---------------------------------------------------------------------------
+DEFAULT_AUTO_EMAIL_FROM = "CNAConsole@clarknationalaccounts.com"
+AUTO_EMAIL_INTERVALS = ("weekly", "biweekly")
+AUTO_EMAIL_SEND_DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri")
+
+
+def load_auto_email_settings() -> dict:
+    """Return the auto-email reminder settings (from time_allocation_settings.json).
+
+    Shape: {from_address, live, test_recipient, departments: {dept: {enabled,
+    interval, send_day}}}. Missing/blank values fall back to safe defaults; a
+    missing or disabled department simply means "no reminders for that team".
+    """
+    settings = load_time_allocation_settings()
+    raw = settings.get("auto_email") if isinstance(settings, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    departments = raw.get("departments")
+    departments = departments if isinstance(departments, dict) else {}
+    return {
+        "from_address": str(raw.get("from_address") or DEFAULT_AUTO_EMAIL_FROM).strip(),
+        "live": bool(raw.get("live", False)),
+        "test_recipient": str(raw.get("test_recipient") or "").strip(),
+        "departments": departments,
+    }
+
+
+def save_auto_email_settings(auto_email: dict) -> Path:
+    """Persist auto-email reminder settings, preserving other Time Allocation settings."""
+    settings = load_time_allocation_settings()
+    settings = dict(settings) if isinstance(settings, dict) else {}
+    settings["auto_email"] = auto_email if isinstance(auto_email, dict) else {}
+    return save_time_allocation_settings(settings)
+
+
+def normalize_auto_email_department(cfg: object) -> dict:
+    """Coerce one department's stored auto-email config into a complete, valid dict.
+
+    Cadence is weekly-only and the send day is always Friday (the interval is
+    forced to 'weekly' and send_day to 'Fri'; any legacy values are ignored)."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "interval": "weekly",
+        "send_day": "Fri",
+        "manager_recap": bool(cfg.get("manager_recap", False)),
+    }
+
+
+def list_departments() -> list[str]:
+    """Return sorted distinct non-empty department names from users.parquet."""
+    df = load_users_table()
+    if df.empty:
+        return []
+    col = _find_column_by_alias(df, ["Department", "Dept"])
+    if not col:
+        return []
+    values = df[col].dropna().astype(str).str.strip()
+    return sorted({v for v in values if v})

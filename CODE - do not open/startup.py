@@ -250,6 +250,7 @@ def load_users_excel(path: Path) -> pd.DataFrame:
         ("Manager", ["manager", "manager name"]),
         ("ManagerEmployeeNumber", ["manageremployeenumber", "manager employee number", "manager id"]),
         ("isAdmin", ["isadmin", "is admin", "admin", "isadministrator", "is administrator"]),
+        ("Developer", ["developer", "developer?", "isdeveloper", "is developer", "dev"]),
         ("User", ["user", "user login", "username", "login", "samaccountname"]),
     ]
 
@@ -269,6 +270,7 @@ def load_users_excel(path: Path) -> pd.DataFrame:
     out["StartDate"] = pd.to_datetime(out["StartDate"], errors="coerce")
     out["IsManager"] = out["IsManager"].map(_to_flag).astype(int)
     out["isAdmin"] = out["isAdmin"].map(_to_flag).astype(int)
+    out["Developer"] = out["Developer"].map(_to_flag).astype(int)
 
     # Fill missing full-name values from First/Last when possible.
     first = out["First Name"].fillna("")
@@ -368,6 +370,24 @@ def main() -> None:
             LOGGER.info("Saved users data: users.parquet")
     except Exception as e:
         LOGGER.error("Failed to load users Excel: %s", e)
+    # Cache the current user's own row locally as an offline fallback. Reads the
+    # authoritative network users.parquet (refreshed just above when connected) so
+    # the local copy mirrors what the app reads online. When the share is
+    # unreachable this read fails and the previous cache is left intact — which is
+    # exactly the offline case the cache exists to cover. Best-effort: never blocks
+    # startup. See user_profile_cache.py and utils._cached_profile_value.
+    try:
+        import user_profile_cache
+        network_users_df = pd.read_parquet(output_dir / "users.parquet")
+        if user_profile_cache.save_current_user_profile(network_users_df):
+            LOGGER.info("Refreshed local user profile cache for '%s'.", get_os_user())
+        else:
+            LOGGER.info(
+                "Current user '%s' not found in users.parquet; local profile cache left unchanged.",
+                get_os_user(),
+            )
+    except Exception as e:
+        LOGGER.warning("Could not refresh local user profile cache: %s", e)
     LOGGER.info("Startup check complete.")
 
 if __name__ == "__main__":

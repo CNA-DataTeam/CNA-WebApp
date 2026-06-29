@@ -19,6 +19,7 @@ Output schema:
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import time
 import uuid
@@ -35,6 +36,7 @@ from streamlit_calendar import calendar as st_calendar
 
 import config
 import utils
+import time_allocation_store as ta_store
 
 LOGGER = utils.get_page_logger("Time Allocation Tool")
 PAGE_TITLE = utils.get_registry_page_title(__file__, "Time Allocation Tool")
@@ -76,20 +78,23 @@ _TA_COMPACT_CSS = """
     font-size: 0.85rem !important;
     padding: 0.3rem 0.55rem !important;
 }
-/* Bordered card per entry */
+/* Default bordered card (admin views, dialogs) — unchanged faint tint. Input-row cards
+   are restyled below, scoped to the rows that carry .ta-row-marker. */
 [data-testid="stVerticalBlockBorderWrapper"] {
     padding: 0.55rem 0.75rem !important;
     border-radius: 8px !important;
     background-color: rgba(0, 177, 158, 0.04);
 }
-/* Header row that sits above the entry cards */
+/* --- Column header row above the entry cards: table-style head ----------- */
 .ta-entry-col-header {
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: var(--cna-green);
-    padding: 0 0.75rem;
+    font-family: var(--cna-body);
+    font-size: 0.66rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--cna-navy-soft);
+    padding: 0 0.85rem 5px;
 }
-/* Tighten % caption inside an entry card */
 .ta-entry-pct {
     font-size: 0.95rem;
     font-weight: 600;
@@ -101,35 +106,184 @@ _TA_COMPACT_CSS = """
     font-size: 0.72rem;
     color: rgba(49, 51, 63, 0.65);
 }
-/* Saved vs draft input rows. Each row carries a hidden marker span; we keep it in
-   the DOM (for :has()) but pull it out of layout so it adds no gap. A row with the
-   .ta-row-saved marker gets a darker teal card fill and a thicker teal border (vs the
-   draft's default 1px grey border) so saved rows read as clearly distinct — styling
-   the bordered card (the PARENT of the keyed block), not the inputs. */
+/* --- Input-row cards (scoped via .ta-row-marker) -------------------------- */
+/* Refined white card: hairline border, rounded, soft shadow, hover lift, plus a colored
+   LEFT STATUS BAR — green = saved, amber = unsaved/draft (with a faint amber wash). */
+[data-testid="stVerticalBlockBorderWrapper"]:has(.ta-row-marker) {
+    position: relative;
+    padding: 0.7rem 0.9rem !important;
+    border: 1px solid var(--cna-rule) !important;
+    border-left: 4px solid var(--cna-muted) !important;
+    border-radius: 11px !important;
+    background-color: var(--cna-white) !important;
+    box-shadow: 0 2px 8px rgba(0, 46, 101, 0.06) !important;
+    transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:has(.ta-row-marker):hover {
+    box-shadow: 0 6px 16px rgba(0, 46, 101, 0.12) !important;
+    transform: translateY(-1px);
+}
+/* Saved row — green left bar */
+[data-testid="stVerticalBlockBorderWrapper"]:has(.ta-row-saved) {
+    border-left-color: var(--cna-green) !important;
+}
+/* Draft / unsaved row — amber left bar + faint wash to flag pending changes */
+[data-testid="stVerticalBlockBorderWrapper"]:has(.ta-row-marker):not(:has(.ta-row-saved)) {
+    border-left-color: #E0A100 !important;
+    background-color: rgba(224, 161, 0, 0.05) !important;
+}
+/* Hide the row marker element itself (kept in DOM only for the :has() hooks above) */
 [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .ta-row-marker) {
     display: none !important;
 }
-[data-testid="stVerticalBlockBorderWrapper"]:has(.ta-row-saved) {
-    background-color: rgba(0, 177, 158, 0.16) !important;
-    border: 2px solid rgba(0, 177, 158, 0.55) !important;
+/* Green focus ring on the row's selects */
+[data-testid="stVerticalBlockBorderWrapper"]:has(.ta-row-marker) [data-baseweb="select"] > div:focus-within {
+    border-color: var(--cna-green) !important;
+    box-shadow: 0 0 0 2px rgba(0, 177, 154, 0.18) !important;
 }
-/* Minimal timeframe-total line under the calendar (per-day totals live in the
-   calendar squares themselves, as ::after badges built in render_input_day_selector) */
-.ta-hours-summary {
+/* Add Row — dashed "ghost" card (button restyle, scoped to its keyed container) */
+.st-key-ta_add_row_wrap button {
+    border: 1.5px dashed var(--cna-rule) !important;
+    background: transparent !important;
+    color: var(--cna-teal) !important;
+    border-radius: 11px !important;
+    padding: 0.55rem !important;
+    font-weight: 600 !important;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.st-key-ta_add_row_wrap button:hover {
+    background: rgba(0, 177, 154, 0.07) !important;
+    border-color: var(--cna-green) !important;
+    color: var(--cna-green) !important;
+}
+/* Timeframe-total callout — sits above the calendar's top-right corner (rendered into
+   the header row's right column). Per-day totals still live in the calendar squares as
+   ::after badges built in render_input_day_selector. */
+.ta-hours-callout-wrap {
     display: flex;
+    justify-content: flex-end;
     align-items: center;
-    font-size: 0.74rem;
-    color: rgba(49, 51, 63, 0.7);
-    margin: 0.15rem 0 0.45rem;
+    height: 100%;
+}
+.ta-hours-callout {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    padding: 7px 16px;
+    background: var(--cna-sky-lite);
+    border: 1px solid var(--cna-rule);
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(0, 46, 101, 0.07);
+}
+.ta-hours-callout-label {
+    font-family: var(--cna-body);
+    font-size: 0.66rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--cna-muted);
+    line-height: 1;
+}
+.ta-hours-callout-value {
+    font-family: var(--cna-heading);
+    font-size: 1.55rem;
+    font-weight: 700;
+    line-height: 1.05;
+    color: var(--cna-green);
+}
+/* Channel color legend shown under the calendar (only channels present in the view) */
+.ta-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.7rem;
+    align-items: center;
+    margin: 0.1rem 0 0.4rem;
     padding: 0 0.15rem;
 }
-.ta-hours-total {
-    color: var(--cna-green);
-    font-weight: 600;
+.ta-legend-chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.68rem;
+    font-weight: 500;
+    color: rgba(49, 51, 63, 0.75);
+    white-space: nowrap;
 }
-.ta-hours-total b {
-    color: var(--cna-green);
-    font-weight: 700;
+.ta-legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    margin-right: 0.32rem;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+/* --- Calendar view selector: themed segmented (pill) control ------------------
+   Restyles the st.radio (inside the keyed container .st-key-ta_view_toggle) into a
+   connected pill group with a green selected segment, matching the CNA theme. Scoped to
+   the container class so no other radio is touched. The native radio circle is hidden;
+   the <label> stays the click target (BaseWeb drives selection from the label). */
+.st-key-ta_view_toggle {
+    display: flex;
+    justify-content: flex-start;
+}
+.st-key-ta_view_toggle [role="radiogroup"] {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--cna-sky-lite);
+    border: 1px solid var(--cna-rule);
+    border-radius: 999px;
+    padding: 3px;
+    box-shadow: inset 0 1px 2px rgba(0, 46, 101, 0.06);
+}
+.st-key-ta_view_toggle [role="radiogroup"] > label {
+    margin: 0 !important;
+    padding: 5px 16px !important;
+    gap: 0 !important;
+    border-radius: 999px;
+    cursor: pointer;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    text-align: center;
+    font-family: var(--cna-body);
+    font-size: 0.8rem;
+    font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+/* Hide the native radio circle (first child) */
+.st-key-ta_view_toggle [role="radiogroup"] > label > div:first-child {
+    display: none !important;
+}
+/* Keep nested label text sized to the segment */
+.st-key-ta_view_toggle [role="radiogroup"] > label * {
+    font-size: inherit !important;
+    font-weight: inherit !important;
+}
+/* Unselected segment text — navy on the light track */
+.st-key-ta_view_toggle [role="radiogroup"] > label,
+.st-key-ta_view_toggle [role="radiogroup"] > label * {
+    color: var(--cna-navy-soft) !important;
+}
+/* Hover (unselected) — green text + faint green tint */
+.st-key-ta_view_toggle [role="radiogroup"] > label:hover {
+    background: rgba(0, 177, 154, 0.10);
+}
+.st-key-ta_view_toggle [role="radiogroup"] > label:hover,
+.st-key-ta_view_toggle [role="radiogroup"] > label:hover * {
+    color: var(--cna-green) !important;
+}
+/* Selected segment — filled CNA green */
+.st-key-ta_view_toggle [role="radiogroup"] > label:has(input:checked) {
+    background: var(--cna-green);
+    box-shadow: 0 2px 6px rgba(0, 177, 154, 0.30);
+}
+/* Selected segment text — white (wins over unselected + hover via higher specificity) */
+.st-key-ta_view_toggle [role="radiogroup"] > label:has(input:checked),
+.st-key-ta_view_toggle [role="radiogroup"] > label:has(input:checked) *,
+.st-key-ta_view_toggle [role="radiogroup"] > label:has(input:checked):hover,
+.st-key-ta_view_toggle [role="radiogroup"] > label:has(input:checked):hover * {
+    color: var(--cna-white) !important;
 }
 </style>
 """
@@ -210,6 +364,40 @@ CHANNEL_OPTIONS = [
     "Express: Full",
 ]
 
+# Calendar event colors grouped by channel TYPE — the trailing word of the channel
+# (after the colon), or the whole name for Resupply. Five on-brand buckets so the grid
+# reads by work type at a glance, regardless of the Consolidated/Express prefix:
+#   Resupply / Smallwares / Equipment / Rollout / Full.
+# The calendar runs in an iframe that can't see the app's --cna-* CSS variables, so these
+# are spelled out as literal hex. Drawn from the CNA palette (Green / Turquoise / Teal /
+# steel-blue / Navy). (background, text) pairs; text is chosen for contrast.
+CHANNEL_TYPE_COLORS: dict[str, tuple[str, str]] = {
+    "Resupply": ("#00B19A", "#ffffff"),
+    "Smallwares": ("#08B4C5", "#ffffff"),
+    "Equipment": ("#06828D", "#ffffff"),
+    "Rollout": ("#3F6FB0", "#ffffff"),
+    "Full": ("#002E65", "#ffffff"),
+}
+# Fallback for blank / legacy channel values that match no known type bucket.
+CHANNEL_COLOR_DEFAULT: tuple[str, str] = ("#5B6B7B", "#ffffff")
+
+
+def _channel_type(channel: object) -> str:
+    """Classify a channel into its color-bucket key. Returns the segment after the last
+    colon ('Consolidated: Full' -> 'Full', 'Express: Smallwares' -> 'Smallwares') or the
+    whole name when there's no colon ('Resupply'), provided it's a known bucket; else ''.
+    """
+    text = str(channel or "").strip()
+    if not text:
+        return ""
+    tail = text.split(":")[-1].strip()
+    return tail if tail in CHANNEL_TYPE_COLORS else ""
+
+
+def _channel_color(channel: object) -> tuple[str, str]:
+    """Return the (background, text) color pair for a channel value, bucketed by type."""
+    return CHANNEL_TYPE_COLORS.get(_channel_type(channel), CHANNEL_COLOR_DEFAULT)
+
 # Hour/minute dropdown options for the per-row Time input.
 TIME_HOUR_OPTIONS = list(range(0, 13))
 TIME_MINUTE_OPTIONS = [0, 15, 30, 45]
@@ -253,26 +441,17 @@ def _empty_to_none(value: object) -> str | None:
 
 def _get_time_allocation_user_partition(user_login: str, full_name: str = "") -> str:
     """Return a stable folder-safe user key for time-allocation storage."""
-    login_key = _normalize_login(user_login)
-    if login_key:
-        return config.sanitize_log_user(login_key)
-    fallback = str(full_name or "").strip().lower().replace(" ", "_")
-    return config.sanitize_log_user(fallback or "unknown_user")
+    return ta_store.user_partition(user_login, full_name)
 
 
 def _get_time_allocation_month_dir(base_dir: Path, entry_date: date) -> Path:
     """Return the year/month partition directory for an entry date."""
-    return base_dir / f"year={entry_date.year:04d}" / f"month={entry_date.month:02d}"
+    return ta_store.month_dir(base_dir, entry_date)
 
 
 def _get_time_allocation_daily_file(base_dir: Path, user_login: str, full_name: str, entry_date: date) -> Path:
     """Return the one-file-per-day parquet path for a user/date."""
-    user_partition = _get_time_allocation_user_partition(user_login, full_name)
-    return (
-        _get_time_allocation_month_dir(base_dir, entry_date)
-        / f"user={user_partition}"
-        / f"time_allocation_{entry_date:%Y%m%d}.parquet"
-    )
+    return ta_store.daily_file(base_dir, user_login, full_name, entry_date)
 
 
 def _iter_time_allocation_files(base_dir: Path) -> list[Path]:
@@ -314,97 +493,15 @@ def _iter_user_window_candidate_files(
     window_start: date,
     window_end: date,
 ) -> list[Path]:
-    """Candidate parquet files for one user across a date window.
-
-    Cheaper than calling a per-day helper in a loop: each day's targeted per-user
-    partition file is resolved with a single ``is_file()`` stat (no recursive
-    month-dir rglob across every user's partitions), and the legacy flat files at
-    the directory root are listed ONCE — indexed by the date parsed from each
-    filename — instead of re-globbing the whole root once per day. Over a UNC
-    share that collapses N recursive month walks + N full-root listings into N
-    stats + one root listing. Returns the same files the per-day path returned,
-    so the downstream user/date filtering and REPLACE semantics are unchanged.
-    """
-    files: list[Path] = []
-    seen: set[str] = set()
-
-    # One top-level listing for legacy flat files, indexed by entry date, so the
-    # root isn't re-enumerated for every day in the window.
-    prefix = "time_allocation_"
-    legacy_by_day: dict[date, list[Path]] = {}
-    if base_dir.exists():
-        for path in base_dir.glob(f"{prefix}*.parquet"):
-            if not path.is_file():
-                continue
-            token = path.stem[len(prefix):len(prefix) + 8]
-            try:
-                legacy_day = date(int(token[:4]), int(token[4:6]), int(token[6:8]))
-            except (ValueError, IndexError):
-                continue
-            legacy_by_day.setdefault(legacy_day, []).append(path)
-
-    current_day = window_start
-    while current_day <= window_end:
-        # Targeted per-user partitioned file for the day (single stat).
-        user_path = _get_time_allocation_daily_file(base_dir, user_login, full_name, current_day)
-        if user_path.is_file():
-            path_key = str(user_path).lower()
-            if path_key not in seen:
-                files.append(user_path)
-                seen.add(path_key)
-        # Legacy flat files for the day, from the one-time root listing.
-        for path in sorted(legacy_by_day.get(current_day, []), reverse=True):
-            path_key = str(path).lower()
-            if path_key not in seen:
-                files.append(path)
-                seen.add(path_key)
-        current_day += timedelta(days=1)
-
-    return files
+    """Candidate parquet files for one user across a date window (see time_allocation_store)."""
+    return ta_store.iter_user_window_candidate_files(
+        base_dir, user_login, full_name, window_start, window_end
+    )
 
 
 def _read_time_allocation_exports_from_files(file_paths: list[Path], base_dir: Path) -> pd.DataFrame:
     """Read and normalize saved time-allocation files into one DataFrame."""
-    if not file_paths:
-        return pd.DataFrame()
-
-    frames: list[pd.DataFrame] = []
-    for file_path in file_paths:
-        try:
-            one = pd.read_parquet(file_path)
-        except Exception as exc:
-            LOGGER.warning("Skipping unreadable export file '%s': %s", file_path, exc)
-            continue
-        if one.empty:
-            continue
-        try:
-            source_file = str(file_path.relative_to(base_dir))
-        except ValueError:
-            source_file = file_path.name
-        one["Source File"] = source_file
-        frames.append(one)
-
-    if not frames:
-        return pd.DataFrame()
-
-    df = pd.concat(frames, ignore_index=True)
-    expected_cols = [
-        "Entry Date",
-        "User",
-        "Full Name",
-        "Department",
-        "Account",
-        "Customer Code",
-        "Time",
-        "Channel",
-    ]
-    for col in expected_cols:
-        if col not in df.columns:
-            df[col] = pd.NA
-    if "Source File" not in df.columns:
-        df["Source File"] = ""
-    df["Entry Date"] = pd.to_datetime(df["Entry Date"], errors="coerce").dt.date
-    return df[expected_cols + ["Source File"]]
+    return ta_store.read_exports_from_files(file_paths, base_dir)
 
 
 # How many per-user-day files the dataset scanner reads concurrently. The export
@@ -633,33 +730,12 @@ def _invalidate_admin_export_tables() -> None:
 
 
 def _normalize_login(value: object) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return ""
-    text = text.replace("/", "\\")
-    if "\\" in text:
-        text = text.split("\\")[-1]
-    if "@" in text:
-        text = text.split("@")[0]
-    return text.strip()
+    return ta_store.normalize_login(value)
 
 
 def _filter_user_exports(exports_df: pd.DataFrame, user_login: str, full_name: str) -> pd.DataFrame:
     """Return exports filtered to the current user by login and full-name fallback."""
-    if exports_df.empty:
-        return exports_df.copy()
-
-    login_key = _normalize_login(user_login)
-    full_name_key = str(full_name or "").strip().lower()
-    user_series = exports_df["User"].fillna("").astype(str).map(_normalize_login)
-    mask = user_series.eq(login_key)
-    if full_name_key:
-        full_name_series = exports_df["Full Name"].fillna("").astype(str).str.strip().str.lower()
-        mask = mask | full_name_series.eq(full_name_key)
-    user_df = exports_df.loc[mask].copy()
-    user_df["Entry Date"] = pd.to_datetime(user_df["Entry Date"], errors="coerce").dt.date
-    user_df = user_df[user_df["Entry Date"].notna()].copy()
-    return user_df
+    return ta_store.filter_user_exports(exports_df, user_login, full_name)
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -673,22 +749,9 @@ def load_time_allocation_user_window(
     """Load one user's saved allocations for a bounded date window."""
     window_start = _parse_date_value(window_start_iso)
     window_end = _parse_date_value(window_end_iso)
-    if window_start is None or window_end is None or window_end < window_start:
+    if window_start is None or window_end is None:
         return pd.DataFrame()
-
-    files = _iter_user_window_candidate_files(
-        base_dir, user_login, full_name, window_start, window_end
-    )
-
-    window_df = _read_time_allocation_exports_from_files(files, base_dir)
-    if window_df.empty:
-        return window_df
-
-    filtered_df = _filter_user_exports(window_df, user_login, full_name)
-    filtered_df = filtered_df[
-        filtered_df["Entry Date"].ge(window_start) & filtered_df["Entry Date"].le(window_end)
-    ].copy()
-    return filtered_df
+    return ta_store.load_user_window(base_dir, user_login, full_name, window_start, window_end)
 
 
 def _coerce_account(value: object, account_options: list[str]) -> str:
@@ -1000,30 +1063,51 @@ def _is_editable_day(day: date) -> bool:
 
 @st.cache_data(ttl=30)
 def _build_calendar_events(
-    window_rows: tuple[tuple[str, str, int], ...],
+    window_rows: tuple[tuple[str, str, int, str], ...],
+    compact: bool = False,
 ) -> list[dict[str, object]]:
-    """Build calendar event payload from normalized window rows."""
+    """Build calendar event payload from normalized window rows.
+
+    Each event is colored by its channel TYPE (see ``CHANNEL_TYPE_COLORS``) so the grid
+    reads by work type at a glance. In ``compact`` mode every event becomes a small
+    textless color dot — useful for the multi-week "This Period" view; otherwise block
+    height scales with logged hours (0.5-hour buckets).
+    """
     events: list[dict[str, object]] = []
-    for row_idx, (entry_day_iso, account_name, seconds) in enumerate(window_rows):
+    for row_idx, (entry_day_iso, account_name, seconds, channel) in enumerate(window_rows):
         hours_value = max(0, int(seconds)) / 3600.0
         height_units = min(24, max(1, int(round(hours_value * 2))))  # 0.5-hour buckets
         day_value = _parse_date_value(entry_day_iso)
         if day_value is None:
             continue
 
+        bg_color, text_color = _channel_color(channel)
+        class_names = ["ta-entry-event"]
+        if compact:
+            # Compact mode renders each entry as a small colored dot (no text) — the
+            # per-day total badge carries the hours, the dot color carries the type, and a
+            # per-dot ``ta-tip-<idx>`` class drives the hover tooltip (see
+            # _build_dot_tooltip_css). The index matches enumerate(window_rows) so the
+            # tooltip CSS built from the same rows lines up.
+            class_names.extend(["ta-dot", f"ta-tip-{row_idx}"])
+            title = ""
+        else:
+            class_names.append(f"ta-hu-{height_units}")
+            title = f"{account_name} | {hours_value:.2f} hours"
+
         events.append(
             {
                 "id": f"ta-{entry_day_iso}-{row_idx}",
-                "title": f"{account_name} | {hours_value:.2f} hours",
+                "title": title,
                 "start": entry_day_iso,
                 "end": (day_value + timedelta(days=1)).isoformat(),
                 "allDay": True,
                 "display": "block",
-                "backgroundColor": "#00B19E",
-                "borderColor": "#00B19E",
-                "textColor": "#ffffff",
-                "classNames": ["ta-entry-event", f"ta-hu-{height_units}"],
-                "extendedProps": {"entry_date": entry_day_iso},
+                "backgroundColor": bg_color,
+                "borderColor": bg_color,
+                "textColor": text_color,
+                "classNames": class_names,
+                "extendedProps": {"entry_date": entry_day_iso, "channel": str(channel or "")},
             }
         )
     return events
@@ -1519,11 +1603,107 @@ def _build_day_total_badge_css(day_total_seconds: dict[str, int]) -> str:
     return "\n".join(parts)
 
 
+def _build_empty_day_hint_css(empty_day_isos: list[str]) -> str:
+    """Build CSS that gives in-range days with NO logged hours a faint dashed outline that
+    fills the WHOLE cell plus a low-contrast centered ``+`` prompt, so empty days read as
+    "click to add" rather than dead space. The box brightens on hover (reinforcing the
+    hover affordance). Targets specific ``data-date`` cells — padding/out-of-range days are
+    excluded by the caller, so they stay plain.
+
+    The box is one ``::before`` anchored to the day CELL (the ``<td>``, which is
+    ``position: relative`` and always spans the full cell height) — NOT the inner day
+    frame, which FullCalendar caps near its ~48px ``min-height`` in the fixed-height grid,
+    leaving the dashed box covering only the top of the square. ``::before`` (not
+    ``::after``) keeps it clear of the bottom-right total badge (``::after``), which only
+    appears on days that DO have hours, so the two never collide.
+    """
+    if not empty_day_isos:
+        return ""
+    before_sels: list[str] = []
+    hover_sels: list[str] = []
+    for iso in empty_day_isos:
+        day_sel = f'.fc .fc-daygrid-day[data-date="{iso}"]'
+        before_sels.append(f"{day_sel}::before")
+        hover_sels.append(f"{day_sel}:hover::before")
+    box_css = (
+        ", ".join(before_sels)
+        + ' { content: "+"; position: absolute; top: 3px; right: 3px; bottom: 3px;'
+        " left: 3px; display: flex; align-items: center; justify-content: center;"
+        " border: 1px dashed rgba(0, 177, 154, 0.30); border-radius: 6px;"
+        " font-size: 1.25rem; font-weight: 600; color: rgba(0, 177, 154, 0.28);"
+        " pointer-events: none; z-index: 0;"
+        " transition: color 0.15s ease, border-color 0.15s ease; }"
+    )
+    hover_css = (
+        ", ".join(hover_sels)
+        + " { color: rgba(0, 177, 154, 0.72); border-color: rgba(0, 177, 154, 0.5); }"
+    )
+    return "\n".join([box_css, hover_css])
+
+
+def _css_str_escape(text: object) -> str:
+    """Escape a value for safe use inside a CSS ``content: "..."`` string literal."""
+    return (
+        str(text)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", " ")
+        .replace("\r", " ")
+    )
+
+
+def _build_dot_tooltip_css(window_rows: tuple[tuple[str, str, int, str], ...]) -> str:
+    """Per-dot hover-tooltip content for compact (This Period) view.
+
+    Each dot carries a ``ta-tip-<idx>`` class (idx == enumerate(window_rows) index, so it
+    lines up with the events built from the same rows). The shared tooltip card/arrow
+    styling lives in the static calendar CSS; here we only emit the per-dot ``content``
+    (reporting name, channel, hours) revealed on hover. This per-index trick mirrors the
+    day-total badges — streamlit_calendar exposes no JS render hook to attach a tooltip
+    library inside the calendar iframe. ``\\A`` (with its terminating space, which CSS
+    consumes) gives the multi-line layout under ``white-space: pre-line``.
+    """
+    parts: list[str] = []
+    for idx, (entry_day_iso, account_name, seconds, channel) in enumerate(window_rows):
+        if _parse_date_value(entry_day_iso) is None:
+            continue
+        hours_value = max(0, int(seconds)) / 3600.0
+        hours_text = f"{hours_value:.2f}".rstrip("0").rstrip(".") or "0"
+        channel_text = str(channel or "").strip() or "—"
+        body = (
+            f"{_css_str_escape(account_name)}\\A "
+            f"{_css_str_escape(channel_text)}\\A "
+            f"{_css_str_escape(hours_text + ' hrs')}"
+        )
+        parts.append(f'.fc .ta-tip-{idx}:hover::after {{ content: "{body}"; }}')
+    return "\n".join(parts)
+
+
+def _render_channel_legend(types_present: list[str]) -> None:
+    """Render a small color legend mapping each channel TYPE present in the current view
+    (Resupply / Smallwares / Equipment / Rollout / Full) to its calendar color. Only types
+    actually present in the window are shown, so it stays short and contextual."""
+    if not types_present:
+        return
+    chips = []
+    for type_key in types_present:
+        bg_color, _text = CHANNEL_TYPE_COLORS.get(type_key, CHANNEL_COLOR_DEFAULT)
+        chips.append(
+            '<span class="ta-legend-chip">'
+            f'<span class="ta-legend-dot" style="background:{bg_color};"></span>'
+            f"{html.escape(type_key)}</span>"
+        )
+    st.markdown(
+        '<div class="ta-legend">' + "".join(chips) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _render_window_hours_summary(window_df: pd.DataFrame, view_mode: str) -> None:
-    """Render a minimal info line with the total hours for the viewed timeframe.
+    """Render the timeframe-total callout (shown above the calendar's top-right corner).
 
     Per-day totals are shown as badges inside the calendar squares (see
-    ``_build_day_total_badge_css``); this line carries only the timeframe sum
+    ``_build_day_total_badge_css``); this callout carries only the timeframe sum
     (This Week / Last Week / This Period) so the two don't duplicate each other.
     """
     total_seconds = 0
@@ -1531,34 +1711,44 @@ def _render_window_hours_summary(window_df: pd.DataFrame, view_mode: str) -> Non
         if isinstance(row.get("Entry Date"), date):
             total_seconds += max(0, int(row.get("seconds", 0)))
 
-    total_label = f"{view_mode} total" if view_mode else "Total"
+    total_label = "Total Hours"
     st.markdown(
-        f'<div class="ta-hours-summary">'
-        f'<span class="ta-hours-total">{total_label} <b>{_format_hours_label(total_seconds)}</b></span>'
-        f"</div>",
+        '<div class="ta-hours-callout-wrap">'
+        '<div class="ta-hours-callout">'
+        f'<span class="ta-hours-callout-label">{html.escape(total_label)}</span>'
+        f'<span class="ta-hours-callout-value">{_format_hours_label(total_seconds)}</span>'
+        "</div></div>",
         unsafe_allow_html=True,
     )
 
 
 def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd.DataFrame]:
     """Render clickable calendar and return selected day + selected day rows."""
-    header_col, toggle_col = st.columns([2, 3])
-    with header_col:
-        st.subheader("Calendar", anchor=False)
+    # Header row above the calendar: the view toggle (left) and the timeframe-total
+    # callout (right, above the calendar's top-right corner). The total is rendered into
+    # total_col further down, once window_df is loaded.
+    toggle_col, total_col = st.columns([1, 1])
     with toggle_col:
         view_mode_options = ["This Week", "This Period", "Last Week"]
         stored_view = st.session_state.get("ta_calendar_view", "This Week")
         if stored_view not in view_mode_options:
             stored_view = "This Week"
             st.session_state["ta_calendar_view"] = stored_view
-        view_mode = st.radio(
-            "View",
-            options=view_mode_options,
-            index=view_mode_options.index(stored_view),
-            horizontal=True,
-            key="ta_calendar_view",
-            label_visibility="collapsed",
-        )
+        # Keyed container so the segmented-control CSS can scope to .st-key-ta_view_toggle
+        # (a keyed st.container reliably emits that class).
+        with st.container(key="ta_view_toggle"):
+            view_mode = st.radio(
+                "View",
+                options=view_mode_options,
+                index=view_mode_options.index(stored_view),
+                horizontal=True,
+                key="ta_calendar_view",
+                label_visibility="collapsed",
+            )
+    # The multi-week This Period grid always renders entries as compact color dots (with
+    # hover tooltips); the week views keep the height-scaled labeled blocks. There's no
+    # block view for This Period and no toggle.
+    compact_view = view_mode == "This Period"
 
     today = utils.to_eastern(utils.now_utc()).date()
     window_start, window_end = _compute_calendar_window(view_mode, today)
@@ -1583,23 +1773,52 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         window_df = pd.DataFrame(columns=["Entry Date", "Account", "Time", "Channel", "Source File"])
 
     window_df["seconds"] = window_df["Time"].astype(str).apply(utils.parse_hhmmss).clip(lower=0)
-    window_rows: list[tuple[str, str, int]] = []
+
+    # Timeframe-total callout in the header row's right column (above the calendar's
+    # top-right corner).
+    with total_col:
+        _render_window_hours_summary(window_df, view_mode)
+
+    window_rows: list[tuple[str, str, int, str]] = []
     for _, row in window_df.reset_index(drop=True).iterrows():
         entry_day = row["Entry Date"]
         if not isinstance(entry_day, date):
             continue
         account_name = str(row.get("Account") or "").strip() or "(No Account)"
+        channel = str(row.get("Channel") or "").strip()
         seconds = max(0, int(row.get("seconds", 0)))
-        window_rows.append((entry_day.isoformat(), account_name, seconds))
-    calendar_events = _build_calendar_events(tuple(window_rows))
+        window_rows.append((entry_day.isoformat(), account_name, seconds, channel))
+    calendar_events = _build_calendar_events(tuple(window_rows), compact=compact_view)
 
     # Per-day hours total, keyed by ISO date, to paint a corner badge on each day cell.
     day_total_seconds: dict[str, int] = {}
-    for entry_day_iso, _account_name, seconds in window_rows:
+    for entry_day_iso, _account_name, seconds, _channel in window_rows:
         day_total_seconds[entry_day_iso] = day_total_seconds.get(entry_day_iso, 0) + max(0, int(seconds))
     day_total_badge_css = _build_day_total_badge_css(day_total_seconds)
 
     num_days = (window_end - window_start).days + 1
+
+    # In-range days with no logged hours get the "click to add" empty-state hint — but
+    # only in the week views, where a day is selectable/editable. The multi-week This
+    # Period grid is a read-only overview (dots), so it gets no "+" prompt. Padding days
+    # (This Period grid spillover) sit outside [window_start, window_end] anyway.
+    if compact_view:
+        empty_day_hint_css = ""
+    else:
+        empty_day_isos = [
+            (window_start + timedelta(days=i)).isoformat()
+            for i in range(num_days)
+            if day_total_seconds.get((window_start + timedelta(days=i)).isoformat(), 0) <= 0
+        ]
+        empty_day_hint_css = _build_empty_day_hint_css(empty_day_isos)
+
+    # Per-dot hover tooltips (compact / This Period only).
+    dot_tooltip_css = _build_dot_tooltip_css(tuple(window_rows)) if compact_view else ""
+
+    # Channel TYPES present in this window, in canonical color order, for the legend.
+    types_seen = {_channel_type(ch) for *_rest, ch in window_rows}
+    types_seen.discard("")
+    types_present = [t for t in CHANNEL_TYPE_COLORS if t in types_seen]
     calendar_initial_date = window_start.isoformat()
     valid_range: dict[str, str] | None = None
     if view_mode == "This Period":
@@ -1648,7 +1867,9 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         "editable": False,
         "selectable": False,
         "eventDisplay": "block",
-        "dayMaxEventRows": 4,
+        # Compact dots are tiny and wrap, and This Period uses auto height (cells expand),
+        # so show them all (no "+X more"). Block view keeps the 4-row cap + popover.
+        "dayMaxEventRows": False if compact_view else 4,
         "headerToolbar": {"left": "", "center": "title", "right": ""},
         "height": calendar_height,
         "initialDate": calendar_initial_date,
@@ -1683,11 +1904,27 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         font-family: 'Work Sans', sans-serif;
     }
     .fc .fc-toolbar-title {
-        font-size: 0.9rem;
+        font-family: 'Poppins', 'Work Sans', sans-serif;
+        font-size: 0.95rem;
         font-weight: 600;
+        letter-spacing: 0.01em;
+        color: #002E65;
     }
     .fc .fc-toolbar {
-        margin-bottom: 0.25rem;
+        margin-bottom: 0.4rem;
+    }
+    /* Weekday header row: uppercase, letter-spaced, brand-tinted (Sky) */
+    .fc .fc-col-header-cell {
+        background-color: rgba(208, 236, 238, 0.45);
+        border-color: rgba(0, 46, 101, 0.08);
+    }
+    .fc .fc-col-header-cell-cushion {
+        font-size: 0.62rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.09em;
+        color: rgba(0, 46, 101, 0.6);
+        padding: 4px 2px;
     }
     .fc .fc-daygrid-day-frame {
         min-height: 48px;
@@ -1701,6 +1938,13 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
        non-liquid layout (where FC doesn't set it). */
     .fc .fc-daygrid-day {
         position: relative;
+        transition: background-color 0.15s ease;
+    }
+    /* Hover affordance: subtle tint over the WHOLE day cell (the <td>, full height) so
+       the entire box dims — not just the inner frame, which only spans the cell's top in
+       the fixed-height week views (that left the "half box dims" artifact). */
+    .fc .fc-daygrid-day:hover {
+        background-color: rgba(0, 177, 154, 0.07);
     }
     .fc .fc-daygrid-day,
     .fc .fc-daygrid-day-top,
@@ -1708,17 +1952,120 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
     .fc .fc-daygrid-bg-harness {
         cursor: pointer;
     }
+    /* Day number: a touch larger, lighter weight, navy-tinted */
     .fc .fc-daygrid-day-number {
-        font-weight: 600;
-        font-size: 0.78rem;
+        font-weight: 500;
+        font-size: 0.82rem;
+        color: rgba(0, 46, 101, 0.78);
+        padding: 4px 6px 2px;
     }
+    /* Events: depth via gradient sheen + drop shadow + rounding (no flat rectangles) */
     .fc .fc-daygrid-event {
-        border-radius: 6px;
-        padding: 1px 4px;
+        border-radius: 7px;
+        padding: 2px 6px;
         cursor: pointer;
+        background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(0, 0, 0, 0.10));
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+        transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+    }
+    /* Hover lift on events */
+    .fc .fc-daygrid-event:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 3px 6px rgba(0, 0, 0, 0.22);
+        filter: brightness(1.06);
+        z-index: 7;
     }
     .fc .ta-entry-event {
         align-items: flex-start;
+    }
+    /* Compact dot mode (This Period only): each entry becomes a small colored circle, no
+       text. Dots flow left-to-right and wrap, so a day's entries read as a tidy cluster
+       of colored dots instead of stacked bars. The day-events container is flipped to a
+       wrapping flexbox and the harnesses sized to content (overriding FullCalendar's
+       full-width vertical stacking). */
+    .fc .fc-daygrid-day-events:has(.ta-dot) {
+        display: flex;
+        flex-wrap: wrap;
+        align-content: flex-start;
+        gap: 4px;
+        padding: 3px 4px 0;
+        min-height: 0;
+    }
+    .fc .fc-daygrid-day-events:has(.ta-dot) .fc-daygrid-event-harness {
+        position: static !important;
+        display: inline-block !important;
+        width: auto !important;
+        margin: 0 !important;
+        top: auto !important;
+        left: auto !important;
+        right: auto !important;
+    }
+    .fc .ta-dot {
+        position: relative;
+        width: 12px !important;
+        height: 12px !important;
+        min-height: 0 !important;
+        padding: 0 !important;
+        border: 1.5px solid rgba(255, 255, 255, 0.65) !important;
+        border-radius: 50% !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+        background-image: none;
+    }
+    .fc .ta-dot .fc-event-main,
+    .fc .ta-dot .fc-event-title,
+    .fc .ta-dot .fc-event-time {
+        display: none !important;
+    }
+    /* Dot hover tooltip — shared card + arrow styling; the per-dot ``content`` (reporting
+       name / channel / hours) is appended separately (see _build_dot_tooltip_css). Hidden
+       until the dot is hovered. Anchored to the dot (position: relative above). */
+    .fc .ta-dot::after,
+    .fc .ta-dot::before {
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.12s ease;
+        pointer-events: none;
+        z-index: 9999;
+    }
+    .fc .ta-dot::after {
+        content: "";
+        bottom: calc(100% + 7px);
+        white-space: pre-line;
+        text-align: left;
+        width: max-content;
+        max-width: 200px;
+        background: #002E65;
+        color: #ffffff;
+        font-family: 'Work Sans', sans-serif;
+        font-size: 0.66rem;
+        font-weight: 500;
+        line-height: 1.5;
+        padding: 6px 9px;
+        border-radius: 8px;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+    }
+    .fc .ta-dot::before {
+        content: "";
+        bottom: calc(100% + 1px);
+        border: 6px solid transparent;
+        border-top-color: #002E65;
+    }
+    .fc .ta-dot:hover::after,
+    .fc .ta-dot:hover::before {
+        opacity: 1;
+        visibility: visible;
+    }
+    /* Let the tooltip escape the grid instead of being clipped by FullCalendar's
+       overflow:hidden containers (safe here — This Period uses auto height, no scroller). */
+    .fc:has(.ta-dot) .fc-view-harness,
+    .fc:has(.ta-dot) .fc-scroller,
+    .fc:has(.ta-dot) .fc-daygrid-body,
+    .fc:has(.ta-dot) .fc-daygrid-day-frame,
+    .fc:has(.ta-dot) .fc-daygrid-day-events {
+        overflow: visible !important;
     }
     .fc .fc-event-title {
         font-weight: 600;
@@ -1726,8 +2073,8 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
         line-height: 1.15;
         font-size: 0.68rem;
     }
-    """ + "\n" + height_rules + "\n" + selected_day_css + "\n" + day_total_badge_css + "\n" + _CALENDAR_MORE_POPOVER_CSS
-    calendar_widget_key = f"ta_input_calendar_{view_mode}_{num_days}"
+    """ + "\n" + height_rules + "\n" + selected_day_css + "\n" + day_total_badge_css + "\n" + empty_day_hint_css + "\n" + dot_tooltip_css + "\n" + _CALENDAR_MORE_POPOVER_CSS
+    calendar_widget_key = f"ta_input_calendar_{view_mode}_{num_days}_{'c' if compact_view else 'f'}"
     calendar_state = st_calendar(
         events=calendar_events,
         options=calendar_options,
@@ -1768,7 +2115,7 @@ def render_input_day_selector(user_login: str, full_name: str) -> tuple[date, pd
                 st.session_state["ta_input_selected_day"] = selected_day
                 _rerun_input_fragment()
 
-    _render_window_hours_summary(window_df, view_mode)
+    _render_channel_legend(types_present)
 
     selected_day_df = window_df[window_df["Entry Date"].eq(selected_day)].copy()
     return selected_day, selected_day_df
@@ -2049,14 +2396,17 @@ def render_input_view(
             }
         )
 
-    add_col, save_col, _spacer_col, refresh_col = st.columns([1, 1, 5, 2])
-    with add_col:
+    # Add Row — full-width dashed "ghost" card (styled via .st-key-ta_add_row_wrap),
+    # echoing the calendar's empty-day "click to add" hint so adding feels like part of
+    # the list rather than a detached button.
+    with st.container(key="ta_add_row_wrap"):
         if st.button(
             "Add Row",
             key="ta_detailed_add_row_btn",
             icon=":material/add:",
             type="secondary",
             disabled=editing_locked,
+            width="stretch",
         ):
             st.session_state["ta_detailed_count"] = number_of_accounts + 1
             # Adding a row changes the fragment's element count. A fragment-scoped
@@ -2067,12 +2417,14 @@ def render_input_view(
             # same robust path Save uses), so it can't hit that mismatch.
             st.rerun()
 
+    save_col, _spacer_col, refresh_col = st.columns([2, 5, 2])
     with save_col:
         save_detailed_clicked = st.button(
             "Save Allocation",
             type="primary",
             key="ta_save_detailed",
             disabled=editing_locked,
+            width="stretch",
         )
 
     with refresh_col:
@@ -4187,6 +4539,219 @@ def render_admin_add_entry_view(account_options: list[str], account_lookup: dict
         confirm_admin_add_entry_dialog()
 
 
+def render_auto_email_settings_view() -> None:
+    """Admin-only controls for the automated 'missing time entries' reminder emails."""
+    st.subheader("Automated Reminder Emails", anchor=False)
+    st.caption(
+        "Send automated weekly emails at 3PM each Friday notifying team members of "
+        "missing or low time allocation for the current week."
+    )
+
+    status = st.session_state.pop("ta_auto_email_status", None)
+    if isinstance(status, dict) and str(status.get("message") or "").strip():
+        level = str(status.get("level") or "").lower()
+        message = str(status["message"])
+        if level == "success":
+            st.success(message)
+        elif level == "error":
+            st.error(message)
+        else:
+            st.info(message)
+
+    settings = utils.load_auto_email_settings()
+    departments = utils.list_departments()
+    existing = settings.get("departments") or {}
+    is_dev = utils.is_current_user_developer()
+
+    # Global send mechanics (from-address, pilot/test recipient, live toggle) are
+    # developer-only. Non-developer admins only curate the per-department table
+    # below; the developer-managed values are preserved untouched on their save.
+    if is_dev:
+        gc1, gc2 = st.columns(2)
+        gc1.text_input(
+            "Send from (shared mailbox)",
+            value=settings.get("from_address") or utils.DEFAULT_AUTO_EMAIL_FROM,
+            key="ta_ae_from",
+            help="The Outlook mailbox reminders send as. Must be a mailbox the data-refresh machine can send from.",
+        )
+        gc2.text_input(
+            "Pilot/test recipient",
+            value=settings.get("test_recipient") or "",
+            key="ta_ae_test",
+            help="While 'Send live' is off, every reminder goes here instead of to employees.",
+        )
+        st.checkbox(
+            "Send live to employees (off = pilot: send only to the test recipient)",
+            value=bool(settings.get("live", False)),
+            key="ta_ae_live",
+        )
+    else:
+        mode = "Live — emailing employees" if settings.get("live") else "Pilot mode — not sending to employees"
+        st.caption(f"Sending controls are managed by developers. Current status: **{mode}**.")
+
+    st.markdown("**Departments**")
+    st.caption(
+        "‘Mgr recap’ also emails each manager in the department a summary of their own "
+        "reports (matched by the Manager field) who have missing days."
+    )
+    dept_editor_df = None
+    if not departments:
+        st.info("No departments found in users.parquet yet.")
+    else:
+        # Compact checkbox grid: one slim row per department, two toggles. The grid
+        # scrolls when the list is long, so no separate show-more control is needed.
+        dept_rows = []
+        for dept in departments:
+            cfg = utils.normalize_auto_email_department(existing.get(dept))
+            dept_rows.append(
+                {"Department": dept, "Enabled": cfg["enabled"], "Mgr recap": cfg["manager_recap"]}
+            )
+        base_df = pd.DataFrame(dept_rows, columns=["Department", "Enabled", "Mgr recap"])
+        visible_rows = min(len(departments), 9)
+        dept_editor_df = st.data_editor(
+            base_df,
+            hide_index=True,
+            use_container_width=True,
+            disabled=["Department"],
+            height=(visible_rows + 1) * 35 + 3,
+            column_config={
+                "Department": st.column_config.TextColumn("Department"),
+                "Enabled": st.column_config.CheckboxColumn("Enabled", width="small"),
+                "Mgr recap": st.column_config.CheckboxColumn("Mgr recap", width="small"),
+            },
+        )
+
+    if st.button("Save Reminder Settings", type="primary", key="ta_ae_save"):
+        # Read rendered rows from widget state; for departments not rendered this run
+        # (collapsed under "Show More"), keep their saved config so a save while
+        # collapsed never silently resets hidden departments.
+        new_departments = {}
+        if dept_editor_df is not None:
+            for _, dept_row in dept_editor_df.iterrows():
+                dept_name = str(dept_row["Department"])
+                new_departments[dept_name] = utils.normalize_auto_email_department(
+                    {
+                        "enabled": bool(dept_row["Enabled"]),
+                        "interval": "weekly",
+                        "send_day": "Fri",
+                        "manager_recap": bool(dept_row["Mgr recap"]),
+                    }
+                )
+        if is_dev:
+            payload = {
+                "from_address": str(st.session_state.get("ta_ae_from") or utils.DEFAULT_AUTO_EMAIL_FROM).strip(),
+                "live": bool(st.session_state.get("ta_ae_live", False)),
+                "test_recipient": str(st.session_state.get("ta_ae_test") or "").strip(),
+                "departments": new_departments,
+            }
+        else:
+            # Non-developers can't see the send controls; preserve them as-is.
+            payload = {
+                "from_address": settings.get("from_address") or utils.DEFAULT_AUTO_EMAIL_FROM,
+                "live": bool(settings.get("live", False)),
+                "test_recipient": settings.get("test_recipient") or "",
+                "departments": new_departments,
+            }
+        try:
+            utils.save_auto_email_settings(payload)
+            LOGGER.info(
+                "Saved auto-email settings | live=%s enabled_depts=%s",
+                payload["live"],
+                [dept for dept, cfg in new_departments.items() if cfg["enabled"]],
+            )
+            st.session_state["ta_auto_email_status"] = {
+                "level": "success",
+                "message": "Reminder settings saved.",
+            }
+        except Exception as exc:
+            LOGGER.exception("Failed to save auto-email settings: %s", exc)
+            st.session_state["ta_auto_email_status"] = {
+                "level": "error",
+                "message": f"Failed to save reminder settings: {exc}",
+            }
+        st.rerun()
+
+
+def render_admin_name_cleanup_view() -> None:
+    """Admin/developer maintenance: repair entries saved under a Windows username.
+
+    Pairs with the disconnected-save case — a user who submits time while offline
+    can have their Windows login stored as the name (e.g. "jfitouri" instead of
+    "Jennifer Fitouri"). Rather than blocking those submissions, this lets an admin
+    or developer remap them to real names on demand. Only touches rows whose saved
+    name is blank or equals the user's own login, so real names are never altered.
+    Delegates to ta_store.repair_fullnames (Preview = dry run)."""
+    st.subheader("Fix entry names")
+    st.caption(
+        "Repairs saved entries whose name was recorded as a Windows username "
+        "(e.g. “jfitouri”) instead of the person’s full name (“Jennifer Fitouri”). "
+        "This can happen when someone submits time while disconnected from the "
+        "network drive. Safe to run anytime — it only changes rows where the saved "
+        "name is blank or matches the user’s own login, and never alters real names."
+    )
+    col_preview, col_apply = st.columns(2)
+    do_preview = col_preview.button(
+        "Preview",
+        width="stretch",
+        key="ta_namefix_preview",
+        help="Report how many entries would change, without modifying anything.",
+    )
+    do_apply = col_apply.button(
+        "Fix names now",
+        type="primary",
+        width="stretch",
+        key="ta_namefix_apply",
+    )
+    if do_preview or do_apply:
+        mapping = utils.load_user_fullname_map()
+        if not mapping:
+            st.session_state["ta_namefix_summary"] = None
+            st.error(
+                "Couldn't load the user list from the network drive — are you "
+                "connected? No changes were made."
+            )
+        else:
+            dry = not do_apply
+            with st.spinner("Scanning entries…" if dry else "Repairing entry names…"):
+                summary = ta_store.repair_fullnames(TIME_ALLOCATION_DIR, mapping, dry_run=dry)
+            if do_apply:
+                _invalidate_admin_export_tables()
+                LOGGER.info(
+                    "Time allocation name cleanup applied by '%s' | scanned=%s changed=%s fixed=%s errors=%s",
+                    utils.get_os_user(),
+                    summary["files_scanned"],
+                    summary["files_changed"],
+                    summary["rows_fixed"],
+                    len(summary["errors"]),
+                )
+            st.session_state["ta_namefix_summary"] = summary
+
+    summary = st.session_state.get("ta_namefix_summary")
+    if summary:
+        verb = "Would fix" if summary["dry_run"] else "Fixed"
+        if summary["rows_fixed"] == 0:
+            st.success("No entries need fixing — all names look correct.")
+        else:
+            st.success(
+                f"{verb} {summary['rows_fixed']} row(s) across "
+                f"{summary['files_changed']} file(s)."
+            )
+            by_name = summary.get("by_name") or {}
+            if by_name:
+                st.dataframe(
+                    pd.DataFrame(
+                        sorted(by_name.items(), key=lambda kv: (-kv[1], kv[0])),
+                        columns=["Corrected To", "Rows"],
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+        if summary.get("errors"):
+            st.warning(
+                f"{len(summary['errors'])} file(s) couldn't be processed; see the app log."
+            )
+
+
 def render_admin_settings_view(account_lookup: dict, account_options: list[str]) -> None:
     """Admin-only Time Allocation Tool settings: entry fields, add-entry form, and the Edit Entries table."""
     if not utils.is_current_user_admin():
@@ -4196,14 +4761,20 @@ def render_admin_settings_view(account_lookup: dict, account_options: list[str])
     render_entry_fields_editor_view()
 
     st.divider()
+    render_auto_email_settings_view()
+
+    st.divider()
     render_admin_add_entry_view(account_options, account_lookup)
 
     st.divider()
     render_admin_data_editor_view(account_lookup)
 
+    st.divider()
+    render_admin_name_cleanup_view()
 
-# Header
-utils.render_page_header(PAGE_TITLE)
+
+# Header (no divider under the title/subtitle — Time Allocation only)
+utils.render_page_header(PAGE_TITLE, show_divider=False)
 
 user_login = utils.get_os_user()
 full_name = utils.get_full_name_for_user(None, user_login)

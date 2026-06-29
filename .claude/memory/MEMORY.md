@@ -27,6 +27,10 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 - [Accounts parquet daily regen lag](project_accounts_parquet_daily_regen.md) — new accounts columns appear only after the daily parquet rebuilds
 - [Accounts source SharePoint constraints](project_accounts_source_sharepoint_constraints.md) — refreshing without per-user sync: file stays in SP, org-only links, no Azure app; options + tradeoffs
 - [Time allocation load perf](project_time_allocation_load_perf.md) — cold-load fixes (vectorized lookup, fixed channel order, lazy admin tabs, column projection) + pyarrow.dataset fast path for the exports/edit tables
+- [Time allocation auto-email reminders](project_time_allocation_auto_email.md) — missing-weekday reminders ride the data-refresh machine, send as CNAConsole shared mailbox; default-OFF per dept; read layer extracted to time_allocation_store.py
+- [Developer "View as" role override](project_developer_view_as_role.md) — is_current_user_admin/developer return an EFFECTIVE role; devs can preview as user/admin/developer from Settings; non-devs can't escalate
+- [Network-drive connection indicator](project_network_drive_indicator.md) — sidebar green/red dot via bounded socket probe to SMB 445 (not a UNC path check); re-checks per page load/nav, cached per-page
+- [User profile offline cache](project_user_profile_offline_cache.md) — startup caches current user's users.parquet row locally; utils falls back to it (name/dept/admin/dev) when the drive is unreachable
 
 ### Per-page gotchas
 
@@ -36,6 +40,7 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 - [Time allocation input fragment](gotchas_time_allocation_input_fragment.md) — input st.fragment; two white-screen traps: nested run_every AND row add/delete need a full st.rerun (not fragment-scoped)
 - [Task tracker LS vs DA differences](gotchas_task_tracker_ls_vs_da.md) — shared file, separate state keys, separate dirs, LS-only `sync_tasks_parquet_targets()` call
 - [Task Log editor relocation](gotchas_task_log_editing.md) — editable columns, Start/End/Duration precedence, partition move on user/date change
+- [Time allocation name cleanup](gotchas_time_allocation_name_cleanup.md) — Admin "Fix entry names" remaps Full Name saved as a login; rewrite via buffered read (no partition-baking / no WinError 5)
 
 ### Reference
 
