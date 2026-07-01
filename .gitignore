@@ -57,6 +57,8 @@ CODE - do not open/installer/build/
 CODE - do not open/installer/dist/
 CODE - do not open/.last_update_check
 CODE - do not open/.update_available
+CODE - do not open/.migrated_to_azure
+CODE - do not open/.azure_authed
 CODE - do not open/favorites.json
 CODE - do not open/ta_account_favorites.json
 CODE - do not open/user_profile_cache.json

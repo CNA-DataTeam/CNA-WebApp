@@ -32,6 +32,8 @@ from pathlib import Path
 APP_DIR = Path(__file__).resolve().parent
 ROOT_DIR = APP_DIR.parent
 UPDATE_FLAG = APP_DIR / ".update_available"
+FLIP_MARKER = APP_DIR / ".migrated_to_azure"
+AZURE_REMOTE_URL = "https://dev.azure.com/ClarkAssociates/CNA%20Reporting%20and%20Analytics/_git/cna-console"
 LAUNCHER_EXE = ROOT_DIR / "CNA Web App.exe"
 SETUP_BAT = ROOT_DIR / "setup.bat"
 REQUIREMENTS_FILE = APP_DIR / "requirements.txt"
@@ -70,6 +72,7 @@ def _low_speed_env() -> dict:
         "GIT_HTTP_LOW_SPEED_LIMIT": "1000",
         "GIT_HTTP_LOW_SPEED_TIME": "10",
         "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
     }
 
 
@@ -229,10 +232,45 @@ def _rebuild_launcher_if_missing() -> None:
         pass
 
 
+def _maybe_flip_to_azure() -> None:
+    """One-time, idempotent migration of the update remote from GitHub to Azure
+    DevOps. Runs on EVERY launch but no-ops once done.
+
+    Must run unconditionally (not only after a pull): the code that performs the
+    flip arrives *in* the final GitHub pull, so the first launch that actually
+    executes this function has nothing new to pull. Fail-open -- never block
+    startup on a migration hiccup. After the flip, `credential.helper=manager`
+    + `credential.useHttpPath=true` let Git Credential Manager authenticate the
+    private Azure repo silently from the cached Entra credential.
+    """
+    try:
+        if FLIP_MARKER.exists():
+            return
+        res = _git(["config", "--get", "remote.origin.url"], timeout=10)
+        origin = (res.stdout or "").strip()
+        if not origin:
+            return
+        if "dev.azure.com" in origin:
+            FLIP_MARKER.write_text("already-azure")
+            return
+        if "github.com" not in origin:
+            return  # unknown origin -- leave it alone
+        if _git(["remote", "set-url", "origin", AZURE_REMOTE_URL], timeout=15).returncode != 0:
+            return
+        _git(["config", "credential.helper", "manager"], timeout=10)
+        _git(["config", "credential.https://dev.azure.com.useHttpPath", "true"], timeout=10)
+        FLIP_MARKER.write_text(date.today().isoformat())
+        print("[check_updates] Update remote migrated from GitHub to Azure DevOps.", file=sys.stderr)
+    except Exception as exc:
+        print(f"[check_updates] Azure migration skipped: {exc}", file=sys.stderr)
+
+
 def run_check() -> None:
     git_dir = ROOT_DIR / ".git"
     if not git_dir.exists():
         return
+
+    _maybe_flip_to_azure()  # one-time GitHub -> Azure; no-op once migrated
 
     # Lightweight, every-launch check: a quick ls-remote tells us whether
     # origin/main has a commit we don't have. When it doesn't (the common case)

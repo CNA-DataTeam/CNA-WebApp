@@ -355,6 +355,143 @@ def _check_for_updates_manual():
         return False
 
 
+# -----------------------------------------------------------------
+# One-time Azure sign-in gate (after the GitHub -> Azure update flip)
+# -----------------------------------------------------------------
+# Once check_updates._maybe_flip_to_azure() re-points the update remote to the
+# private Azure DevOps repo (and drops the .migrated_to_azure marker), each user
+# must sign in ONCE so Git Credential Manager caches their Entra credential;
+# every later update is then silent. The headless startup/watcher checks run
+# non-interactively and never pop a window, so we surface that single sign-in
+# here as a clear, expected prompt. Gated on cheap marker-file checks (no git
+# work for the GitHub-era majority or already-signed-in users); fail-open, so any
+# detection error skips the gate rather than locking anyone out of the app.
+_FLIP_MARKER = APP_DIR / ".migrated_to_azure"
+_AZURE_AUTHED_FLAG = APP_DIR / ".azure_authed"
+
+
+def _azure_silent_probe() -> str:
+    """Non-interactive reachability check of the (Azure) origin. Returns
+    'ok' (cached credential works), 'auth' (reachable, sign-in needed), or
+    'offline' (network/unknown — don't nag, retry next launch)."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+    try:
+        r = _silent_run(
+            ["git", "ls-remote", "origin", "refs/heads/main"],
+            cwd=ROOT_DIR, capture_output=True, text=True, timeout=20, env=env,
+        )
+    except Exception:
+        return "offline"
+    if r.returncode == 0:
+        return "ok"
+    err = ((r.stderr or "") + (r.stdout or "")).lower()
+    network_markers = (
+        "could not resolve host", "couldn't resolve host", "could not connect",
+        "failed to connect", "unable to access", "timed out", "no route to host",
+        "network is unreachable", "temporary failure in name resolution",
+    )
+    if any(m in err for m in network_markers):
+        return "offline"
+    return "auth"
+
+
+def _azure_interactive_signin() -> tuple[bool, str]:
+    """Run an interactive `git fetch` so Git Credential Manager opens the
+    Microsoft sign-in and caches the credential. Foreground + user-initiated, so
+    GCM's window is expected. Returns (ok, error)."""
+    env = {**os.environ}
+    env["GCM_INTERACTIVE"] = "auto"
+    env.pop("GIT_TERMINAL_PROMPT", None)
+    try:
+        r = _silent_run(
+            ["git", "fetch", "origin", "main"],
+            cwd=ROOT_DIR, capture_output=True, text=True, timeout=180, env=env,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    if r.returncode == 0:
+        return True, ""
+    return False, (r.stderr or r.stdout or "git fetch failed").strip()
+
+
+if _FLIP_MARKER.exists() and not _AZURE_AUTHED_FLAG.exists() and not st.session_state.get("_azure_signin_deferred"):
+    _azure_probe = _azure_silent_probe()
+    if _azure_probe == "ok":
+        try:
+            _AZURE_AUTHED_FLAG.write_text("ok")
+        except Exception:
+            pass
+    elif _azure_probe == "auth":
+        @st.dialog("One-time sign-in required", width="small")
+        def _azure_signin_dialog():
+            st.markdown(
+                "**CNA Console has moved to a secure internal update system.**"
+            )
+            st.markdown(
+                "Sign in once with your Microsoft (work) account to finish moving this "
+                "installation over and keep receiving updates. You won't be asked again "
+                "on this computer."
+            )
+            st.warning(
+                "**The current version is being shut down on July 10.** Any installation "
+                "still on the old version after that date will lose access and have to be "
+                "reinstalled. Signing in now completes the move and avoids that.",
+                icon="⚠️",
+            )
+            if st.button(
+                "Sign in with Microsoft", type="primary", use_container_width=True
+            ):
+                with st.spinner(
+                    "Opening Microsoft sign-in — complete it in the window that appears..."
+                ):
+                    ok, err = _azure_interactive_signin()
+                if ok:
+                    try:
+                        _AZURE_AUTHED_FLAG.write_text("ok")
+                    except Exception:
+                        pass
+                    st.success("Signed in — you're all set.")
+                    import time
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    LOGGER.error("Azure first sign-in failed: %s", err)
+                    st.error(f"Sign-in didn't complete:\n\n```\n{err}\n```")
+                    st.caption(
+                        "A Microsoft sign-in window should have opened. Check your "
+                        "connection and try again, or use **Repair App** below."
+                    )
+            st.divider()
+            st.caption(
+                "**Only if you're having trouble** signing in or updating: you can keep "
+                "working for now — the app runs normally, you just won't get new updates "
+                "until you sign in, and you'll be reminded next time you open it. Please "
+                "sign in before **July 10** to stay on the supported version."
+            )
+            _trouble_left, _trouble_right = st.columns(2)
+            with _trouble_left:
+                if st.button(
+                    "Continue without signing in",
+                    use_container_width=True,
+                    type="tertiary",
+                    key="_azure_signin_defer",
+                ):
+                    st.session_state["_azure_signin_deferred"] = True
+                    st.rerun()
+            with _trouble_right:
+                if st.button(
+                    "Repair App",
+                    use_container_width=True,
+                    type="tertiary",
+                    key="_azure_signin_repair",
+                ):
+                    _launch_repair()
+
+        _azure_signin_dialog()
+        st.stop()
+    # 'offline': can't sign in now — skip the gate and retry on the next launch.
+
+
 if UPDATE_FLAG.exists():
     @st.dialog("Update Available", width="small")
     def _update_dialog():

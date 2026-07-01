@@ -31,6 +31,8 @@ This is the shared memory index for the CNA-WebApp project. Every entry here is 
 - [Developer "View as" role override](project_developer_view_as_role.md) — is_current_user_admin/developer return an EFFECTIVE role; devs can preview as user/admin/developer from Settings; non-devs can't escalate
 - [Network-drive connection indicator](project_network_drive_indicator.md) — sidebar green/red dot via bounded socket probe to SMB 445 (not a UNC path check); re-checks per page load/nav, cached per-page
 - [User profile offline cache](project_user_profile_offline_cache.md) — startup caches current user's users.parquet row locally; utils falls back to it (name/dept/admin/dev) when the drive is unreachable
+- [Azure DevOps GCM auth (useHttpPath)](gotchas_azure_devops_gcm_usehttppath.md) — dev.azure.com pulls need credential.useHttpPath=true or GCM can't find the org and git falls to a terminal prompt
+- [Route 1 GitHub→Azure flip](project_route1_github_to_azure_flip.md) — graft-seed (no force-push) + unconditional marker-gated flip in check_updates.py; verified in sandbox
 
 ### Per-page gotchas
 

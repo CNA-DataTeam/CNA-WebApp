@@ -88,7 +88,7 @@ REM Reset git state to the latest known-good code.
 REM   - origin/main when online (most-fixed version)
 REM   - HEAD when offline (last-known-good local commit)
 REM ------------------------------------------------------------
-call :STEP "Fetching latest from GitHub..."
+call :STEP "Fetching latest updates..."
 "!GIT_EXE!" -C "%ROOT%" fetch --prune >> "%LOG%" 2>&1
 if errorlevel 1 (
   call :STEP "(offline -- resetting working tree to last known good commit)"
