@@ -427,3 +427,107 @@ def repair_fullnames(
             summary["by_name"][k] = summary["by_name"].get(k, 0) + v
 
     return summary
+
+
+def repair_blank_customer_codes(
+    base_dir: Path,
+    reporting_name_to_code: dict,
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Fill a blank 'Customer Code' from its row's 'Account' (Reporting Name).
+
+    For each row whose 'Customer Code' is blank/missing AND whose 'Account'
+    (Reporting Name) maps to a known code, set that code. ONLY the 'Customer Code'
+    column is rewritten; every other column and the file's parquet schema are
+    preserved exactly (the column is swapped in-place on the Arrow table).
+    Idempotent, and never overwrites a code that is already present — so a
+    hand-picked code is left untouched. A reporting name absent from the map (or a
+    blank name) has nothing to fill from and is left blank.
+
+    `reporting_name_to_code`: map of Reporting Name -> Customer Code to fill in.
+    Matched on the stripped name, with a case-insensitive fallback.
+
+    Returns a summary dict:
+        files_scanned, files_changed, rows_fixed (ints),
+        by_name {reporting name: rows}, errors [(path, message)], dry_run (bool).
+    """
+    base_dir = Path(base_dir)
+    exact_map: dict[str, str] = {}
+    lower_map: dict[str, str] = {}
+    for raw_name, raw_code in (reporting_name_to_code or {}).items():
+        name = str(raw_name or "").strip()
+        code = str(raw_code or "").strip()
+        if name and code:
+            exact_map.setdefault(name, code)
+            lower_map.setdefault(name.lower(), code)
+
+    summary: dict = {
+        "files_scanned": 0,
+        "files_changed": 0,
+        "rows_fixed": 0,
+        "by_name": {},
+        "errors": [],
+        "dry_run": bool(dry_run),
+    }
+    if not exact_map:
+        return summary
+
+    def _code_for(name: object) -> str:
+        key = str(name or "").strip()
+        if not key:
+            return ""
+        return exact_map.get(key) or lower_map.get(key.lower(), "")
+
+    for path in all_export_files(base_dir):
+        summary["files_scanned"] += 1
+        try:
+            table = _read_own_columns(path)
+        except Exception as exc:
+            summary["errors"].append((str(path), f"read failed: {exc}"))
+            continue
+
+        by_lower = {str(c).strip().lower(): c for c in table.column_names}
+        account_col = by_lower.get("account")
+        code_col = by_lower.get("customer code") or by_lower.get("customercode")
+        if not account_col or not code_col:
+            continue  # not an entry file (no account/code columns) — skip
+
+        accounts = table.column(account_col).to_pylist()
+        codes = table.column(code_col).to_pylist()
+        new_codes = list(codes)
+        file_by_name: dict[str, int] = {}
+        for i, (account, code) in enumerate(zip(accounts, codes)):
+            current = "" if code is None else str(code).strip()
+            if current:
+                continue  # already has a code — never overwrite
+            fill = _code_for(account)
+            if not fill:
+                continue  # reporting name not in the map — nothing to fill from
+            new_codes[i] = fill
+            name_key = str(account or "").strip()
+            file_by_name[name_key] = file_by_name.get(name_key, 0) + 1
+
+        file_fixes = sum(file_by_name.values())
+        if not file_fixes:
+            continue
+
+        if not dry_run:
+            try:
+                field = table.schema.field(code_col)
+                new_col = pa.array(new_codes, type=field.type)
+                code_idx = table.column_names.index(code_col)
+                new_table = table.set_column(code_idx, field, new_col)
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                pq.write_table(new_table, tmp)
+                os.replace(tmp, path)  # atomic swap; readers never see a half file
+            except Exception as exc:
+                summary["errors"].append((str(path), f"write failed: {exc}"))
+                continue  # don't count fixes we couldn't persist
+
+        summary["rows_fixed"] += file_fixes
+        summary["files_changed"] += 1
+        for k, v in file_by_name.items():
+            summary["by_name"][k] = summary["by_name"].get(k, 0) + v
+
+    return summary

@@ -1050,6 +1050,22 @@ def _effective_customer_code(reporting_name: object, customer_code: object) -> s
     return lookup.get("rn_to_first_code", {}).get(name, "")
 
 
+def _reporting_name_to_code_map() -> dict[str, str]:
+    """Reporting Name -> Customer Code to backfill onto blank-code entries.
+
+    This is the same source `_effective_customer_code` fills from at save time
+    (each name's first/alphabetical code), so the one-off cleanup assigns exactly
+    what a fresh save would. It additionally maps any pre-merge Reporting Name
+    (e.g. "Domino's Canada") to the merged name's code, so legacy rows that still
+    carry an original name are filled too."""
+    lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
+    rn_to_first_code = dict(lookup.get("rn_to_first_code", {}))
+    for original, merged in _REPORTING_NAME_MERGES.items():
+        if original not in rn_to_first_code and merged in rn_to_first_code:
+            rn_to_first_code[original] = rn_to_first_code[merged]
+    return rn_to_first_code
+
+
 def _parse_date_value(value: object) -> date | None:
     """Safely parse date-like values into a date object."""
     parsed = pd.to_datetime(value, errors="coerce")
@@ -1061,11 +1077,6 @@ def _parse_date_value(value: object) -> date | None:
 def _today_eastern() -> date:
     """Return today's date in Eastern time."""
     return utils.to_eastern(utils.now_utc()).date()
-
-
-def _get_current_period() -> dict | None:
-    """Return the fiscal period containing today (Eastern), or None if not configured."""
-    return utils.get_fiscal_period_for_date(_today_eastern())
 
 
 def _work_week_bounds(reference: date) -> tuple[date, date]:
@@ -4044,7 +4055,7 @@ def render_entry_fields_editor_view() -> None:
         confirm_entry_field_delete_dialog()
 
 
-# --- Admin: add new entries (mirrors the Input tab; current fiscal period only) ---
+# --- Admin: add new entries (mirrors the Input tab; any date) ---
 
 @st.cache_data(ttl=300)
 def _user_login_lookup() -> dict[str, str]:
@@ -4055,27 +4066,6 @@ def _user_login_lookup() -> dict[str, str]:
         if key and key not in lookup:
             lookup[key] = str(login or "").strip()
     return lookup
-
-
-def _current_period_bounds() -> tuple[date, date] | None:
-    """Return (start, end) of the fiscal period containing today, or None if not configured."""
-    period = _get_current_period()
-    if not period:
-        return None
-    start = _parse_date_value(period.get("StartDate"))
-    end = _parse_date_value(period.get("EndDate"))
-    if start is None or end is None or end < start:
-        return None
-    return start, end
-
-
-def _is_within_current_period(day: date) -> bool:
-    """True when `day` falls inside the current fiscal period."""
-    bounds = _current_period_bounds()
-    if bounds is None:
-        return False
-    start, end = bounds
-    return start <= day <= end
 
 
 def _on_add_reporting_name_change(idx: int, lookup: dict) -> None:
@@ -4155,19 +4145,7 @@ def _save_admin_added_records(
     department: str,
     entry_date: date,
 ) -> bool:
-    """Append admin-entered rows to a user's saved entries for one day (current period only)."""
-    if not _is_within_current_period(entry_date):
-        bounds = _current_period_bounds()
-        if bounds is None:
-            st.error("No current fiscal period is configured, so entries can't be added.")
-        else:
-            start, end = bounds
-            st.error(
-                f"Entries can only be added within the current fiscal period "
-                f"({start:%m/%d/%Y}–{end:%m/%d/%Y}). Cannot save for {entry_date:%m/%d/%Y}."
-            )
-        return False
-
+    """Append admin-entered rows to a user's saved entries for one day (any date)."""
     entry_fields = _load_entry_fields()
     new_records: list[dict[str, object]] = []
     for row, seconds in zip(rows, parsed_seconds):
@@ -4314,7 +4292,10 @@ def confirm_admin_add_entry_dialog() -> None:
 
 @st.fragment
 def render_admin_add_entry_view(account_options: list[str], account_lookup: dict) -> None:
-    """Admin-only form to add new entries for any user, restricted to the current fiscal period."""
+    """Admin-only form to add new entries for any user, on any date.
+
+    Admins can backfill for any date: the This Week/Last Week window and the
+    fiscal-period limit that constrain regular users do not apply here."""
     if "ta_add_confirm_open" not in st.session_state:
         st.session_state["ta_add_confirm_open"] = False
     if "ta_add_confirm_rendered" not in st.session_state:
@@ -4324,20 +4305,9 @@ def render_admin_add_entry_view(account_options: list[str], account_lookup: dict
 
     st.subheader("Add Entries", anchor=False)
 
-    bounds = _current_period_bounds()
-    if bounds is None:
-        st.info(
-            "No current fiscal period is configured, so entries can't be added here. "
-            "Set up the current period to enable this section."
-        )
-        return
-    period_start, period_end = bounds
-    period_label = str((_get_current_period() or {}).get("PeriodName") or "").strip()
-    period_suffix = f" ({period_label})" if period_label else ""
     st.caption(
-        "Add new entries for any user; rows are appended to that user's existing entries "
-        f"for the day. Limited to the current fiscal period{period_suffix}: "
-        f"{period_start:%m/%d/%Y}–{period_end:%m/%d/%Y}."
+        "Add new entries for any user on any date; rows are appended to that "
+        "user's existing entries for the day."
     )
 
     status = st.session_state.pop("ta_add_status", None)
@@ -4361,14 +4331,14 @@ def render_admin_add_entry_view(account_options: list[str], account_lookup: dict
     with sel_col:
         selected_full_name = st.selectbox("User", options=[""] + full_name_options, key="ta_add_user")
     with date_col:
-        default_date = _today_eastern()
-        if not (period_start <= default_date <= period_end):
-            default_date = period_start
+        today_et = _today_eastern()
         entry_date = st.date_input(
             "Entry Date",
-            value=default_date,
-            min_value=period_start,
-            max_value=period_end,
+            value=today_et,
+            # Admins may backfill any date, so allow a wide range instead of the
+            # fiscal-period / two-week window that limits regular users.
+            min_value=date(today_et.year - 5, 1, 1),
+            max_value=date(today_et.year + 1, 12, 31),
             format="MM/DD/YYYY",
             key="ta_add_date",
         )
@@ -4528,8 +4498,6 @@ def render_admin_add_entry_view(account_options: list[str], account_lookup: dict
         errors: list[str] = []
         if not str(selected_full_name).strip():
             errors.append("Select a user to add entries for.")
-        if not _is_within_current_period(entry_date):
-            errors.append("Entry Date must be within the current fiscal period.")
         parsed_seconds: list[int] = []
         for i, row in enumerate(rows, start=1):
             if not _empty_to_none(row["account"]):
@@ -4779,6 +4747,89 @@ def render_admin_name_cleanup_view() -> None:
             )
 
 
+def render_admin_blank_code_cleanup_view() -> None:
+    """Admin/developer maintenance: fill blank Customer Codes from the Reporting Name.
+
+    Pairs with the fixed root cause (entries now always save a code when the
+    Reporting Name has one — see _effective_customer_code). This cleans up the
+    entries left behind with a blank code before that fix, assigning each the code
+    that matches its Reporting Name — exactly what a fresh save would store. Only
+    blanks are touched (an already-set code is never changed); a Reporting Name
+    with no code in the accounts data is left blank. Delegates to
+    ta_store.repair_blank_customer_codes (Preview = dry run)."""
+    st.subheader("Fix blank Customer Codes")
+    st.caption(
+        "Fills a Customer Code onto saved entries that have a Reporting Name but a "
+        "blank Customer Code, using the code that matches the Reporting Name. Safe "
+        "to run anytime — it only fills blanks (never changes a code that's already "
+        "set), and leaves a Reporting Name that has no code alone."
+    )
+    col_preview, col_apply = st.columns(2)
+    do_preview = col_preview.button(
+        "Preview",
+        width="stretch",
+        key="ta_codefix_preview",
+        help="Report how many entries would change, without modifying anything.",
+    )
+    do_apply = col_apply.button(
+        "Fix codes now",
+        type="primary",
+        width="stretch",
+        key="ta_codefix_apply",
+    )
+    if do_preview or do_apply:
+        mapping = _reporting_name_to_code_map()
+        if not mapping:
+            st.session_state["ta_codefix_summary"] = None
+            st.error(
+                "Couldn't load the accounts list from the network drive — are you "
+                "connected? No changes were made."
+            )
+        else:
+            dry = not do_apply
+            with st.spinner("Scanning entries…" if dry else "Filling blank codes…"):
+                summary = ta_store.repair_blank_customer_codes(
+                    TIME_ALLOCATION_DIR, mapping, dry_run=dry
+                )
+            if do_apply:
+                _invalidate_admin_export_tables()
+                load_time_allocation_user_window.clear()
+                LOGGER.info(
+                    "Time allocation blank-code cleanup applied by '%s' | scanned=%s changed=%s fixed=%s errors=%s",
+                    utils.get_os_user(),
+                    summary["files_scanned"],
+                    summary["files_changed"],
+                    summary["rows_fixed"],
+                    len(summary["errors"]),
+                )
+            st.session_state["ta_codefix_summary"] = summary
+
+    summary = st.session_state.get("ta_codefix_summary")
+    if summary:
+        verb = "Would fill" if summary["dry_run"] else "Filled"
+        if summary["rows_fixed"] == 0:
+            st.success("No entries need fixing — every coded Reporting Name already has a Customer Code.")
+        else:
+            st.success(
+                f"{verb} {summary['rows_fixed']} row(s) across "
+                f"{summary['files_changed']} file(s)."
+            )
+            by_name = summary.get("by_name") or {}
+            if by_name:
+                st.dataframe(
+                    pd.DataFrame(
+                        sorted(by_name.items(), key=lambda kv: (-kv[1], kv[0])),
+                        columns=["Reporting Name", "Rows"],
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+        if summary.get("errors"):
+            st.warning(
+                f"{len(summary['errors'])} file(s) couldn't be processed; see the app log."
+            )
+
+
 def render_admin_settings_view(account_lookup: dict, account_options: list[str]) -> None:
     """Admin-only Time Allocation Tool settings: entry fields, add-entry form, and the Edit Entries table."""
     if not utils.is_current_user_admin():
@@ -4798,6 +4849,9 @@ def render_admin_settings_view(account_lookup: dict, account_options: list[str])
 
     st.divider()
     render_admin_name_cleanup_view()
+
+    st.divider()
+    render_admin_blank_code_cleanup_view()
 
 
 # Header (no divider under the title/subtitle — Time Allocation only)
