@@ -53,6 +53,16 @@ def get_os_user() -> str:
     """Get current OS username."""
     return getpass.getuser()
 
+_subprocess_run = subprocess.run
+
+
+def _silent_run(*args, **kwargs):
+    """subprocess.run that never flashes a console window on Windows."""
+    if os.name == "nt":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return _subprocess_run(*args, **kwargs)
+
+
 def get_parent_command(parent_pid: int) -> str:
     """Best-effort lookup of the parent process command line."""
     if parent_pid <= 0:
@@ -70,7 +80,7 @@ def get_parent_command(parent_pid: int) -> str:
             ]
         else:
             cmd = ["ps", "-o", "command=", "-p", str(parent_pid)]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, check=False)
+        result = _silent_run(cmd, capture_output=True, text=True, timeout=5, check=False)
         return result.stdout.strip()
     except Exception:
         return ""

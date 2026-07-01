@@ -24,6 +24,20 @@ import utils
 
 UPDATE_FLAG = APP_DIR / ".update_available"
 
+_subprocess_run = subprocess.run
+
+
+def _silent_run(*args, **kwargs):
+    """subprocess.run that never flashes a console window on Windows.
+
+    The app runs windowless, so a console child (git/uv/cmd) would briefly pop a
+    terminal unless CREATE_NO_WINDOW is set. Every call routed here is silent /
+    background, so the flag is applied uniformly."""
+    if os.name == "nt":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return _subprocess_run(*args, **kwargs)
+
+
 # Preload third-party component once from the main script context.
 _AUTOREFRESH_PRELOAD_ERROR: Exception | None = None
 try:
@@ -106,7 +120,7 @@ def _refresh_dependencies() -> None:
         return
     env = {**os.environ, "VIRTUAL_ENV": str(_VENV_DIR)}
     try:
-        result = subprocess.run(
+        result = _silent_run(
             [uv_exe, "pip", "install", "--link-mode", "copy",
              "-r", str(_REQUIREMENTS_FILE)],
             cwd=ROOT_DIR,
@@ -134,7 +148,7 @@ def _rebuild_launcher_if_missing() -> None:
     if _LAUNCHER_EXE.exists() or not _SETUP_BAT.exists():
         return
     try:
-        subprocess.run(
+        _silent_run(
             ["cmd.exe", "/c", str(_SETUP_BAT), "/silent"],
             cwd=ROOT_DIR,
             capture_output=True,
@@ -152,7 +166,7 @@ def _apply_update() -> tuple[bool, str]:
     """
     for artifact in _REGENERATED_TRACKED_ARTIFACTS:
         try:
-            subprocess.run(
+            _silent_run(
                 ["git", "checkout", "--", artifact],
                 cwd=ROOT_DIR,
                 capture_output=True,
@@ -162,7 +176,7 @@ def _apply_update() -> tuple[bool, str]:
             pass
 
     try:
-        pull = subprocess.run(
+        pull = _silent_run(
             ["git", "pull", "--ff-only"],
             cwd=ROOT_DIR,
             capture_output=True,
@@ -319,13 +333,13 @@ def _render_soft_update_banner() -> None:
 def _check_for_updates_manual():
     """Run git fetch and return True if updates are available."""
     try:
-        subprocess.run(
+        _silent_run(
             ["git", "fetch", "--prune"],
             cwd=ROOT_DIR,
             capture_output=True,
             timeout=30,
         )
-        result = subprocess.run(
+        result = _silent_run(
             ["git", "status", "-uno"],
             cwd=ROOT_DIR,
             capture_output=True,

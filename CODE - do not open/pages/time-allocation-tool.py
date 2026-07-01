@@ -869,6 +869,16 @@ def _favorites_first(options: list[str], favorites: set[str]) -> list[str]:
     return blank + favs + rest
 
 
+# Reporting names consolidated into a single dropdown entry for this tool. The
+# merged name offers the union of the originals' Customer Codes; existing saved
+# entries keep their original names (preserved by _coerce_account on load).
+_REPORTING_NAME_MERGES = {
+    "Domino's Canada": "Domino's",
+    "Domino's Domestic": "Domino's",
+    "Domino's International": "Domino's",
+}
+
+
 def _build_account_lookup(lookup_df: pd.DataFrame) -> dict:
     """
     Build the Customer Code <-> Reporting Name lookup structures from the
@@ -905,6 +915,12 @@ def _build_account_lookup(lookup_df: pd.DataFrame) -> dict:
             if "CustomerCode" in lookup_df.columns
             else pd.Series("", index=lookup_df.index, dtype="object")
         )
+
+    # Consolidate any merged reporting names (e.g. the Domino's sub-accounts) before
+    # building the lookup, so the dropdown shows the single merged name and its
+    # autofill/validation pool is the union of the originals' Customer Codes.
+    if _REPORTING_NAME_MERGES:
+        rn_series = rn_series.map(lambda n: _REPORTING_NAME_MERGES.get(n, n))
 
     norm = pd.DataFrame({"rn": rn_series.to_numpy(), "code": code_series.to_numpy()})
     has_rn = norm["rn"] != ""
@@ -1012,6 +1028,26 @@ def _on_customer_code_change(idx: int, lookup: dict) -> None:
     reporting_name = lookup["code_to_rn"].get(customer_code, "")
     if reporting_name:
         st.session_state[f"ta_detailed_account_{idx}"] = reporting_name
+
+
+def _effective_customer_code(reporting_name: object, customer_code: object) -> str:
+    """The Customer Code to persist for a row, defaulting to the Reporting Name's
+    first code when the row's code is blank.
+
+    Any code under the correct Reporting Name is acceptable, so this guarantees a
+    non-blank code is saved whenever the name has one — closing the gap that produced
+    blank-code entries (the autofill only fires on a *fresh* dropdown change, so
+    pre-filled/copied rows, or names that were uncoded in the accounts file at entry
+    time, slipped through with no code). A name absent from the current accounts data
+    stays blank (there is nothing to fill from)."""
+    code = str(customer_code or "").strip()
+    if code:
+        return code
+    name = str(reporting_name or "").strip()
+    if not name:
+        return ""
+    lookup = _account_lookup_for_dir(str(PERSONNEL_DIR))
+    return lookup.get("rn_to_first_code", {}).get(name, "")
 
 
 def _parse_date_value(value: object) -> date | None:
@@ -1462,20 +1498,11 @@ def _refresh_account_data(number_of_accounts: int) -> None:
         _rerun_input_fragment()
         return
 
-    reset_idxs: list[int] = []
-    for idx in range(int(max(1, number_of_accounts))):
-        reporting_name = st.session_state.get(f"ta_detailed_account_{idx}", "")
-        customer_code = st.session_state.get(f"ta_detailed_custcode_{idx}", "")
-        if not str(reporting_name or "").strip() and not str(customer_code or "").strip():
-            continue
-        was_valid = _row_selection_valid(previous_lookup, reporting_name, customer_code)
-        still_valid = _row_selection_valid(refreshed_lookup, reporting_name, customer_code)
-        if was_valid and not still_valid:
-            reset_idxs.append(idx)
-
-    if reset_idxs:
-        st.session_state["ta_account_refresh_reset_idxs"] = reset_idxs
-
+    # Keep the user's chosen Reporting Name / Customer Code across an account-data
+    # refresh. The accounts file is a moving target (names/codes get added or renamed
+    # over time), but an entry's pairing is a historical choice and must not be wiped
+    # just because the source changed under it. (Previously, pairings that became
+    # invalid after a refresh were reset to blank, which silently lost valid selections.)
     _queue_input_status("success", "Account data refreshed.")
 
     _rerun_input_fragment()
@@ -2389,7 +2416,7 @@ def render_input_view(
         rows.append(
             {
                 "account": account,
-                "customer_code": customer_code,
+                "customer_code": _effective_customer_code(account, customer_code),
                 "duration": duration,
                 "channel": channel,
                 "custom_values": custom_values,
@@ -4482,7 +4509,7 @@ def render_admin_add_entry_view(account_options: list[str], account_lookup: dict
         rows.append(
             {
                 "account": account,
-                "customer_code": customer_code,
+                "customer_code": _effective_customer_code(account, customer_code),
                 "duration": duration,
                 "channel": channel,
                 "custom_values": custom_values,

@@ -47,6 +47,20 @@ REGENERATED_TRACKED_ARTIFACTS = (
 )
 
 
+_subprocess_run = subprocess.run
+
+
+def _silent_run(*args, **kwargs):
+    """subprocess.run that never flashes a console window on Windows.
+
+    The app runs windowless, so a console child (git/uv/cmd) would briefly pop a
+    terminal unless CREATE_NO_WINDOW is set. Every call routed here is silent /
+    background, so the flag is applied uniformly."""
+    if os.name == "nt":
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return _subprocess_run(*args, **kwargs)
+
+
 def _low_speed_env() -> dict:
     """Env that makes git abort a stalled transfer quickly and never block on a
     credential/terminal prompt (the running app's watcher thread has no TTY, so a
@@ -105,7 +119,7 @@ def remote_is_ahead() -> bool:
 
 
 def _git(args: list[str], timeout: int = 30, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return _silent_run(
         ["git", *args],
         cwd=ROOT_DIR,
         capture_output=True,
@@ -171,7 +185,7 @@ def _refresh_dependencies() -> None:
         return
     env = {**os.environ, "VIRTUAL_ENV": str(VENV_DIR)}
     try:
-        result = subprocess.run(
+        result = _silent_run(
             [uv_exe, "pip", "install", "--link-mode", "copy",
              "-r", str(REQUIREMENTS_FILE)],
             cwd=ROOT_DIR,
@@ -205,7 +219,7 @@ def _rebuild_launcher_if_missing() -> None:
     if not SETUP_BAT.exists():
         return
     try:
-        subprocess.run(
+        _silent_run(
             ["cmd.exe", "/c", str(SETUP_BAT), "/silent"],
             cwd=ROOT_DIR,
             capture_output=True,
